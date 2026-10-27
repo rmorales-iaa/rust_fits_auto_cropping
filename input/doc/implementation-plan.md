@@ -1,12 +1,12 @@
 # Implementation plan: Rust FITS Auto Clipping
 
-Status: proposed, not implemented. Date: 2026-10-27.
+Status: implementation in progress. Rust CLI prototype delivered locally on 2026-10-27. The completed items below refer to engineering behavior and synthetic fixtures only; they do not establish a scientific-release result.
 
 ## Objective and scope
 
 Build a Rust CLI that examines an input directory, identifies large instrument-related border regions in eligible FITS images, writes processed copies into a chosen output directory, and summarizes every candidate. Preserve input files, valid science pixels and observational metadata. Process only files containing exactly one HDU, which must contain a non-empty two-dimensional primary image. Ignore multi-HDU files, tables, empty primary arrays and unsupported dimensions with explicit reasons. Malformed/unreadable FITS files are errors rather than ordinary ignores.
 
-Rust is the preferred implementation language. Start by prototyping the `fitsio` wrapper over CFITSIO; verify required header preservation, storage types, undefined values and concurrency before committing to the backend. Keep any required unsafe calls behind a small tested adapter. Pin chosen versions and the Rust toolchain requirement during implementation. See [primary references](references.md).
+Rust is the implementation language. Use a pure-Rust FITS crate where it covers the file-format contract. The implementation selected `fitskit` after checking image types, stored integer access, scaling metadata, ordered header cards, multi-HDU parsing and checksum writing. Pin chosen versions and the Rust toolchain requirement. See [primary references](references.md).
 
 ## Processing semantics and assumptions
 
@@ -76,7 +76,7 @@ All implementation phases below are pending. Each phase ends with updated docume
 
 | Phase | Work | Completion evidence |
 | --- | --- | --- |
-| 1. Feasibility and contracts | Prototype Rust/CFITSIO reads, single-HDU writes, card preservation, raw integer/null handling and WCS handling; inventory representative samples | Round-trip tests cover float and integer data, scaling, unknown cards and exact HDU count; backend/toolchain selected; unresolved formats documented |
+| 1. Feasibility and contracts | Prototype pure-Rust FITS reads/writes, single-HDU eligibility, header preservation, raw integer/null handling and WCS metadata; inventory representative samples | Round-trip tests cover float and integer data, scaling, retained cards and exact HDU count; backend/toolchain selected; unresolved formats documented |
 | 2. CLI and pipeline foundation | Cargo project, typed config, discovery, eligibility, atomic outputs, structured logger and summary schema | End-to-end no-op copy run, invalid-config/path tests, deterministic manifest and balanced counters; help/config guide available |
 | 3. Detector research | Seeded synthetic generator, source-aware robust features, components, conservative decision rules and evidence diagnostics | Ground-truth masks and null/confounder cases evaluated; thresholds selected on development data; algorithm documented and frozen before held-out evaluation |
 | 4. Safe mask writer | Apply masks, sentinel policy, header/checksum updates and provenance | Retained pixels exact, invalid semantics correct, one-HDU outputs; independent FITS-reader verification |
@@ -84,7 +84,7 @@ All implementation phases below are pending. Each phase ends with updated docume
 | 6. Performance | Bounded file-level scheduling, allocation/I/O improvements and memory accounting | Serial/parallel scientific outputs agree; measured throughput and peak memory for multiple sizes/worker counts; no shared FITS handles |
 | 7. Release validation and documentation | Full regression matrix, held-out real data, extensive help/README, guides and acceptance audit | Every requirement maps to code/tests; failures documented; reproducible benchmark/science report; scoped commit and clean task-owned worktree |
 
-For concurrency, check that the linked CFITSIO build is reentrant before parallel FITS I/O. Use independent handles; otherwise serialize FITS calls and parallelize pure detection. Limit concurrent images by estimated resident bytes as well as CPU count. Oversized files receive a clear resource error until a validated tiled path exists. Avoid nested pools. Sorting results must make scheduling independent of scientific output; timestamps and timings may differ.
+For concurrency, use independent parser/writer instances per file and do not share mutable FITS objects between workers. Limit concurrent images by estimated resident bytes as well as CPU count. Oversized files receive a clear resource error until a validated tiled path exists. Avoid nested pools. Sorting results must make scheduling independent of scientific output; timestamps and timings may differ.
 
 ## Test and validation matrix
 
@@ -98,10 +98,25 @@ For concurrency, check that the linked CFITSIO build is reentrant before paralle
 
 Proposed initial quantitative gates, to freeze in phase 3 before held-out testing: 100% preservation of retained raw pixels and required metadata invariants; no newly masked pixels on deterministic artifact-free fixtures; at least 95% artifact recall on clearly separable synthetic borders; aggregate valid-pixel false-removal rate at most 0.1%, also reported per image/instrument and against protected science apertures. Report boundary error and abstention/review rate so conservative abstention cannot hide poor detection. These are targets, not achieved results or guarantees for every instrument. Define a WCS numerical tolerance appropriate to the tested projection/library and record it before comparisons.
 
-Use meaningful unit/property tests, CLI integration tests and small deterministic generated FITS fixtures. Cross-check outputs with an independent FITS/WCS reader in test tooling where practical. Store fixture-generation metadata and licenses/provenance for any real samples; keep large observations out of Git. Expected Rust checks once code exists: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, release-build CLI smoke tests and recorded benchmarks. Do not claim these checks ran during the current planning deliverable.
+Use meaningful unit/property tests, CLI integration tests and small deterministic generated FITS fixtures. Cross-check outputs with an independent FITS/WCS reader in test tooling where practical. Store fixture-generation metadata and licenses/provenance for any real samples; keep large observations out of Git. Expected Rust checks once code exists: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, release-build CLI smoke tests and recorded benchmarks. These checks have now been run for the current prototype; see the dated validation record. Their passing results do not replace held-out scientific validation.
 
 ## Documentation and final reconciliation
 
 Deliver user guide, complete CLI help with examples and exit codes, configuration reference, algorithm assumptions/limitations, architecture, FITS/header policy, validation procedures, benchmark procedure and README build/install instructions. All detailed documents live in input/doc/. Maintain .gitignore and local milestone commits.
 
 Before declaring completion, create a requirement-to-evidence table covering: one-HDU eligibility; all requested geometries; statistically supported decisions; preserved headers/pixels; CLI directory arguments; final summary; configuration/output/logging layout; English documentation; tests; performance; modularity; and local Git history. Link each to implementation paths, actual tests and outcomes. Mark incomplete items explicitly. Real-image validation remains a prerequisite to a scientific-release claim if representative instrument samples are unavailable.
+
+
+## Implementation progress (2026-10-27)
+
+| Phase | Status | Evidence / remaining work |
+| --- | --- | --- |
+| 1. Feasibility and contracts | Prototype implemented for 2D BITPIX 8/16/32/64 and -32/-64 | Pure-Rust fitskit round trips exercised with float64, int64, scaled int16, and uint8 synthetic frames; retained raw integer samples and parsed header values verified. Multi-HDU rejection exercised. Gzip, uncommon FITS conventions, byte-identical card formatting and real instrument headers still need evaluation. |
+| 2. CLI and pipeline foundation | Implemented as prototype | Typed TOML, required directories, recursive discovery, dry run, overwrite, bounded workers, JSONL log, JSON/CSV report and exit behavior exist. Fatal I/O paths and all config combinations still need more tests. |
+| 3. Detector research | Initial heuristic only | Tile MAD, lag-one correlation support, border flood-fill and abstention gates implemented. Synthetic tests exercise multiple corners, side, rectangle, circle, oversized component, interior anomaly, and smooth gradient. End-to-end fixtures cover float, uint8, scaled int16, int64, multi-HDU, kept output, dry-run, WCS metadata, checksums and serial/parallel equivalence. No empirical threshold calibration or held-out instrument sample evaluation has been done. |
+| 4. Safe mask writer | Implemented for baseline FITS cases | Parses source, marks undefined samples, writes separate mask, updates checksums, reopens and verifies HDU count, BITPIX, dimensions, retained values and DATASUM. Existing BLANK, duplicate/history cards and broad third-party FITS interoperability need more regression coverage. |
+| 5. Optional crop mode | Deferred | Geometry-aware crop and WCS/distortion updates are not implemented; only dimension-preserving masking is supported. |
+| 6. Performance | Bounded file concurrency implemented; benchmark pending | File processing runs in a bounded Rayon pool with independent fitskit instances. Serial/parallel equality is covered; measured throughput and peak-memory benchmarks remain pending. |
+| 7. Release validation and documentation | In progress | README, help, config, architecture, algorithm and validation docs exist. Documentation and requirement mapping must be updated as remaining work is implemented. Held-out scientific validation is still required. |
+
+The current processor is useful for controlled prototype evaluation, not unattended scientific production. Every detected mask must be reviewed against representative images before downstream measurements.

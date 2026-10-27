@@ -2,10 +2,10 @@
 
 Always work and respond in English.
 
-Read `input/doc/skills/scientific-fits-engineering/SKILL.md` before project work. It is the authoritative project contract. Read the relevant sibling specialty skills when needed; no delegation is required.
+Read `input/doc/skills/scientific-fits-engineering/SKILL.md` before project work. It is the authoritative project contract. Read relevant sibling specialty skills when needed; no delegation is required.
 
-Documentation: `input/doc/`. Runtime configuration: `input/`. Default data output: `output/`. Logs: `<output-root>/logger/` with UTC ISO timestamps in entries and filenames. An explicit output-directory argument overrides the output root.
+Documentation lives in `input/doc/`. Runtime configuration lives in `input/`. Default science products and run reports live in `output/`; logs live in `output/logger/` with UTC ISO timestamps in entries and filenames. An explicit output directory becomes the output root.
 
-Automatically commit verified, coherent changes locally, preserving unrelated work. Never push unless requested. Keep root README.md and .gitignore maintained. Tool-required build manifests and lockfiles retain their conventional paths.
+Keep the root README current. Tool-required Cargo files remain at the project root. Preserve unrelated work and automatically commit each verified, coherent change locally. Never push unless requested.
 
-The current deliverable is a skill bundle and implementation plan, not an implemented FITS processor. Follow `input/doc/implementation-plan.md` for subsequent implementation; do not mark its phases complete without evidence.
+The implementation follows `input/doc/implementation-plan.md`. A Rust prototype now supports single-HDU 2D integer and floating image masks. Do not claim the detector scientifically validated until it passes held-out observatory data review. Cropping, compressed FITS support, and calibrated detector thresholds remain outstanding.

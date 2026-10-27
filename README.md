@@ -1,32 +1,27 @@
 # Rust FITS Auto Clipping
 
-Planned Rust command-line tool to identify non-scientific border regions in single-HDU FITS images and write new images while preserving valid science pixels and relevant metadata.
+A conservative Rust CLI prototype that detects large, anomalous regions connected to the borders of one-HDU, two-dimensional FITS images. It writes an image copy with accepted samples marked undefined, a separate mask, and a per-run report. Original files remain untouched.
 
-**Status:** planning only. No Rust application or detector has been implemented or scientifically validated.
+The first detector uses robust tile statistics, spatial lag-one correlation and border-connected components. It supports asymmetric and partly symmetric border patterns; circle/rectangle boundaries are approximated at tile scale. Its thresholds are starting values and have **not** been scientifically validated against held-out observatory images. Inspect every mask before scientific use. See [the algorithm and its limits](input/doc/algorithm.md).
 
-The design supports asymmetric corners/sides, circular, rectangular and partly symmetric instrument boundaries. Conservative masking preserves the image grid; optional rectangular cropping requires WCS updates. Ambiguous detections remain unchanged and are reported for review. Multi-HDU files are ignored.
+## Build and run
 
-## Documentation
+Requires Rust 1.88+. FITS reading and writing use the pure-Rust [`fitskit`](https://docs.rs/fitskit/) crate and do not require CFITSIO or a system C library.
 
-- [Implementation plan and acceptance gates](input/doc/implementation-plan.md)
-- [Reusable project skill](input/doc/skills/scientific-fits-engineering/SKILL.md)
-- [Skill catalog and installation](input/doc/skill-catalog.md)
-- [Primary technical references](input/doc/references.md)
-
-## Project layout
-
-- `input/`: runtime configuration and optional local data in `input/data/`.
-- `input/doc/`: methods, plans, help, validation procedures and versioned skills.
-- `output/`: default generated images, masks, diagnostic and summary products.
-- `output/logger/`: UTC ISO-timestamped activity logs.
-- `src/`, `tests/`, `benches/`: planned implementation, tests and benchmarks.
-
-An explicit output path becomes the output root, including logs and reports. Cargo manifests and lockfiles will remain at the project root. Raw observations, generated products, logs and credentials are excluded from Git.
-
-## Planned interface (not yet executable)
-
-```text
-fits-auto-clipping --input-dir input/data --output-dir output --config input/config.toml
+```bash
+cargo build --release
+cargo run --release -- --input-dir input/data --output-dir output --config input/config.toml
+cargo run --release -- --input-dir input/data --output-dir output --dry-run
 ```
 
-The plan defines configuration, masking versus cropping, validation, reporting and exit behavior. Build/install commands, full CLI examples, configuration reference and measured performance will be added with implementation. Development uses scoped local commits; no remote is configured or published by this setup.
+Pass `--help` for all options. The input and output directory trees must not overlap. By default only the immediate input directory is searched; use `--recursive` for nested folders. Multi-HDU files and unsupported shapes/compressed inputs are recorded as ignored. Corrupt files and inputs exceeding the configured memory limit are errors.
+
+## Products and configuration
+
+`output/images/` contains processed or unchanged copies; `output/masks/` contains companion uint8 masks where one means newly masked. `output/reports/<run-id>/` contains JSON and CSV summaries. `output/logger/` contains UTC ISO-timestamped JSON Lines activity logs. Integer image pixels use a safe FITS `BLANK` sentinel; float pixels use NaN. Retained raw samples, dimensions and the original header are checked after writing; checksum cards are regenerated.
+
+Runtime settings live in [input/config.toml](input/config.toml). Read the [user guide](input/doc/user-guide.md), [configuration reference](input/doc/configuration.md), [architecture](input/doc/architecture.md), and [validation record](input/doc/validation.md). Cropping is not implemented; this release preserves the pixel grid and WCS. Gzip-compressed FITS images are not supported.
+
+## Project development
+
+Source code is organized in small modules under `src/`; tests are under `tests/`. Run `cargo test`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`. Each verified coherent change is registered in local Git. Build products, logs and raw FITS inputs are ignored.

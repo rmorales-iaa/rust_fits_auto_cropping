@@ -1,0 +1,9 @@
+# Initial border detector
+
+The current detector is an engineering baseline for large, border-connected regions. It divides a two-dimensional image into square tiles. For each tile it measures the finite-sample median and scaled median absolute deviation. It estimates the image interior from central tiles, then compares each tile median with the median of those interior medians. Its contrast score divides the absolute difference by the larger of the robust tile-median dispersion, interior noise scale and a small relative numeric floor.
+
+It also measures horizontal and vertical lag-one Pearson correlations from finite adjacent pixel pairs. Correlation supports an already high-contrast tile; it is never sufficient alone. For a constant tile, correlation is undefined. A zero-dispersion region against a measurable zero-dispersion interior may still be selected if it has clear contrast. The detector grows 4-connected candidate components from each frame edge and preserves isolated interior components. It expands accepted tile selections to whole tiles, then applies configured minimum/maximum tile-area fractions.
+
+The detector supports asymmetric and partly symmetric regions through the connected-component mask. Circular and rectangular regions can emerge as masks with pixelated tile boundaries; there is no geometric circle/ellipse/rectangle fit in this release. Boundary precision is therefore limited by `tile_size`, and all pixels in selected tiles are marked.
+
+A score is not a p-value or probability: spatial pixels and tiles are dependent, detector thresholds have not been calibrated, and selecting the center as reference can fail when the usable field is off-center. Noise reduction and correlation can also occur in valid sky or astronomical structure. Ambiguous outputs should be retained by raising the contrast gate or lowering the maximum mask fraction. Never interpret this baseline as proof that masked pixels contain no science signal.
