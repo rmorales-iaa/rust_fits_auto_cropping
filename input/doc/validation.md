@@ -229,6 +229,12 @@ The independent checker now verifies every optional reason plane against its bin
 
 All 12 tests in `python3 -m unittest tools.test_cross_validate_fits -v` passed. The checker revalidated release `0.1.33` run `20261027T202641.065615444Z` from the requested 25-file dataset: Astropy verified 20 science images, 16 masks and 16 reason planes; `fitsverify` checked the generated FITS products. Four unchanged symlinked images resolve to original inputs. Astropy emitted warnings for legacy PC/RADECSYS/PROJPn cards and an inconsistent DATE-OBS/MJD-OBS pair in source headers. Some SIP world-to-pixel residuals remained unavailable because Astropy did not converge; the independently sampled finite forward coordinates matched where available. The run passed the checker's tested scope, not full WCS-convention coverage, labeled artifact accuracy, photometric integrity or held-out scientific validation. The five malformed source FITS files remain batch errors.
 
+### One output image per discovered FITS input (2026-10-27)
+
+Normal runs now produce one corresponding `images/<relative-path>` entry for every discovered FITS input. Malformed/read-failure and unsupported/ignored files are annotated and preserved through canonical source symlinks; their per-input manifests hash the linked file and retain the original `error` or `ignored` status. Summary schema 8 records `total` and `output_images`; dry-run remains output-free. The output-parity integration tests cover malformed FITS, multi-HDU FITS, gzip streams and tiled-compressed FITS, with source-target, byte identity, manifest and count assertions. The locked Rust suite passes 83 tests, Python FITS-checker tests pass 14, formatting and strict Clippy pass.
+
+Release `0.1.44` at clean Git revision `a1ef5a97967b` ran crop mode with previews and reason masks on `/fast_disk/tmp/clippling_test/input/`, using four workers and recursive discovery. Run `20261027T224357.086048273Z` reports `total=25`, `output_images=25`, 16 clipped, 4 kept, 0 ignored and 5 malformed-header errors. All five malformed inputs have annotated source symlinks; output symlinks preserve their original bytes. Astropy/fitsverify checked the 20 parseable image outputs, 16 masks and 16 reason planes; the independent preview checker verified all 16 PNGs. The run exits with status 1 because malformed input errors remain visible, even though every input has an output image entry. The science classification remains unvalidated on independent labels.
+
 
 ### Experimental multiscale consensus evidence (2026-10-27)
 

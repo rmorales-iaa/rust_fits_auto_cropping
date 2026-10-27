@@ -1,6 +1,6 @@
 # Project memory
 
-Updated: 2026-10-27, after one-to-one pass-through output support and FITS validation.
+Updated: 2026-10-27, after release validation of one-to-one pass-through output support.
 
 ## Identity and active work
 
@@ -72,4 +72,4 @@ Updated: 2026-10-27, after one-to-one pass-through output support and FITS valid
 
 ## One-to-one FITS output behavior — 2026-10-27
 
-Normal-run summary schema 8 reports `total` discovered FITS inputs and `output_images` published entries. Malformed/read-failure and unsupported/ignored FITS inputs remain annotated (`error` or `ignored`) and are symlinked unchanged into the matching path under `images/`; their manifests hash the pass-through product. Successful normal runs therefore have equal input/output-image counts. A symlink-publication failure is explicit and may leave the count short; dry-run intentionally has zero output images. Tests cover malformed, multi-HDU, gzip-signature and tiled-compressed inputs, canonical targets, source-byte preservation, manifests and dry-run. See [output parity plan](output-parity-plan.md).
+Normal-run summary schema 8 reports `total` discovered FITS inputs and `output_images` published entries. Malformed/read-failure and unsupported/ignored FITS inputs remain annotated (`error` or `ignored`) and are symlinked unchanged into the matching path under `images/`; their manifests hash the pass-through product. Successful normal runs therefore have equal input/output-image counts. A symlink-publication failure is explicit and may leave the count short; dry-run intentionally has zero output images. Tests cover malformed, multi-HDU, gzip-signature and tiled-compressed inputs, canonical targets, source-byte preservation, manifests and dry-run. Release `0.1.44`, clean revision `a1ef5a97967b`, processed the requested 25-file set with `total=25`, `output_images=25`, 16 clipped, 4 kept, and 5 malformed-input errors. All five errors had output symlinks to their sources. Astropy/fitsverify checked 20 parsed science images, 16 masks and 16 reason planes; the preview checker accepted all 16 PNGs. The program exits 1 when input errors occur despite preserving their output entries. See [output parity plan](output-parity-plan.md) and [validation record](validation.md).
