@@ -745,16 +745,18 @@ fn publish_completion_manifest(
         let metadata = fs::metadata(path)
             .with_context(|| format!("reading completed product metadata {}", path.display()))?;
         let symlink = fs::symlink_metadata(path)?.file_type().is_symlink();
-        if symlink && kind == "science_image" {
-            let actual_sha256 = hash_file(path)?;
-            if Some(actual_sha256.as_str()) != outcome.source_sha256.as_deref() {
-                bail!("kept-image symlink no longer resolves to the parsed source bytes");
-            }
+        let content_sha256 = hash_file(path)?;
+        if symlink
+            && kind == "science_image"
+            && Some(content_sha256.as_str()) != outcome.source_sha256.as_deref()
+        {
+            bail!("kept-image symlink no longer resolves to the parsed source bytes");
         }
         products.push(serde_json::json!({
             "kind": kind,
             "path": run_relative,
             "bytes": metadata.len(),
+            "sha256": content_sha256,
             "symlink": symlink,
         }));
     }
@@ -766,7 +768,7 @@ fn publish_completion_manifest(
         OutcomeKind::Error => "error",
     };
     let contents = serde_json::to_vec_pretty(&serde_json::json!({
-        "manifest_version": 2,
+        "manifest_version": 3,
         "complete": true,
         "run_id": run_id,
         "input": input_relative,

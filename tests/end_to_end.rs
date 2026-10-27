@@ -1,5 +1,6 @@
 use fitskit::{FitsFile, Hdu, HduData, HeaderValue, ImageData, PixelData};
 use flate2::{Compression, write::GzEncoder};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Write,
@@ -24,6 +25,10 @@ fn product_path(output: &Path, category: &str, relative: &str) -> PathBuf {
 
 fn summary_path(output: &Path) -> PathBuf {
     run_dir(output).join("summary.json")
+}
+
+fn file_sha256(path: &Path) -> String {
+    format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
 }
 
 fn create_fits(path: &Path, bitpix: i64, width: usize, height: usize, data: &[f64]) {
@@ -211,9 +216,13 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     )
     .unwrap();
     assert_eq!(clean_manifest["complete"], true);
-    assert_eq!(clean_manifest["manifest_version"], 2);
+    assert_eq!(clean_manifest["manifest_version"], 3);
     assert_eq!(clean_manifest["input_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(clean_manifest["products"][0]["symlink"], true);
+    assert_eq!(
+        clean_manifest["products"][0]["sha256"],
+        file_sha256(&product_path(&output, "images", "clean.fits"))
+    );
     let m = FitsFile::from_file(product_path(&output, "masks", "float.fits")).unwrap();
     assert_eq!(m.primary().header.get_float("CRPIX1"), Some(48.5));
     assert_eq!(m.primary().header.get_string("BUNIT"), None);
@@ -750,7 +759,7 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     assert_eq!(manifest["complete"], true);
-    assert_eq!(manifest["manifest_version"], 2);
+    assert_eq!(manifest["manifest_version"], 3);
     assert_eq!(manifest["input_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(summary["files"][0]["reason_code"], "crop_applied");
     assert_eq!(
@@ -759,6 +768,10 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     );
     assert_eq!(summary["files"][0]["crop_excluded_undefined_pixels"], 0);
     assert_eq!(manifest["products"].as_array().unwrap().len(), 3);
+    for product in manifest["products"].as_array().unwrap() {
+        let product_path = run_dir(&output).join(product["path"].as_str().unwrap());
+        assert_eq!(product["sha256"], file_sha256(&product_path));
+    }
     assert!(
         manifest["products"]
             .as_array()
