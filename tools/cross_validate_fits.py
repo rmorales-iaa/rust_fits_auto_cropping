@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import re
 import shutil
 import subprocess
@@ -28,6 +29,52 @@ WCS_ALT_SUFFIX = re.compile(
     r"^(?:CTYPE|CRPIX|CRVAL|CDELT|CUNIT|CROTA)\d{1,2}[A-Z]$|"
     r"^(?:CD|PC|PV|PS)\d{1,2}_\d{1,2}[A-Z]$"
 )
+CARD_POLICY_IGNORED = {
+    "SIMPLE",
+    "XTENSION",
+    "BITPIX",
+    "NAXIS",
+    "EXTEND",
+    "PCOUNT",
+    "GCOUNT",
+    "BSCALE",
+    "BZERO",
+    "BLANK",
+    "CHECKSUM",
+    "DATASUM",
+    "DATAMIN",
+    "DATAMAX",
+    "CREATOR",
+    "DATE",
+    "HISTORY",
+}
+CARD_POLICY_ADDED = {
+    "science": {
+        "CHECKSUM",
+        "DATASUM",
+        "CREATOR",
+        "DATE",
+        "HISTORY",
+        "BLANK",
+        "CLIPSHAP",
+        "CLIPX0",
+        "CLIPY0",
+        "CLIPCX",
+        "CLIPCY",
+        "CLIPRAD",
+        "COMMENT",
+    },
+    "mask": {"CHECKSUM", "DATASUM", "CREATOR", "DATE", "HISTORY", "COMMENT"},
+    "reason": {
+        "CHECKSUM",
+        "DATASUM",
+        "CREATOR",
+        "DATE",
+        "HISTORY",
+        "COMMENT",
+        "RSCHEME",
+    },
+}
 
 
 def open_one(path: Path) -> fits.HDUList:
@@ -58,6 +105,78 @@ def verify_provenance(path: Path, header: fits.Header) -> None:
         raise AssertionError(f"{path}: DATE product timestamp is missing or malformed")
     if not any("generated_utc=" in str(value) for value in header.get("HISTORY", [])):
         raise AssertionError(f"{path}: generated_utc HISTORY provenance is missing")
+
+
+def verify_reason_codes(
+    original: np.ndarray,
+    source_header: fits.Header,
+    exclusion_mask: np.ndarray,
+    reason_codes: np.ndarray,
+    is_crop: bool,
+    path: Path,
+) -> None:
+    if original.shape != reason_codes.shape or exclusion_mask.shape != reason_codes.shape:
+        raise AssertionError(f"{path}: reason-plane dimensions do not match source/mask")
+    if reason_codes.dtype != np.dtype("uint8") or not np.isin(reason_codes, (0, 1, 2, 3)).all():
+        raise AssertionError(f"{path}: reason plane must be uint8 with codes 0..3")
+
+    undefined = ~np.isfinite(original)
+    if not np.issubdtype(original.dtype, np.floating) and "BLANK" in source_header:
+        undefined |= original == source_header["BLANK"]
+    if not np.array_equal(reason_codes == 3, undefined):
+        raise AssertionError(f"{path}: code 3 does not match pre-existing undefined samples")
+
+    defined_excluded = (exclusion_mask == 1) & ~undefined
+    reason_excluded = (reason_codes == 1) | (reason_codes == 2)
+    if not np.array_equal(reason_excluded, defined_excluded):
+        raise AssertionError(f"{path}: reason exclusions disagree with the binary action mask")
+    if not is_crop and not np.array_equal(reason_codes == 1, defined_excluded):
+        raise AssertionError(f"{path}: mask-mode artifact reason codes are inconsistent")
+    if not np.array_equal(reason_codes == 0, ~undefined & (exclusion_mask == 0)):
+        raise AssertionError(f"{path}: retained-pixel reason codes are inconsistent")
+
+
+def verify_preserved_header(
+    source: fits.Header,
+    output: fits.Header,
+    path: Path,
+    product_kind: str,
+) -> None:
+    """Check all source cards outside the documented science-product policy."""
+    if product_kind not in {"science", "mask", "reason"}:
+        raise ValueError(f"unknown FITS product kind: {product_kind}")
+
+    def preserved(header: fits.Header) -> dict[str, list[tuple[object, object]]]:
+        cards: dict[str, list[tuple[object, object]]] = defaultdict(list)
+        for card in header.cards:
+            key = card.keyword
+            if (
+                not key
+                or key in CARD_POLICY_IGNORED
+                or re.fullmatch(r"NAXIS\d+|ZNAXIS\d+", key)
+                or key.startswith("CLIP")
+                or WCS_KEY.fullmatch(key)
+                or (product_kind in {"mask", "reason"} and key == "BUNIT")
+            ):
+                continue
+            cards[key].append((card.value, card.comment))
+        return cards
+
+    expected = preserved(source)
+    actual = preserved(output)
+    for key, source_cards in expected.items():
+        if actual.get(key) != source_cards:
+            raise AssertionError(f"{path}: source metadata card {key} changed or disappeared")
+    source_keys = set(source)
+    for key in output:
+        if key in source_keys or key in CARD_POLICY_ADDED[product_kind]:
+            continue
+        if (
+            re.fullmatch(r"SIMPLE|XTENSION|BITPIX|NAXIS\d*|EXTEND|PCOUNT|GCOUNT", key)
+            or key.startswith("CLIP") and product_kind == "science"
+        ):
+            continue
+        raise AssertionError(f"{path}: unexpected output header card {key}")
 
 
 def verify_wcs(
@@ -168,10 +287,10 @@ def verify_wcs(
             raise AssertionError(f"{path}: WCS {code!r} output inverse residual exceeds 1e-6 pixel")
 
 
-def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tuple[int, int]:
+def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tuple[int, int, int]:
     images = sorted((output_dir / "images").rglob("*"))
     images = [path for path in images if path.is_file()]
-    checked_images = checked_masks = 0
+    checked_images = checked_masks = checked_reason_masks = 0
     for output_path in images:
         relative = output_path.relative_to(output_dir / "images")
         source_path = input_dir / relative
@@ -184,6 +303,12 @@ def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tu
                     raise AssertionError(f"{output_path}: kept-image symlink does not target its input")
             else:
                 verify_provenance(output_path, output[0].header)
+            verify_preserved_header(
+                source[0].header,
+                output[0].header,
+                output_path,
+                "science",
+            )
             x0 = int(output[0].header.get("CLIPX0", 0))
             y0 = int(output[0].header.get("CLIPY0", 0))
             original = np.asarray(source[0].data)
@@ -227,6 +352,14 @@ def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tu
                 with open_one(mask_path) as mask_hdus:
                     verify_checksums(mask_path, mask_hdus)
                     verify_provenance(mask_path, mask_hdus[0].header)
+                    verify_preserved_header(
+                        source[0].header,
+                        mask_hdus[0].header,
+                        mask_path,
+                        "mask",
+                    )
+                    if "BUNIT" in mask_hdus[0].header:
+                        raise AssertionError(f"{mask_path}: binary mask must be dimensionless")
                     mask = np.asarray(mask_hdus[0].data)
                     if mask.shape != original.shape or not np.isin(mask, (0, 1)).all():
                         raise AssertionError(f"{mask_path}: invalid uint8 mask geometry or values")
@@ -257,18 +390,60 @@ def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tu
                             raise AssertionError(f"{output_path}: retained integer values changed")
                     verify_wcs(source[0].header, mask_hdus[0].header, mask_path, 0, 0, False)
                 checked_masks += 1
+                reason_path = output_dir / "reason_masks" / relative
+                if reason_path.exists():
+                    with open_one(reason_path) as reason_hdus:
+                        verify_checksums(reason_path, reason_hdus)
+                        verify_provenance(reason_path, reason_hdus[0].header)
+                        verify_preserved_header(
+                            source[0].header,
+                            reason_hdus[0].header,
+                            reason_path,
+                            "reason",
+                        )
+                        reason = reason_hdus[0]
+                        if reason.header.get("RSCHEME") != "PIXACT1":
+                            raise AssertionError(f"{reason_path}: unknown reason-code scheme")
+                        if "BUNIT" in reason.header:
+                            raise AssertionError(f"{reason_path}: reason plane must be dimensionless")
+                        if reason.data is None or reason.data.shape != original.shape:
+                            raise AssertionError(f"{reason_path}: reason-plane geometry differs from source")
+                        verify_reason_codes(
+                            original,
+                            source[0].header,
+                            mask,
+                            np.asarray(reason.data),
+                            is_crop,
+                            reason_path,
+                        )
+                        verify_wcs(
+                            source[0].header,
+                            reason.header,
+                            reason_path,
+                            0,
+                            0,
+                            False,
+                        )
+                    checked_reason_masks += 1
             else:
+                if (output_dir / "reason_masks" / relative).exists():
+                    raise AssertionError(f"{output_path}: reason plane exists without a binary mask")
                 verify_checksums(output_path, output, required=False)
                 if not np.array_equal(actual, original, equal_nan=True):
                     raise AssertionError(f"{output_path}: kept image differs from its input")
         if fitsverify:
-            for path in (output_path, *((mask_path,) if mask_path.exists() else ())):
+            reason_path = output_dir / "reason_masks" / relative
+            for path in (
+                output_path,
+                *((mask_path,) if mask_path.exists() else ()),
+                *((reason_path,) if reason_path.exists() else ()),
+            ):
                 result = subprocess.run([fitsverify, str(path)], capture_output=True, text=True, check=False)
                 transcript = result.stdout + result.stderr
                 if "*** Error" in transcript or "Verification found" in transcript and re.search(r"\b[1-9]\d* error", transcript):
                     raise AssertionError(f"fitsverify rejected {path}:\n{transcript}")
         checked_images += 1
-    return checked_images, checked_masks
+    return checked_images, checked_masks, checked_reason_masks
 
 
 def main() -> int:
@@ -278,13 +453,16 @@ def main() -> int:
     parser.add_argument("--fitsverify", default=shutil.which("fitsverify"))
     args = parser.parse_args()
     try:
-        images, masks = verify_tree(args.input_dir, args.output_dir, args.fitsverify)
+        images, masks, reason_masks = verify_tree(args.input_dir, args.output_dir, args.fitsverify)
     except Exception as error:  # surface the first concrete mismatch with a failure code
         print(f"cross-validation failed: {error}", file=sys.stderr)
         return 1
-    print(f"Astropy verified {images} science images and {masks} mask products")
+    print(
+        f"Astropy verified {images} science images, {masks} masks and "
+        f"{reason_masks} reason planes"
+    )
     if args.fitsverify:
-        print(f"fitsverify checked all science/mask outputs using {args.fitsverify}")
+        print(f"fitsverify checked all science/mask/reason outputs using {args.fitsverify}")
     return 0
 
 

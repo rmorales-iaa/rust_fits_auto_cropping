@@ -223,6 +223,12 @@ Staged FITS bytes are synced before rename. After science/mask pair publication,
 
 Validation: two durability-helper unit tests passed, the full Rust suite passes 72 tests (44 unit, 24 end-to-end, 4 version), strict Clippy and formatting pass. Release `0.1.5` processed the supplied 25-frame development set with four workers (16 clipped, 4 kept, 5 malformed-header errors); Astropy and `fitsverify` accepted 20 science images and 16 masks. Evidence is under `/fast_disk/tmp/clippling_test/output/durability-sync-check-20261027/runs/20261027T182049.972720961Z/`. This verifies normal operation and interoperability, not simulated crash recovery. Directory barriers do not make the image/mask pair transactional, eliminate the crash window between their renames, or guarantee device write-cache durability.
 
+### Reason-plane semantics and metadata policy audit (2026-10-27)
+
+The independent checker now verifies every optional reason plane against its binary action mask and original image: code 3 must identify exactly the original undefined samples; codes 1 and 2 together must identify exactly the defined samples excluded by the action mask; retained defined samples must be code 0. It rejects unsupported codes, shape/type mismatches, reason planes without a corresponding mask, and dimensional units on masks/reason planes. For science, mask and reason products it compares source metadata card values/comments against a documented preservation policy and rejects unexpected non-structural output cards. Reason outputs also require `RSCHEME=PIXACT1` and compatible WCS cards.
+
+All 12 tests in `python3 -m unittest tools.test_cross_validate_fits -v` passed. The checker revalidated release `0.1.33` run `20261027T202641.065615444Z` from the requested 25-file dataset: Astropy verified 20 science images, 16 masks and 16 reason planes; `fitsverify` checked the generated FITS products. Four unchanged symlinked images resolve to original inputs. Astropy emitted warnings for legacy PC/RADECSYS/PROJPn cards and an inconsistent DATE-OBS/MJD-OBS pair in source headers. Some SIP world-to-pixel residuals remained unavailable because Astropy did not converge; the independently sampled finite forward coordinates matched where available. The run passed the checker's tested scope, not full WCS-convention coverage, labeled artifact accuracy, photometric integrity or held-out scientific validation. The five malformed source FITS files remain batch errors.
+
 
 ### Experimental multiscale consensus evidence (2026-10-27)
 
