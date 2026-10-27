@@ -343,6 +343,122 @@ mod tests {
     }
 
     #[test]
+    fn maximal_rectangle_matches_exhaustive_small_grid_oracle() {
+        let (width, height) = (3, 3);
+        for pattern in 0_u16..(1 << (width * height)) {
+            let mask: Vec<bool> = (0..width * height)
+                .map(|index| pattern & (1 << index) != 0)
+                .collect();
+            let mut expected = 0;
+            for y0 in 0..height {
+                for x0 in 0..width {
+                    for h in 1..=height - y0 {
+                        for w in 1..=width - x0 {
+                            let clean =
+                                (y0..y0 + h).all(|y| (x0..x0 + w).all(|x| !mask[y * width + x]));
+                            if clean {
+                                expected = expected.max(w * h);
+                            }
+                        }
+                    }
+                }
+            }
+            let actual = largest_unmasked_rectangle(&mask, width, height)
+                .map(CropRect::area)
+                .unwrap_or(0);
+            assert_eq!(actual, expected, "pattern={pattern:09b}");
+        }
+    }
+
+    #[test]
+    fn exact_circle_transform_matches_brute_force_small_grid_oracle() {
+        let (width, height) = (4, 3);
+        for pattern in 1_u16..(1 << (width * height)) - 1 {
+            let mask: Vec<bool> = (0..width * height)
+                .map(|index| pattern & (1 << index) != 0)
+                .collect();
+            let actual = largest_unmasked_circle(&mask, width, height);
+            let expected = brute_force_circle(&mask, width, height);
+            match (actual, expected) {
+                (None, None) => {}
+                (Some(actual), Some(expected)) => {
+                    assert_eq!((actual.center_x, actual.center_y), (expected.0, expected.1));
+                    assert!((actual.radius - expected.2).abs() < 1e-12);
+                    assert_eq!(actual.retained_pixels, expected.3);
+                    assert_eq!(actual.bounds, expected.4);
+                }
+                pair => panic!("circle oracle mismatch for pattern {pattern:012b}: {pair:?}"),
+            }
+        }
+    }
+
+    fn brute_force_circle(
+        mask: &[bool],
+        width: usize,
+        height: usize,
+    ) -> Option<(usize, usize, f64, usize, CropRect)> {
+        let mut best: Option<(f64, f64, usize, usize)> = None;
+        for y in 0..height {
+            for x in 0..width {
+                if mask[y * width + x] {
+                    continue;
+                }
+                let nearest = (0..height)
+                    .flat_map(|my| (0..width).map(move |mx| (mx, my)))
+                    .filter(|(mx, my)| mask[my * width + mx])
+                    .map(|(mx, my)| {
+                        ((x as f64 - mx as f64).powi(2) + (y as f64 - my as f64).powi(2)).sqrt()
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                let clearance = nearest - std::f64::consts::FRAC_1_SQRT_2;
+                let edge = (x as f64 + 0.5)
+                    .min(width as f64 - x as f64 - 0.5)
+                    .min(y as f64 + 0.5)
+                    .min(height as f64 - y as f64 - 0.5);
+                let radius = clearance.min(edge);
+                let center_distance = (x as f64 - (width as f64 - 1.0) / 2.0).powi(2)
+                    + (y as f64 - (height as f64 - 1.0) / 2.0).powi(2);
+                let candidate = (radius, -center_distance, y, x);
+                if best.is_none_or(|old| {
+                    candidate.0 > old.0
+                        || (candidate.0 == old.0
+                            && (candidate.1, candidate.2, candidate.3) > (old.1, old.2, old.3))
+                }) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        let (radius, _, center_y, center_x) = best?;
+        if !radius.is_finite() || radius <= 0.0 {
+            return None;
+        }
+        let x0 = ((center_x as f64 - radius).ceil() as usize).min(width);
+        let y0 = ((center_y as f64 - radius).ceil() as usize).min(height);
+        let x1 = ((center_x as f64 + radius).floor() as usize + 1).min(width);
+        let y1 = ((center_y as f64 + radius).floor() as usize + 1).min(height);
+        let bounds = CropRect {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        };
+        let mut retained = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if (x as f64 - center_x as f64).powi(2) + (y as f64 - center_y as f64).powi(2)
+                    <= radius * radius
+                {
+                    if mask[y * width + x] {
+                        return None;
+                    }
+                    retained += 1;
+                }
+            }
+        }
+        Some((center_x, center_y, radius, retained, bounds))
+    }
+
+    #[test]
     fn circular_field_retains_more_pixels_than_its_clean_rectangle() {
         let (width, height) = (128, 128);
         let mut mask = vec![true; width * height];

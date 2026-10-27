@@ -1,12 +1,12 @@
 # Project memory
 
-Updated: 2026-10-27, after implementing the first P1 correctness/reporting slice.
+Updated: 2026-10-27, after implementing the second correctness/spatial-evidence slice.
 
 ## Identity and active work
 
 - Repository/CLI: `rust_fits_auto_cropping`; pure-Rust FITS I/O with `fitskit`; English communication and documentation.
 - Active work specification: [scientific improvement plan](scientific-improvement-plan.md). Evidence and prioritized failures: [scientific audit](scientific-audit-2026-10-27.md). The [original implementation plan](implementation-plan.md) and crop/preview/layout plans are historical baseline records, not proof of every proposed guarantee.
-- The active request is to implement the [scientific improvement plan](scientific-improvement-plan.md). P1 has partial fixes for centered pixel analysis, lazy BLANK selection, gzip signature exclusion, derived-image metadata, and proposal/applied reporting. The tile detector and thresholds were not changed; P2–P5 and science release gates remain open. Do not treat passing regressions or FITS interoperability as science validation.
+- The active request is to implement the [scientific improvement plan](scientific-improvement-plan.md). Current work partially addresses P1 with no-BLANK keep fallback, integer precision abstention, crop refusal for recognized unsupported WCS distortion, and report/build/config provenance identities. P3 has independent provisional component gates and allocation-free scale-conditioned correlation. Exhaustive small-grid rectangle/circle oracles strengthen geometry checks. P2 and P4–P5 remain open; the detector still expands tiles and has no source-aware model or calibrated action objective. P6 has only an exact algorithm allocation change and no repeated paired performance/RSS measurement. Do not treat passing regressions or prior FITS interoperability checks as science validation.
 - Documentation and versioned skills belong in `input/doc/`, configuration in `input/`, generated data under the chosen output root. Read `AGENTS.md` and the main project skill before work.
 
 ## Persistent user and science contracts
@@ -22,12 +22,20 @@ Updated: 2026-10-27, after implementing the first P1 correctness/reporting slice
 ## Review baseline and verified evidence
 
 - Audited baseline: `626f53c52e4fdd59e7e90ed86cd050c09cd8016c`, package `0.1.0`, release `0.0.29`; planning tests built `0.0.30`. The implementation smoke build was `0.0.34`; later test/lint builds advanced the local counter. Query the executable because package version, build counter and Git identity are distinct.
-- Current test suite: 51 passing (27 unit, 20 end-to-end, 4 version tests); format and Clippy checks pass. Current tests now reproduce fixes for large BZERO invariance, retained full-range uint8, lazy reuse of an existing BLANK, gzip-magic exclusion, undefined-pixel reporting, metadata and dry-run semantics.
+- Latest validation in this work: 60 tests passed (34 unit, 22 end-to-end, 4 version tests); formatting and Clippy passed. Regression coverage adds no-unused-BLANK keep fallback, lookup-distortion crop refusal, integer precision abstention, large-value stable correlation, independently gated components and exhaustive small-grid circle/rectangle oracles.
 - One release run on 25 repeatedly inspected development frames: 16 clipped, 4 kept, 5 malformed-header errors; 3.35 s and 952,624 KiB RSS, four workers. Astropy and fitsverify accepted 20 science images and 16 masks. This is one interoperability/performance observation, not a benchmark distribution or a science-accuracy result. No independent labels exist.
-- P1 remains partial: no-sentinel fallback, unsupported WCS handling, source-identity/atomic publication and provenance schema gaps remain. A01–A06 and A11–A17 are not resolved by the first code slice. The detector still expands whole tiles and is not science-grade.
+- P1 remains partial: no-sentinel fallback and recognized unsupported-WCS crop refusal are now implemented, and report/build/config identities were added. Stable source identity, crash-consistent publication, broad WCS validation, all reason-code matrices and detailed set intersections remain. The detector still expands whole tiles and is not science-grade.
 - Probe evidence and fixture script: `output/reviews/science-plan-20261027-4hmuy3p9/` (ignored local output); portable recipes are in the tracked audit.
 - Earlier supplied-data run: 25 files from `/fast_disk/tmp/clippling_test/input/`; 16 clipped, 4 kept, 5 malformed quoted INSAPNAM errors; 20 science outputs, 16 masks and 16 previews. Independent FITS/PNG checks passed on those cases. One warm 4-worker run took 4.56 s with 925,972 KiB RSS. This is historical evidence, not a new benchmark or a universal interoperability claim.
 - The repeatedly inspected supplied set is development data. It has no independent artifact labels and must not be called an untouched hold-out.
+
+## Second engineering slice
+
+- Independently gated components prevent disconnected detections from sharing count, area, evidence or provisional utility support. Candidate/accepted component counts are in per-image reports. This is a P3 engineering partial, not multiscale evidence or calibration.
+- Correlation no longer materializes pair vectors; max-magnitude scaling and Welford moments prevent overflow on large finite samples. It still uses raw adjacent pairs and can interpret trends as correlation; directional diagnostics and statistical calibration are unresolved.
+- Integer actions with no unused representable BLANK code now fall back to an unchanged source symlink, including crop publication rollback. Crop mode conservatively keeps recognized `-TAB`, CPDIS/CPERR, D2IM and lookup polynomial conventions.
+- Summary schema version 2 records detector/policy IDs, Git revision/dirty state, executable SHA-256 and source/effective config/heuristics SHA-256. This does not guarantee the source remained unchanged between discovery and read, or crash consistency.
+- `cargo test --locked --all-targets` passed 60 tests; rustfmt and Clippy passed. Release `0.0.57` processed 16 clipped, 4 kept and 5 malformed-header errors from the same 25-image development corpus in 4.37 s / 976,992 KiB RSS, with four workers and PNG output. Astropy/fitsverify accepted all 20 science images and 16 masks. Three repeated no-PNG crop runs measured 13.16 s median / 307,964 KiB median RSS serial and 3.80 s / 923,276 KiB with four workers; all 36 science/mask pixel arrays were equal across all six. This is operational evidence on repeatedly inspected data, not a before/after algorithm gain or science test. Rebuild after commit for clean Git provenance. No independent science corpus or held-out labels are available.
 
 ## Implementation priorities and release conditions
 

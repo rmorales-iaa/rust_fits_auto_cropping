@@ -4,7 +4,7 @@ use crate::{
     config::{Config, HeuristicsConfig, ProcessingMode},
     crop::{CropRegion, largest_clean_region},
     detection::detect_border,
-    fits_image::{is_gzip_compressed, read_image},
+    fits_image::{NoUnusedIntegerCode, is_gzip_compressed, read_image},
     logger::Logger,
     model::{FileOutcome, OutcomeKind},
     output_layout::{OutputLayout, ProductCategory},
@@ -117,6 +117,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let config_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&config)?));
     let source_heuristics_hash = format!("{:x}", Sha256::digest(heuristics_text.as_bytes()));
     let heuristics_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&heuristics)?));
+    let executable_sha256 = executable_sha256()?;
     let requested = if config.processing.threads == 0 {
         rayon::current_num_threads().max(1)
     } else {
@@ -131,7 +132,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let mut logger = Logger::create(&run_dir, &run_id)?;
     logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output_root":layout.root(),"run_directory":&run_dir,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
         "source_heuristics_sha256":source_heuristics_hash,"effective_heuristics_sha256":heuristics_hash,
-        "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
+        "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"git_revision":env!("RUST_FITS_GIT_REVISION"),"git_dirty":env!("RUST_FITS_GIT_DIRTY")=="true","executable_sha256":executable_sha256,"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
     let mut paths = discover(&input, config.processing.recursive)?;
     paths.sort();
     logger.event(&run_id,"discovery_complete",serde_json::json!({"candidate_fits_files":paths.len(),"workers":workers,"memory_budget_mib":config.processing.memory_budget_mib,"maximum_image_mib":config.processing.maximum_image_mib}))?;
@@ -171,7 +172,19 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
             .collect()
     });
     outcomes.sort_by(|a, b| a.input.cmp(&b.input));
-    report::write(&run_dir, &run_id, &outcomes, args.dry_run)?;
+    report::write(
+        &run_dir,
+        &run_id,
+        &outcomes,
+        args.dry_run,
+        report::ReportIdentity {
+            executable_sha256: &executable_sha256,
+            source_config_sha256: &source_config_hash,
+            effective_config_sha256: &config_hash,
+            source_heuristics_sha256: &source_heuristics_hash,
+            effective_heuristics_sha256: &heuristics_hash,
+        },
+    )?;
     if logger_failed.load(Ordering::Relaxed) {
         bail!("activity logger failed while recording file events; see completed summary report")
     };
@@ -241,6 +254,13 @@ fn discover(input: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+fn executable_sha256() -> anyhow::Result<String> {
+    let path = std::env::current_exe().context("locating current executable")?;
+    let bytes =
+        fs::read(&path).with_context(|| format!("hashing executable {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn process_one(
     path: &Path,
     input: &Path,
@@ -293,6 +313,8 @@ fn process_one(
                 image.values.iter().filter(|v| !v.is_finite()).count();
             outcome.proposed_mask_fraction = detection.candidate_fraction;
             outcome.candidate_tiles = detection.candidate_tiles;
+            outcome.candidate_components = detection.candidate_components;
+            outcome.accepted_components = detection.accepted_components;
             outcome.score = detection.score;
             outcome.evidence_ratio = detection.evidence_ratio;
             outcome.artifact_benefit = detection.artifact_benefit;
@@ -305,7 +327,9 @@ fn process_one(
             if detection.accepted {
                 let n = detection.mask.iter().filter(|v| **v).count();
                 outcome.proposed_mask_pixels = n;
-                let crop = if matches!(config.processing.mode, ProcessingMode::Crop) {
+                let crop = if matches!(config.processing.mode, ProcessingMode::Crop)
+                    && image.crop_wcs_unsupported.is_none()
+                {
                     largest_clean_region(&detection.mask, image.width, image.height)
                 } else {
                     None
@@ -313,7 +337,16 @@ fn process_one(
                 let mut crop_accepted = false;
                 if matches!(config.processing.mode, ProcessingMode::Crop) && crop.is_none() {
                     outcome.status = OutcomeKind::Kept;
-                    outcome.reason = "no positive-area rectangle excludes every detected artifact pixel; image retained".into();
+                    let reason = image.crop_wcs_unsupported.as_ref().map_or_else(
+                        || {
+                            "no positive-area rectangle excludes every detected artifact pixel"
+                                .into()
+                        },
+                        |reason| format!("crop declined: {reason}"),
+                    );
+                    outcome.reason.push_str("; ");
+                    outcome.reason.push_str(&reason);
+                    outcome.reason.push_str("; source retained unchanged");
                 }
                 if options.dry_run && detection.accepted && outcome.status == OutcomeKind::Clipped {
                     outcome.status = OutcomeKind::Proposed;
@@ -445,6 +478,39 @@ fn process_one(
                         (create_kept_symlink(path, &image_path), false)
                     };
                     if let Err(e) = write_result {
+                        if e.downcast_ref::<NoUnusedIntegerCode>().is_some() {
+                            if options.overwrite {
+                                if let Err(cleanup_error) = remove_existing_product(&mask_path) {
+                                    outcome.status = OutcomeKind::Error;
+                                    outcome.reason = format!(
+                                        "{e}; could not remove stale mask product: {cleanup_error}"
+                                    );
+                                    return finish(outcome, timer);
+                                }
+                                if let Some(preview) = &png_path
+                                    && let Err(cleanup_error) = remove_existing_product(preview)
+                                {
+                                    outcome.status = OutcomeKind::Error;
+                                    outcome.reason = format!(
+                                        "{e}; could not remove stale preview: {cleanup_error}"
+                                    );
+                                    return finish(outcome, timer);
+                                }
+                            }
+                            if let Err(fallback_error) = create_kept_symlink(path, &image_path) {
+                                outcome.status = OutcomeKind::Error;
+                                outcome.reason = format!(
+                                    "{e}; keeping the source was required but symlink publication failed: {fallback_error}"
+                                );
+                                return finish(outcome, timer);
+                            }
+                            outcome.status = OutcomeKind::Kept;
+                            outcome.reason = format!(
+                                "{e}; source retained unchanged because this integer action cannot represent added undefined pixels"
+                            );
+                            outcome.output_image = Some(image_path);
+                            return finish(outcome, timer);
+                        }
                         outcome.status = OutcomeKind::Error;
                         outcome.reason = e.to_string();
                         return finish(outcome, timer);
@@ -536,6 +602,14 @@ fn path_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
+fn remove_existing_product(path: &Path) -> anyhow::Result<()> {
+    if path_exists(path) {
+        fs::remove_file(path)
+            .with_context(|| format!("removing stale product {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn eligibility_reason(reason: crate::fits_image::Eligibility) -> String {
     match reason {
         crate::fits_image::Eligibility::MultiHdu(n) => {
@@ -543,5 +617,8 @@ fn eligibility_reason(reason: crate::fits_image::Eligibility) -> String {
         }
         crate::fits_image::Eligibility::Not2d => "primary HDU is not a 2D image".into(),
         crate::fits_image::Eligibility::EmptyImage => "image has zero pixels".into(),
+        crate::fits_image::Eligibility::IntegerPrecisionLoss => {
+            "integer sample span exceeds exact f64 analysis precision".into()
+        }
     }
 }

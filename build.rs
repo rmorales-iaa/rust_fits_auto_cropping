@@ -5,6 +5,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };
@@ -22,10 +23,18 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support/version.rs");
     println!("cargo:rerun-if-changed=build_support");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
     println!("cargo:rerun-if-changed=tests");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
     watch_tree(&root.join("src"));
+    let revision = git_output(&root, &["rev-parse", "--short=12", "HEAD"])
+        .unwrap_or_else(|| "unknown".to_owned());
+    let dirty =
+        git_output(&root, &["status", "--porcelain"]).is_some_and(|status| !status.is_empty());
+    println!("cargo:rustc-env=RUST_FITS_GIT_REVISION={revision}");
+    println!("cargo:rustc-env=RUST_FITS_GIT_DIRTY={dirty}");
 
     let output = root.join("output");
     assert_no_symlink(&output);
@@ -67,6 +76,20 @@ fn main() {
     fs::rename(&pending, &state).expect("publish next program version");
     println!("cargo:rustc-env=RUST_FITS_AUTO_CROPPING_VERSION={next}");
     println!("cargo:warning=rust_fits_auto_cropping version {next}");
+}
+
+fn git_output(root: &Path, arguments: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
+        .map(|text| text.trim().to_owned())
 }
 
 fn assert_no_symlink(path: &Path) {

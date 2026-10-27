@@ -1,5 +1,26 @@
 # Validation record
 
+## Second scientific-plan engineering slice (2026-10-27)
+
+The current implementation passed `cargo test --locked --all-targets`: 60 tests total (34 unit, 22 end-to-end and 4 build-version tests). `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets -- -D warnings` passed. Added tests cover integer precision abstention, overflow-safe float centering and correlation, no-available-BLANK keep fallback, unsupported lookup-distortion crop refusal, independent disconnected-component gates, and exhaustive small-grid circle/rectangle geometry references.
+
+Release `0.0.57` processed the repeatedly inspected 25-image development set in `/fast_disk/tmp/clippling_test/input/`, writing a new run to `/fast_disk/tmp/clippling_test/output/followup-0.0.57/runs/20261027T135512.136105834Z/`. Results: 16 clipped, 4 kept, 5 errors; the errors are the known malformed `INSAPNAM` quoted strings and remain explicit. The release run took 4.37 s wall time and reached 976,992 KiB maximum RSS on four workers with previews enabled. This is one observation, not a repeated paired benchmark; it supports no speed or memory improvement claim. The report uses schema 2 and records algorithm/policy IDs, Git revision/dirty state, executable hash, and source/effective configuration hashes.
+
+Current-revision outputs were independently opened by Astropy and checked by `fitsverify`: all 20 generated science images and 16 masks passed; the five unparsable inputs have no products. Astropy emitted compatibility/deprecation warnings for legacy input WCS/time cards. This establishes interoperability for the readable files and checker scope, not WCS support for every convention, artifact truth, source completeness, photometric bias, or detector validity. The input corpus is development data, not an independent hold-out. The run exits with status 1 because the five malformed headers are reported as batch errors.
+
+No current-code repeated paired benchmark, independent labeled science corpus, complete WCS matrix, transaction-interruption test, or image-level memory cap has been established. The relevant G1/G2/G4/G5 release gates remain open.
+
+### Repeated worker comparison
+
+The same input corpus and crop-mode configuration were run three times at one worker and three times at four workers, with PNG previews disabled, using release `0.0.57` and a 2048 MiB configured budget. Each run wrote to a distinct isolated output root under `/fast_disk/tmp/clippling_test/output/benchmarks/followup-0.0.57/`. Trials ran in serial-then-parallel order, so warm-cache and fixed-order effects remain possible.
+
+| Workers | Wall-time trials | Median wall time | Peak RSS trials (KiB) | Median peak RSS |
+| ---: | --- | ---: | --- | ---: |
+| 1 | 13.15, 13.16, 13.17 s | 13.16 s | 307,964; 308,020; 307,884 | 307,964 KiB |
+| 4 | 3.80, 3.85, 3.80 s | 3.80 s | 922,944; 997,276; 923,276 | 923,276 KiB |
+
+This is a 3.46× ratio of observed median throughputs for this specific workload, while four-worker median peak RSS is 3.00× the serial median; one of the parallel RSS trials was higher at 997,276 KiB. All six runs had the same summary counts (16 clipped, 4 kept, 5 malformed-header errors). Astropy compared all 36 science/mask pixel arrays against the first serial trial, and all arrays were identical across all repetitions and both worker counts. FITS headers include run-time provenance, so byte-level product hashes are expected to differ. These measurements establish repeatability and parallel/serial output-array equivalence on this corpus, not a before/after improvement from the new correlation/component algorithms, a hard memory bound, or external scientific validity. Raw time records and logs are in the benchmark output directory above.
+
 ## Scientific-plan implementation slice (2026-10-27)
 
 Implementation build `0.0.34` on the unchanged 25-image development set in `/fast_disk/tmp/clippling_test/input/` wrote a new run to `/fast_disk/tmp/clippling_test/output/runs/20261027T131800.144164298Z/`. It reported 16 clipped, 4 kept and 5 errors. The same five frames have malformed quoted-string headers (`unterminated string value`) in the historical runs; they were not reclassified as successful. The run used the default 2048 MiB budget and four effective workers. `/usr/bin/time -v` measured 3.35 s wall time and 952,624 KiB peak RSS. This is one observational run, not the repeated paired G5 benchmark and not evidence of better science accuracy.

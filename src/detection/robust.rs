@@ -6,7 +6,7 @@ pub fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let m = values.len() / 2;
     if values.len().is_multiple_of(2) {
-        (values[m - 1] + values[m]) * 0.5
+        values[m - 1] * 0.5 + values[m] * 0.5
     } else {
         values[m]
     }

@@ -7,6 +7,7 @@ use std::{fs, path::Path};
 
 #[derive(Serialize)]
 pub struct Summary<'a> {
+    pub schema_version: u32,
     pub run_id: &'a str,
     pub created_utc: String,
     pub program: &'static str,
@@ -18,7 +19,24 @@ pub struct Summary<'a> {
     pub ignored: usize,
     pub errors: usize,
     pub dry_run: bool,
+    pub algorithm_version: &'static str,
+    pub policy_version: &'static str,
+    pub git_revision: &'static str,
+    pub git_dirty: bool,
+    pub executable_sha256: &'a str,
+    pub source_config_sha256: &'a str,
+    pub effective_config_sha256: &'a str,
+    pub source_heuristics_sha256: &'a str,
+    pub effective_heuristics_sha256: &'a str,
     pub files: &'a [FileOutcome],
+}
+
+pub struct ReportIdentity<'a> {
+    pub executable_sha256: &'a str,
+    pub source_config_sha256: &'a str,
+    pub effective_config_sha256: &'a str,
+    pub source_heuristics_sha256: &'a str,
+    pub effective_heuristics_sha256: &'a str,
 }
 
 pub fn write(
@@ -26,9 +44,11 @@ pub fn write(
     run_id: &str,
     outcomes: &[FileOutcome],
     dry_run: bool,
+    identity: ReportIdentity<'_>,
 ) -> anyhow::Result<()> {
     let count = |f: fn(&OutcomeKind) -> bool| outcomes.iter().filter(|o| f(&o.status)).count();
     let summary = Summary {
+        schema_version: 2,
         run_id,
         created_utc: Utc::now().to_rfc3339(),
         program: env!("CARGO_PKG_NAME"),
@@ -40,6 +60,15 @@ pub fn write(
         ignored: count(|s| matches!(s, OutcomeKind::Ignored)),
         errors: count(|s| matches!(s, OutcomeKind::Error)),
         dry_run,
+        algorithm_version: "tile-detector-v1",
+        policy_version: "heuristics-v1",
+        git_revision: env!("RUST_FITS_GIT_REVISION"),
+        git_dirty: env!("RUST_FITS_GIT_DIRTY") == "true",
+        executable_sha256: identity.executable_sha256,
+        source_config_sha256: identity.source_config_sha256,
+        effective_config_sha256: identity.effective_config_sha256,
+        source_heuristics_sha256: identity.source_heuristics_sha256,
+        effective_heuristics_sha256: identity.effective_heuristics_sha256,
         files: outcomes,
     };
     fs::write(
@@ -47,7 +76,7 @@ pub fn write(
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason,width,height,original_undefined_pixels,masked_pixels,proposed_mask_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,elapsed_ms\n",
+        "input,status,reason,width,height,original_undefined_pixels,masked_pixels,proposed_mask_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -62,6 +91,8 @@ pub fn write(
             format!("{:.8}", o.mask_fraction),
             format!("{:.8}", o.proposed_mask_fraction),
             o.candidate_tiles.to_string(),
+            o.candidate_components.to_string(),
+            o.accepted_components.to_string(),
             format!("{:.6}", o.score),
             format!("{:.6}", o.evidence_ratio),
             format!("{:.6}", o.artifact_benefit),

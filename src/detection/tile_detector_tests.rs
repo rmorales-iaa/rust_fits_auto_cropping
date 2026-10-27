@@ -44,6 +44,28 @@ fn preexisting_undefined_samples_are_not_added_to_the_proposed_mask() {
     assert!(!found.mask[0]);
     assert!(found.mask[1]);
 }
+
+#[test]
+fn weak_disconnected_border_component_cannot_borrow_support_from_a_strong_one() {
+    let (w, h) = (96, 96);
+    let mut data = vec![100.0; w * h];
+    for y in 0..24 {
+        for x in 0..24 {
+            data[y * w + x] = 0.0;
+        }
+    }
+    for y in 88..h {
+        for x in 88..w {
+            data[y * w + x] = 0.0;
+        }
+    }
+    let found = detect_border(&data, w, h, &config());
+    assert!(found.accepted, "{}", found.reason);
+    assert_eq!(found.candidate_components, 2);
+    assert_eq!(found.accepted_components, 1);
+    assert!(found.mask[0]);
+    assert!(!found.mask[95 * w + 95]);
+}
 #[test]
 fn detects_single_sided_pattern_without_forcing_symmetry() {
     let (w, h) = (96, 96);

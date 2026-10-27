@@ -2,6 +2,7 @@
 use anyhow::{Context, bail};
 use fitskit::{FitsFile, HduData, Header, PixelData};
 use std::{
+    fmt,
     fs::File,
     io::Read,
     io::{Seek, SeekFrom},
@@ -9,10 +10,28 @@ use std::{
 };
 
 #[derive(Debug)]
+pub struct NoUnusedIntegerCode {
+    pub bitpix: i64,
+}
+
+impl fmt::Display for NoUnusedIntegerCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no unused integer pixel value is available for BLANK at BITPIX={}",
+            self.bitpix
+        )
+    }
+}
+
+impl std::error::Error for NoUnusedIntegerCode {}
+
+#[derive(Debug)]
 pub enum Eligibility {
     MultiHdu(usize),
     Not2d,
     EmptyImage,
+    IntegerPrecisionLoss,
 }
 
 pub struct Image {
@@ -22,6 +41,7 @@ pub struct Image {
     pub bitpix: i64,
     pub blank_value: Option<i64>,
     pub metadata_warnings: Vec<String>,
+    pub crop_wcs_unsupported: Option<String>,
 }
 
 /// Parse a FITS file using fitskit and validate the single-HDU 2D image contract.
@@ -78,10 +98,30 @@ pub fn read_image(
         ));
     }
     let (values, blank_value) = match &image.pixels {
-        PixelData::U8(raw) => (integer_values(raw, existing_blank)?, existing_blank),
-        PixelData::I16(raw) => (integer_values(raw, existing_blank)?, existing_blank),
-        PixelData::I32(raw) => (integer_values(raw, existing_blank)?, existing_blank),
-        PixelData::I64(raw) => (integer_values(raw, existing_blank)?, existing_blank),
+        PixelData::U8(raw) => {
+            if integer_span_exceeds_f64_exactness(raw, existing_blank) {
+                return Ok(Err(Eligibility::IntegerPrecisionLoss));
+            }
+            (integer_values(raw, existing_blank)?, existing_blank)
+        }
+        PixelData::I16(raw) => {
+            if integer_span_exceeds_f64_exactness(raw, existing_blank) {
+                return Ok(Err(Eligibility::IntegerPrecisionLoss));
+            }
+            (integer_values(raw, existing_blank)?, existing_blank)
+        }
+        PixelData::I32(raw) => {
+            if integer_span_exceeds_f64_exactness(raw, existing_blank) {
+                return Ok(Err(Eligibility::IntegerPrecisionLoss));
+            }
+            (integer_values(raw, existing_blank)?, existing_blank)
+        }
+        PixelData::I64(raw) => {
+            if integer_span_exceeds_f64_exactness(raw, existing_blank) {
+                return Ok(Err(Eligibility::IntegerPrecisionLoss));
+            }
+            (integer_values(raw, existing_blank)?, existing_blank)
+        }
         PixelData::F32(raw) => (center_float_values(raw.iter().map(|&v| f64::from(v))), None),
         PixelData::F64(raw) => (center_float_values(raw.iter().copied()), None),
     };
@@ -95,7 +135,41 @@ pub fn read_image(
         bitpix,
         blank_value,
         metadata_warnings,
+        crop_wcs_unsupported: crop_wcs_unsupported(&hdu.header),
     }))
+}
+
+fn crop_wcs_unsupported(header: &Header) -> Option<String> {
+    for axis in 1..=2 {
+        for suffix in std::iter::once(String::new())
+            .chain((b'A'..=b'Z').map(|letter| char::from(letter).to_string()))
+        {
+            let key = format!("CTYPE{axis}{suffix}");
+            if header
+                .get_string(&key)
+                .is_some_and(|value| value.to_ascii_uppercase().contains("-TAB"))
+            {
+                return Some(format!(
+                    "{key} uses table-lookup WCS, which crop mode cannot update safely"
+                ));
+            }
+        }
+    }
+    for keyword in header.iter() {
+        let name = keyword.name.as_str();
+        if [
+            "CPDIS", "CPERR", "D2IMDIS", "D2IMERR", "DP1.", "DP2.", "D2IM1.", "D2IM2.",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        {
+            return Some(format!(
+                "{} declares lookup-table distortion, which crop mode cannot update safely",
+                keyword.name
+            ));
+        }
+    }
+    None
 }
 
 /// Detect gzip by file content so a compressed stream with a misleading FITS
@@ -167,6 +241,26 @@ fn integer_value_in_range(bitpix: i64, value: i64) -> bool {
     }
 }
 
+fn integer_span_exceeds_f64_exactness<T>(raw: &[T], blank: Option<i64>) -> bool
+where
+    T: Copy + Into<i64>,
+{
+    let Some((minimum, maximum)) = raw
+        .iter()
+        .copied()
+        .map(Into::into)
+        .filter(|value| Some(*value) != blank)
+        .fold(None, |range: Option<(i64, i64)>, value| {
+            Some(range.map_or((value, value), |(min, max)| {
+                (min.min(value), max.max(value))
+            }))
+        })
+    else {
+        return false;
+    };
+    i128::from(maximum) - i128::from(minimum) > (1_i128 << 53)
+}
+
 fn integer_values<T>(raw: &[T], existing_blank: Option<i64>) -> anyhow::Result<Vec<f64>>
 where
     T: Copy + Into<i64>,
@@ -209,7 +303,12 @@ fn center_float_values(values: impl Iterator<Item = f64>) -> Vec<f64> {
     };
     for value in &mut values {
         if value.is_finite() {
-            *value -= center;
+            let difference = *value - center;
+            *value = if difference.is_finite() {
+                difference
+            } else {
+                *value * 0.5 - center * 0.5
+            };
         }
     }
     values
@@ -235,9 +334,41 @@ pub fn unused_integer_value(bitpix: i64, raw: &[i64]) -> anyhow::Result<i64> {
             break;
         }
         if candidate == max {
-            bail!("no unused integer pixel value is available for BLANK");
+            return Err(anyhow::Error::new(NoUnusedIntegerCode { bitpix }));
         }
         candidate += 1;
     }
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_centering_avoids_overflow_across_opposite_extremes() {
+        let values = center_float_values([f64::MAX, -f64::MAX].into_iter());
+        assert_eq!(values, [f64::MAX, -f64::MAX]);
+        assert!(values.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn integer_conversion_abstains_when_span_exceeds_exact_f64_integers() {
+        assert!(!integer_span_exceeds_f64_exactness(
+            &[0_i64, 1_i64 << 53],
+            None
+        ));
+        assert!(integer_span_exceeds_f64_exactness(
+            &[0_i64, (1_i64 << 53) + 1],
+            None
+        ));
+        assert!(integer_span_exceeds_f64_exactness(
+            &[i64::MIN, i64::MAX],
+            None
+        ));
+        assert!(!integer_span_exceeds_f64_exactness(
+            &[i64::MIN, i64::MAX],
+            Some(i64::MIN)
+        ));
+    }
 }

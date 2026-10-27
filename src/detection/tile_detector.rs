@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 pub struct Detection {
     pub mask: Vec<bool>,
     pub candidate_tiles: usize,
+    pub candidate_components: usize,
+    pub accepted_components: usize,
     pub candidate_fraction: f64,
     pub accepted: bool,
     pub reason: String,
@@ -33,6 +35,8 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     let empty = || Detection {
         mask: vec![false; data.len()],
         candidate_tiles: 0,
+        candidate_components: 0,
+        accepted_components: 0,
         candidate_fraction: 0.0,
         accepted: false,
         reason: "insufficient valid data".into(),
@@ -142,10 +146,12 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
             best_score = best_score.max(delta.min(1.0e6));
         }
     }
-    // Flood-fill only candidates connected to an edge; isolated sources/features remain intact.
+    // Label edge-connected components independently so one region cannot
+    // subsidize another region's size, support, evidence or utility gates.
     let mut seen = vec![false; tiles.len()];
     let mut accepted_tiles = vec![false; tiles.len()];
     let mut queue = VecDeque::new();
+    let mut components = Vec::new();
     for y in 0..rows {
         for x in 0..cols {
             if x == 0 || y == 0 || x + 1 == cols || y + 1 == rows {
@@ -153,37 +159,89 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
                 if tiles[i].candidate && !seen[i] {
                     seen[i] = true;
                     queue.push_back(i);
+                    let mut component = Vec::new();
+                    while let Some(tile_index) = queue.pop_front() {
+                        component.push(tile_index);
+                        let tile_x = tile_index % cols;
+                        let tile_y = tile_index / cols;
+                        for (nx, ny) in [
+                            (tile_x.wrapping_sub(1), tile_y),
+                            (tile_x + 1, tile_y),
+                            (tile_x, tile_y.wrapping_sub(1)),
+                            (tile_x, tile_y + 1),
+                        ] {
+                            if nx < cols && ny < rows {
+                                let neighbor = ny * cols + nx;
+                                if tiles[neighbor].candidate && !seen[neighbor] {
+                                    seen[neighbor] = true;
+                                    queue.push_back(neighbor);
+                                }
+                            }
+                        }
+                    }
+                    components.push(component);
                 }
             }
         }
     }
-    while let Some(i) = queue.pop_front() {
-        accepted_tiles[i] = true;
-        let x = i % cols;
-        let y = i / cols;
-        for (nx, ny) in [
-            (x.wrapping_sub(1), y),
-            (x + 1, y),
-            (x, y.wrapping_sub(1)),
-            (x, y + 1),
-        ] {
-            if nx < cols && ny < rows {
-                let ni = ny * cols + nx;
-                if tiles[ni].candidate && !seen[ni] {
-                    seen[ni] = true;
-                    queue.push_back(ni);
-                }
-            }
-        }
-    }
-    let count = accepted_tiles.iter().filter(|v| **v).count();
-    let selected_evidence: Vec<f64> = tiles
+    let candidate_tile_count: usize = components.iter().map(Vec::len).sum();
+    let candidate_pixels: usize = components
         .iter()
-        .zip(&accepted_tiles)
-        .filter_map(|(tile, selected)| selected.then_some(tile.evidence_ratio))
-        .collect();
-    let (evidence_ratio, _) = location_scale(&selected_evidence);
-    let evidence_ratio = evidence_ratio.min(cfg.maximum_evidence_ratio).max(0.0);
+        .flatten()
+        .map(|&tile_index| tile_finite_pixels(data, width, height, cols, cfg.tile_size, tile_index))
+        .sum();
+    let candidate_fraction = candidate_pixels as f64 / defined_pixels as f64;
+    let mut accepted_component_count = 0;
+    for component in &components {
+        let component_pixels: usize = component
+            .iter()
+            .map(|&tile_index| {
+                tile_finite_pixels(data, width, height, cols, cfg.tile_size, tile_index)
+            })
+            .sum();
+        let component_fraction = component_pixels as f64 / defined_pixels as f64;
+        let evidence: Vec<f64> = component
+            .iter()
+            .map(|&tile_index| tiles[tile_index].evidence_ratio)
+            .collect();
+        let (component_evidence, _) = location_scale(&evidence);
+        let component_evidence = component_evidence.min(cfg.maximum_evidence_ratio).max(0.0);
+        let component_benefit = component_fraction * component_evidence;
+        let component_loss = cfg.valid_pixel_loss_cost * component_fraction
+            / (1.0 - component_fraction).max(f64::EPSILON);
+        let component_utility = component_benefit - component_loss;
+        let passes = component.len() >= cfg.minimum_border_tiles
+            && component_fraction >= cfg.minimum_mask_fraction
+            && component_fraction <= cfg.maximum_mask_fraction
+            && component_evidence >= cfg.minimum_evidence_ratio
+            && component_utility >= cfg.minimum_net_utility;
+        if passes {
+            accepted_component_count += 1;
+            for &tile_index in component {
+                accepted_tiles[tile_index] = true;
+            }
+        }
+    }
+    let count = candidate_tile_count;
+    let selected_evidence: Vec<f64> = if accepted_component_count == 0 {
+        components
+            .iter()
+            .flatten()
+            .map(|&tile_index| tiles[tile_index].evidence_ratio)
+            .collect()
+    } else {
+        tiles
+            .iter()
+            .zip(&accepted_tiles)
+            .filter_map(|(tile, selected)| selected.then_some(tile.evidence_ratio))
+            .collect()
+    };
+    let evidence_ratio = if selected_evidence.is_empty() {
+        0.0
+    } else {
+        let (center, _) = location_scale(&selected_evidence);
+        center.min(cfg.maximum_evidence_ratio).max(0.0)
+    };
     let mut selected_pixels = 0usize;
     for (ti, selected) in accepted_tiles.iter().enumerate() {
         if !selected {
@@ -200,20 +258,40 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
         }
     }
     let fraction = selected_pixels as f64 / defined_pixels as f64;
+    let decision_fraction = if accepted_component_count == 0 {
+        candidate_fraction
+    } else {
+        fraction
+    };
     // Report the same clip-versus-keep evidence for every non-empty candidate,
     // including candidates rejected by area or support gates. This makes an
     // abstention auditable without implying that the score is calibrated.
-    let artifact_benefit = fraction * evidence_ratio;
+    let artifact_benefit = decision_fraction * evidence_ratio;
     let valid_pixel_loss =
-        cfg.valid_pixel_loss_cost * fraction / (1.0 - fraction).max(f64::EPSILON);
+        cfg.valid_pixel_loss_cost * decision_fraction / (1.0 - decision_fraction).max(f64::EPSILON);
     let net_utility = artifact_benefit - valid_pixel_loss;
-    if count < cfg.minimum_border_tiles {
+    if accepted_component_count == 0 {
         return Detection {
             mask: vec![false; data.len()],
             candidate_tiles: count,
-            candidate_fraction: fraction,
+            candidate_components: components.len(),
+            accepted_components: 0,
+            candidate_fraction,
             accepted: false,
-            reason: "border component below minimum tile count".into(),
+            reason: if candidate_fraction > cfg.maximum_mask_fraction {
+                "candidate exceeds maximum mask fraction".into()
+            } else if candidate_fraction < cfg.minimum_mask_fraction {
+                "candidate below minimum mask fraction".into()
+            } else if evidence_ratio < cfg.minimum_evidence_ratio
+                || net_utility < cfg.minimum_net_utility
+            {
+                format!(
+                    "candidate retained: artifact benefit {artifact_benefit:.4} minus valid-pixel loss {valid_pixel_loss:.4} gives utility {net_utility:.4}, below configured clip rule"
+                )
+            } else {
+                "no edge component passed its independent size, area, evidence and utility gates"
+                    .into()
+            },
             score: best_score,
             evidence_ratio,
             artifact_benefit,
@@ -225,7 +303,9 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
         return Detection {
             mask: vec![false; data.len()],
             candidate_tiles: count,
-            candidate_fraction: fraction,
+            candidate_components: components.len(),
+            accepted_components: accepted_component_count,
+            candidate_fraction,
             accepted: false,
             reason: "candidate below minimum mask fraction".into(),
             score: best_score,
@@ -239,7 +319,9 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
         return Detection {
             mask: vec![false; data.len()],
             candidate_tiles: count,
-            candidate_fraction: fraction,
+            candidate_components: components.len(),
+            accepted_components: accepted_component_count,
+            candidate_fraction,
             accepted: false,
             reason: "candidate exceeds maximum mask fraction".into(),
             score: best_score,
@@ -253,7 +335,9 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
         return Detection {
             mask: vec![false; data.len()],
             candidate_tiles: count,
-            candidate_fraction: fraction,
+            candidate_components: components.len(),
+            accepted_components: accepted_component_count,
+            candidate_fraction,
             accepted: false,
             reason: format!(
                 "candidate retained: artifact benefit {artifact_benefit:.4} minus valid-pixel loss {valid_pixel_loss:.4} gives utility {net_utility:.4}, below configured clip rule"
@@ -282,7 +366,9 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     Detection {
         mask,
         candidate_tiles: count,
-        candidate_fraction: fraction,
+        candidate_components: components.len(),
+        accepted_components: accepted_component_count,
+        candidate_fraction,
         accepted: true,
         reason: format!(
             "clip accepted: evidence ratio {evidence_ratio:.3}; artifact benefit {artifact_benefit:.4}; valid-pixel loss {valid_pixel_loss:.4}; net utility {net_utility:.4}"
@@ -293,6 +379,24 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
         valid_pixel_loss,
         net_utility,
     }
+}
+
+fn tile_finite_pixels(
+    data: &[f64],
+    width: usize,
+    height: usize,
+    columns: usize,
+    tile_size: usize,
+    tile_index: usize,
+) -> usize {
+    let tx = tile_index % columns;
+    let ty = tile_index / columns;
+    (ty * tile_size..((ty + 1) * tile_size).min(height))
+        .flat_map(|y| {
+            (tx * tile_size..((tx + 1) * tile_size).min(width)).map(move |x| y * width + x)
+        })
+        .filter(|&index| data[index].is_finite())
+        .count()
 }
 
 #[cfg(test)]

@@ -331,6 +331,51 @@ fn full_range_byte_image_is_kept_without_eager_blank_allocation() {
 }
 
 #[test]
+fn integer_mask_without_available_blank_keeps_the_source_unchanged() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let (width, height) = (96, 96);
+    let mut values = vec![100_u8; width * height];
+    for y in 0..24 {
+        for x in 0..24 {
+            values[y * width + x] = 0;
+        }
+    }
+    for value in 0..=255_u8 {
+        let offset = 40 * width + 40 + usize::from(value);
+        values[offset] = value;
+    }
+    let source = input.join("no-blank-code.fits");
+    FitsFile::with_primary_image(ImageData::new(vec![width, height], PixelData::U8(values)))
+        .to_file(&source)
+        .unwrap();
+
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let image_path = product_path(&output, "images", "no-blank-code.fits");
+    assert!(
+        fs::symlink_metadata(image_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!product_path(&output, "masks", "no-blank-code.fits").exists());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(summary["errors"], 0);
+    assert_eq!(summary["kept"], 1);
+    assert_eq!(summary["files"][0]["masked_pixels"], 0);
+    assert!(
+        summary["files"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no unused integer pixel value")
+    );
+}
+
+#[test]
 fn detection_is_invariant_to_scaling_and_descriptive_headers() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
@@ -516,6 +561,45 @@ fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference
     assert_eq!(
         mask_file.primary().header.require_int("NAXIS2").unwrap(),
         height as i64
+    );
+}
+
+#[test]
+fn crop_mode_keeps_images_with_lookup_table_distortions() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let config_path = input.join("config.toml");
+    let config_text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("mode=\"mask\"", "mode=\"crop\"");
+    fs::write(&config_path, config_text).unwrap();
+    let source = input.join("lookup-distortion.fits");
+    create_fits(&source, -32, 96, 96, &artifact());
+    let mut fits = FitsFile::from_file(&source).unwrap();
+    fits.primary_mut()
+        .header
+        .set("CPDIS1", HeaderValue::String("LOOKUP".into()), None);
+    fits.to_file(&source).unwrap();
+
+    assert!(invoke(&input, &output, &config_path).success());
+    assert!(
+        fs::symlink_metadata(product_path(&output, "images", "lookup-distortion.fits"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!product_path(&output, "masks", "lookup-distortion.fits").exists());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(summary["kept"], 1);
+    assert!(
+        summary["files"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("lookup-table distortion")
     );
 }
 
@@ -852,6 +936,11 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
+    assert_eq!(summary["schema_version"], 2);
+    assert_eq!(summary["algorithm_version"], "tile-detector-v1");
+    assert_eq!(summary["policy_version"], "heuristics-v1");
+    assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(summary["source_config_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(summary["clipped"], 0);
     assert_eq!(summary["proposed"], 1);
     assert_eq!(summary["files"][0]["masked_pixels"], 0);
