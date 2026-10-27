@@ -91,6 +91,26 @@ impl OutputLayout {
         Ok(PathBuf::from(filename))
     }
 
+    /// Return the science-image destination for a newly generated crop.
+    /// Kept and pass-through images retain the original relative name.
+    pub fn cropped_image_path(&self, relative: &Path) -> anyhow::Result<PathBuf> {
+        validate_relative(relative)?;
+        let file_name = relative
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("crop output path has no file name"))?;
+        let mut cropped_name = relative
+            .file_stem()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from(file_name));
+        cropped_name.push("_cropped");
+        if let Some(extension) = relative.extension() {
+            cropped_name.push(".");
+            cropped_name.push(extension);
+        }
+        let cropped_relative = relative.with_file_name(cropped_name);
+        self.product_path(ProductCategory::Image, &cropped_relative)
+    }
+
     pub fn reason_mask_path(&self, relative: &Path) -> anyhow::Result<PathBuf> {
         self.product_path(ProductCategory::ReasonMask, relative)
     }
@@ -216,6 +236,12 @@ mod tests {
                 .product_path(ProductCategory::Image, Path::new("night/frame.fits"))
                 .unwrap(),
             output.join("runs/20261027T120000000Z/images/night/frame.fits")
+        );
+        assert_eq!(
+            layout
+                .cropped_image_path(Path::new("night/frame.fits"))
+                .unwrap(),
+            output.join("runs/20261027T120000000Z/images/night/frame_cropped.fits")
         );
         assert!(layout.run().join("masks").is_dir());
         assert!(layout.run().join("previews").is_dir());

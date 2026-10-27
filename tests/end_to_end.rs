@@ -20,7 +20,22 @@ fn run_dir(output: &Path) -> PathBuf {
 }
 
 fn product_path(output: &Path, category: &str, relative: &str) -> PathBuf {
-    run_dir(output).join(category).join(relative)
+    let base = run_dir(output).join(category);
+    let path = base.join(relative);
+    if category == "images" && !path.exists() {
+        let relative = Path::new(relative);
+        let mut name = relative
+            .file_stem()
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| relative.file_name().unwrap().to_os_string());
+        name.push("_cropped");
+        if let Some(extension) = relative.extension() {
+            name.push(".");
+            name.push(extension);
+        }
+        return base.join(relative.with_file_name(name));
+    }
+    path
 }
 
 fn summary_path(output: &Path) -> PathBuf {
@@ -65,7 +80,7 @@ fn config(dir: &Path) {
         "[processing]\nthreads=2\nrecursive=false\nmemory_budget_mib=1024\nmaximum_image_mib=256\nmode=\"mask\"\n",
     )
     .unwrap();
-    fs::write(dir.join("heuristics.toml"), "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\n").unwrap();
+    fs::write(dir.join("heuristics.toml"), "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\nmaximum_crop_sacrifice_fraction=0.25\n").unwrap();
 }
 
 fn invoke(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
@@ -840,6 +855,12 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
         .unwrap()
         .replace("mode=\"mask\"", "mode=\"crop\"");
     fs::write(&config_path, config_text).unwrap();
+    let heuristic_path = input.join("heuristics.toml");
+    let heuristic_text = fs::read_to_string(&heuristic_path).unwrap().replace(
+        "maximum_crop_sacrifice_fraction=0.25",
+        "maximum_crop_sacrifice_fraction=1.0",
+    );
+    fs::write(&heuristic_path, heuristic_text).unwrap();
 
     let (width, height) = (128, 128);
     let mut pixels = vec![0.0; width * height];
@@ -857,6 +878,8 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
     let original = FitsFile::from_file(&source).unwrap();
     let cropped =
         FitsFile::from_file(product_path(&output, "images", "circular-field.fits")).unwrap();
+    assert!(product_path(&output, "images", "circular-field_cropped.fits").exists());
+    assert!(!run_dir(&output).join("images/circular-field.fits").exists());
     let header = &cropped.primary().header;
     assert_eq!(header.get_string("CLIPSHAP"), Some("RECTANGLE"));
     assert!(header.get_float("CLIPRAD").is_none());
@@ -958,7 +981,7 @@ fn crop_accounting_reports_preexisting_undefined_geometry_overlap() {
     assert!(image["proposed_mask_pixels"].as_u64().unwrap() > 0);
     assert!(matches!(
         image["reason_code"].as_str().unwrap(),
-        "crop_applied" | "crop_utility_rejected"
+        "crop_applied" | "crop_utility_rejected" | "crop_sacrifice_limit"
     ));
 }
 
@@ -1021,6 +1044,52 @@ fn crop_mode_keeps_source_when_valid_pixel_loss_dominates() {
             .as_str()
             .unwrap()
             .contains("rejected; source retained")
+    );
+}
+
+#[test]
+fn crop_mode_keeps_source_when_geometry_sacrifices_too_much_clean_area() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let config_path = input.join("config.toml");
+    let config_text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("mode=\"mask\"", "mode=\"crop\"");
+    fs::write(&config_path, config_text).unwrap();
+    let heuristic_path = input.join("heuristics.toml");
+    let heuristic_text = fs::read_to_string(&heuristic_path).unwrap().replace(
+        "maximum_crop_sacrifice_fraction=0.25",
+        "maximum_crop_sacrifice_fraction=0.10",
+    );
+    fs::write(&heuristic_path, heuristic_text).unwrap();
+
+    let source = input.join("four-corners.fits");
+    create_fits(&source, 16, 96, 96, &artifact());
+    assert!(invoke(&input, &output, &config_path).success());
+
+    let output_path = product_path(&output, "images", "four-corners.fits");
+    let kept = FitsFile::from_file(&output_path).unwrap();
+    assert_eq!(kept.primary().header.require_int("NAXIS1").unwrap(), 96);
+    assert_eq!(kept.primary().header.require_int("NAXIS2").unwrap(), 96);
+    assert!(
+        fs::symlink_metadata(output_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!product_path(&output, "masks", "four-corners.fits").exists());
+    let result: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(result["kept"], 1);
+    assert_eq!(result["files"][0]["reason_code"], "crop_sacrifice_limit");
+    assert!(
+        result["files"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("configured maximum")
     );
 }
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -298,7 +299,11 @@ def verify_tree(
     images = sorted((output_dir / "images").rglob("*"))
     images = [path for path in images if path.is_file()]
     summary = json.loads((output_dir / "summary.json").read_text())
-    records = {Path(record["input"]): record for record in summary["files"]}
+    records = {
+        os.path.normpath(record["output_image"]): record
+        for record in summary["files"]
+        if record.get("output_image")
+    }
     if summary.get("schema_version", 0) >= 8 and summary["output_images"] != len(images):
         raise AssertionError(
             f"summary reports {summary['output_images']} output images but found {len(images)}"
@@ -309,13 +314,13 @@ def verify_tree(
         )
     checked_images = checked_masks = checked_reason_masks = passthrough_count = 0
     for output_path in images:
-        relative = output_path.relative_to(output_dir / "images")
+        record = records.get(os.path.normpath(str(output_path.absolute())))
+        if record is None:
+            raise AssertionError(f"{output_path}: no matching per-input summary record")
+        relative = Path(record["input"])
         source_path = input_dir / relative
         if not source_path.is_file():
             raise AssertionError(f"no matching input for output {output_path}")
-        record = records.get(relative)
-        if record is None:
-            raise AssertionError(f"{output_path}: no matching per-input summary record")
         status = record["status"]
         if status == "ignored" or (status == "error" and output_path.is_symlink()):
             verify_passthrough_symlink(source_path, output_path)

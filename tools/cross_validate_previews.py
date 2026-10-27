@@ -60,7 +60,9 @@ def main() -> int:
         if not png_name:
             continue
         source_path = args.input_dir / record["input"]
-        cropped_path = args.output_dir / "images" / record["input"]
+        cropped_path = Path(record["output_image"])
+        if not cropped_path.is_absolute():
+            cropped_path = args.output_dir / "images" / cropped_path
         png_path = Path(png_name)
         source, _ = image_data(source_path)
         cropped, _ = image_data(cropped_path)

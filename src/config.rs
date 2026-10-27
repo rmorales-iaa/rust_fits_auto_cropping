@@ -86,6 +86,12 @@ pub struct HeuristicRules {
     pub maximum_evidence_ratio: f64,
     pub valid_pixel_loss_cost: f64,
     pub minimum_net_utility: f64,
+    #[serde(default = "default_maximum_crop_sacrifice_fraction")]
+    pub maximum_crop_sacrifice_fraction: f64,
+}
+
+fn default_maximum_crop_sacrifice_fraction() -> f64 {
+    0.25
 }
 
 impl Config {
@@ -160,6 +166,11 @@ impl HeuristicsConfig {
         {
             bail!("heuristic evidence, loss-cost and utility values are invalid");
         }
+        if !h.maximum_crop_sacrifice_fraction.is_finite()
+            || !(0.0..=1.0).contains(&h.maximum_crop_sacrifice_fraction)
+        {
+            bail!("heuristics.maximum_crop_sacrifice_fraction must be in [0, 1]");
+        }
         Ok(())
     }
 }
@@ -200,6 +211,7 @@ minimum_evidence_ratio = 1.25
 maximum_evidence_ratio = 5.0
 valid_pixel_loss_cost = 1.5
 minimum_net_utility = 0.001
+maximum_crop_sacrifice_fraction = 0.25
 "#;
 
 #[cfg(test)]
@@ -220,6 +232,16 @@ mod tests {
         );
         let c: HeuristicsConfig = toml::from_str(&text).unwrap();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_crop_sacrifice_fraction_outside_unit_interval() {
+        let text = DEFAULT_HEURISTICS.replace(
+            "maximum_crop_sacrifice_fraction = 0.25",
+            "maximum_crop_sacrifice_fraction = 1.1",
+        );
+        let config: HeuristicsConfig = toml::from_str(&text).unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]

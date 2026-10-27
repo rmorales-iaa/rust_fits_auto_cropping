@@ -474,22 +474,41 @@ fn process_one(
                         * valid_loss_fraction
                         / (1.0 - valid_loss_fraction).max(f64::EPSILON);
                     outcome.net_utility = outcome.artifact_benefit - outcome.valid_pixel_loss;
-                    crop_accepted =
-                        outcome.net_utility >= heuristics.heuristics.minimum_net_utility;
+                    let remaining_defined = defined
+                        .saturating_sub(outcome.artifact_pixels_removed)
+                        .max(1);
+                    let crop_sacrifice_fraction =
+                        outcome.unmasked_pixels_sacrificed as f64 / remaining_defined as f64;
+                    crop_accepted = crop_sacrifice_fraction
+                        <= heuristics.heuristics.maximum_crop_sacrifice_fraction
+                        && outcome.net_utility >= heuristics.heuristics.minimum_net_utility;
                     if !crop_accepted {
                         outcome.status = OutcomeKind::Kept;
-                        outcome.reason_code = "crop_utility_rejected";
+                        outcome.reason_code = if crop_sacrifice_fraction
+                            > heuristics.heuristics.maximum_crop_sacrifice_fraction
+                        {
+                            "crop_sacrifice_limit"
+                        } else {
+                            "crop_utility_rejected"
+                        };
                     }
                     outcome.reason.push_str(&format!(
-                        "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels and sacrifices {} unmasked pixels; crop utility {:.4} (benefit {:.4} - loss {:.4}) {}",
+                        "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels and sacrifices {} unmasked pixels ({:.1}% of remaining defined area; configured maximum {:.1}%); crop utility {:.4} (benefit {:.4} - loss {:.4}) {}",
                         rect.shape_name(), bounds.x, bounds.y, bounds.width, bounds.height, rect.retained_pixels(),
                         outcome.artifact_pixels_removed, outcome.unmasked_pixels_sacrificed,
+                        100.0 * crop_sacrifice_fraction,
+                        100.0 * heuristics.heuristics.maximum_crop_sacrifice_fraction,
                         outcome.net_utility, outcome.artifact_benefit, outcome.valid_pixel_loss,
                         if crop_accepted { "accepted" } else { "rejected; source retained" }
                     ));
                 }
                 if !options.dry_run {
-                    let image_path = match layout.product_path(ProductCategory::Image, rel) {
+                    let image_path_result = if crop_accepted {
+                        layout.cropped_image_path(rel)
+                    } else {
+                        layout.product_path(ProductCategory::Image, rel)
+                    };
+                    let image_path = match image_path_result {
                         Ok(path) => path,
                         Err(error) => {
                             outcome.status = OutcomeKind::Error;

@@ -168,6 +168,7 @@ mod tests {
             maximum_evidence_ratio: 5.0,
             valid_pixel_loss_cost: 1.5,
             minimum_net_utility: 0.001,
+            maximum_crop_sacrifice_fraction: 0.25,
         }
     }
 
