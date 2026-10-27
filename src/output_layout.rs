@@ -91,6 +91,10 @@ impl OutputLayout {
         Ok(PathBuf::from(filename))
     }
 
+    pub fn reason_mask_path(&self, relative: &Path) -> anyhow::Result<PathBuf> {
+        self.product_path(ProductCategory::ReasonMask, relative)
+    }
+
     pub fn manifest_path(&self, relative: &Path) -> anyhow::Result<PathBuf> {
         let path = self.product_path(ProductCategory::Manifest, relative)?;
         let mut filename = OsString::from(path.as_os_str());
@@ -105,6 +109,7 @@ pub enum ProductCategory {
     Mask,
     Preview,
     Manifest,
+    ReasonMask,
 }
 
 impl ProductCategory {
@@ -114,6 +119,7 @@ impl ProductCategory {
             Self::Mask => "masks",
             Self::Preview => "previews",
             Self::Manifest => "manifests",
+            Self::ReasonMask => "reason_masks",
         }
     }
 }

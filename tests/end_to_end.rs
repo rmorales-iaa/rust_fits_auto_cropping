@@ -97,7 +97,11 @@ fn invoke_recursive(input: &Path, output: &Path, cfg: &Path) -> std::process::Ex
         .unwrap()
 }
 
-fn invoke_png(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
+fn invoke_png_with_reason_mask(
+    input: &Path,
+    output: &Path,
+    cfg: &Path,
+) -> std::process::ExitStatus {
     Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
         .args(["--input-dir"])
         .arg(input)
@@ -107,7 +111,22 @@ fn invoke_png(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStat
         .arg(cfg)
         .args(["--heuristics"])
         .arg(cfg.parent().unwrap().join("heuristics.toml"))
-        .args(["--mode", "crop", "--png"])
+        .args(["--mode", "crop", "--png", "--reason-mask"])
+        .status()
+        .unwrap()
+}
+
+fn invoke_reason_mask(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
+    Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
+        .args(["--input-dir"])
+        .arg(input)
+        .args(["--output-dir"])
+        .arg(output)
+        .args(["--config"])
+        .arg(cfg)
+        .args(["--heuristics"])
+        .arg(cfg.parent().unwrap().join("heuristics.toml"))
+        .arg("--reason-mask")
         .status()
         .unwrap()
 }
@@ -131,6 +150,73 @@ fn read_mask(path: &Path) -> Vec<u8> {
         },
         _ => panic!("expected image"),
     }
+}
+
+fn read_reason_mask(path: &Path) -> (Vec<usize>, Vec<u8>, String) {
+    let f = FitsFile::from_file(path).unwrap();
+    let image = match &f.primary().data {
+        HduData::Image(img) => img,
+        _ => panic!("expected reason image"),
+    };
+    let values = match &image.pixels {
+        PixelData::U8(values) => values.clone(),
+        _ => panic!("expected byte reason plane"),
+    };
+    (
+        image.axes.clone(),
+        values,
+        f.primary()
+            .header
+            .get_string("RSCHEME")
+            .unwrap()
+            .to_string(),
+    )
+}
+
+#[test]
+fn optional_reason_plane_records_actions_and_is_checksummed_in_manifest() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let mut pixels = artifact();
+    pixels[0] = f64::NAN;
+    create_fits(&input.join("reason.fits"), -64, 96, 96, &pixels);
+
+    assert!(invoke_reason_mask(&input, &output, &input.join("config.toml")).success());
+    let reason_path = product_path(&output, "reason_masks", "reason.fits");
+    let (axes, codes, scheme) = read_reason_mask(&reason_path);
+    assert_eq!(axes, [96, 96]);
+    assert_eq!(scheme, "PIXACT1");
+    assert!(codes.iter().all(|code| *code <= 3));
+    assert_eq!(codes[0], 3, "pre-existing undefined takes precedence");
+    assert!(
+        codes[1..24].contains(&1),
+        "accepted artifact boundary is marked"
+    );
+    assert!(codes.contains(&0));
+
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(summary["schema_version"], 7);
+    assert_eq!(
+        summary["files"][0]["output_reason_mask"],
+        reason_path.to_string_lossy().as_ref()
+    );
+    let manifest_path = run_dir(&output)
+        .join("manifests")
+        .join("reason.fits.complete.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    let reason_product = manifest["products"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|product| product["kind"] == "reason_mask")
+        .unwrap();
+    assert_eq!(reason_product["sha256"], file_sha256(&reason_path));
+    assert_eq!(reason_product["sha256"].as_str().unwrap().len(), 64);
 }
 
 #[test]
@@ -168,6 +254,7 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
         &vec![100.0; 96 * 96],
     );
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    assert!(!run_dir(&output).join("reason_masks").exists());
     let f = FitsFile::from_file(product_path(&output, "images", "float.fits")).unwrap();
     let img = match &f.primary().data {
         HduData::Image(i) => i,
@@ -764,7 +851,7 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     }
     let source = input.join("circular-field.fits");
     create_fits(&source, 16, width, height, &pixels);
-    assert!(invoke_png(&input, &output, &config_path).success());
+    assert!(invoke_png_with_reason_mask(&input, &output, &config_path).success());
 
     let original = FitsFile::from_file(&source).unwrap();
     let cropped =
@@ -873,7 +960,7 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     assert_eq!(summary["files"][0]["crop_excluded_undefined_pixels"], 0);
     assert_eq!(summary["files"][0]["crop_applied_undefined_pixels"], 0);
     assert_eq!(summary["files"][0]["crop_artifact_pixels_retained"], 0);
-    assert_eq!(manifest["products"].as_array().unwrap().len(), 3);
+    assert_eq!(manifest["products"].as_array().unwrap().len(), 4);
     for product in manifest["products"].as_array().unwrap() {
         let product_path = run_dir(&output).join(product["path"].as_str().unwrap());
         assert_eq!(product["sha256"], file_sha256(&product_path));
@@ -889,6 +976,20 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     assert_eq!(output_mask.len(), width * height);
     assert_eq!(output_mask[0], 1);
     assert_eq!(output_mask[64 * width + 64], 0);
+    let (reason_axes, reason_codes, _) = read_reason_mask(&product_path(
+        &output,
+        "reason_masks",
+        "circular-field.fits",
+    ));
+    assert_eq!(reason_axes, [width, height]);
+    assert!(
+        reason_codes.contains(&1),
+        "excluded detector pixels have code 1"
+    );
+    assert!(
+        reason_codes.contains(&2),
+        "crop-only sacrifices have code 2"
+    );
 }
 
 #[test]
@@ -1166,7 +1267,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 6);
+    assert_eq!(summary["schema_version"], 7);
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
     assert_eq!(summary["policy_version"], "heuristics-v1");
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);

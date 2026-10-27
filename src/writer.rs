@@ -10,6 +10,9 @@ use fitskit::{FitsFile, HduData, Header, HeaderValue, ImageData, Keyword, PixelD
 use std::{fs, io::Cursor, path::Path};
 use tempfile::{NamedTempFile, TempDir};
 
+mod reason_mask_writer;
+pub use reason_mask_writer::write_reason_mask;
+
 /// Create a uint8 mask image with WCS and non-structural source cards.
 pub fn write_mask(
     source_header: &Header,
@@ -31,6 +34,7 @@ pub fn write_mask(
             output.primary_mut().header.push(keyword.clone());
         }
     }
+    normalize_history_cards(&mut output.primary_mut().header);
     stamp_processing_metadata(&mut output.primary_mut().header);
     push_history(
         &mut output.primary_mut().header,
@@ -53,6 +57,7 @@ pub fn write_masked_image(
         bail!("source changed: expected exactly one HDU");
     }
     let hdu = output.primary_mut();
+    normalize_history_cards(&mut hdu.header);
     let image = match &mut hdu.data {
         HduData::Image(image) => image,
         _ => bail!("source primary HDU is not an image"),
@@ -279,6 +284,7 @@ pub fn write_cropped_image(
         bail!("source changed: expected exactly one HDU");
     }
     let hdu = output.primary_mut();
+    normalize_history_cards(&mut hdu.header);
     let image = match &mut hdu.data {
         HduData::Image(image) => image,
         _ => bail!("source primary HDU is not an image"),
@@ -409,7 +415,7 @@ pub fn write_cropped_image(
     )
 }
 
-fn stamp_processing_metadata(header: &mut Header) {
+pub(super) fn stamp_processing_metadata(header: &mut Header) {
     let now = Utc::now();
     let creator = format!(
         "{} v{}",
@@ -617,8 +623,42 @@ fn remove_data_extrema(header: &mut Header) {
         .retain(|card| !matches!(card.name.as_str(), "DATAMIN" | "DATAMAX"));
 }
 
-fn push_history(header: &mut Header, text: &str) {
+pub(super) fn push_history(header: &mut Header, text: &str) {
+    header.keywords.extend(history_cards(text));
+}
+
+/// Convert value-style HISTORY cards to FITS commentary cards before output.
+/// Some legacy inputs encode HISTORY as quoted string keywords; the generic
+/// serializer would turn long values into OGIP CONTINUE cards. Converting the
+/// same text to standard commentary avoids adding nonstandard long strings.
+pub(super) fn normalize_history_cards(header: &mut Header) {
+    let previous = std::mem::take(&mut header.keywords);
+    let mut normalized = Vec::with_capacity(previous.len());
+    for keyword in previous {
+        if keyword.name == "HISTORY"
+            && let Some(value) = keyword.value
+        {
+            let mut text = match value {
+                HeaderValue::String(value) => value,
+                other => other.to_string(),
+            };
+            if let Some(comment) = keyword.comment {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(&comment);
+            }
+            normalized.extend(history_cards(&text));
+        } else {
+            normalized.push(keyword);
+        }
+    }
+    header.keywords = normalized;
+}
+
+fn history_cards(text: &str) -> Vec<Keyword> {
     const CARD_TEXT_BYTES: usize = 60;
+    let mut cards = Vec::new();
     let mut remaining = text.trim();
     while !remaining.is_empty() {
         let mut end = remaining.len().min(CARD_TEXT_BYTES);
@@ -630,11 +670,10 @@ fn push_history(header: &mut Header, text: &str) {
         {
             end = boundary.max(1);
         }
-        header
-            .keywords
-            .push(Keyword::commentary("HISTORY", &remaining[..end]));
+        cards.push(Keyword::commentary("HISTORY", &remaining[..end]));
         remaining = remaining[end..].trim_start();
     }
+    cards
 }
 
 fn is_crpix_keyword(name: &str, prefix: &str) -> bool {
@@ -729,7 +768,7 @@ fn verify_cropped_file(
     Ok(())
 }
 
-fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
+pub(super) fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
     let parent = destination
         .parent()
         .context("FITS destination has no parent")?;
@@ -835,7 +874,7 @@ fn restore_backup(path: &Path, backup: Option<NamedTempFile>) -> anyhow::Result<
     Ok(())
 }
 
-fn is_structural_or_data_summary(key: &str) -> bool {
+pub(super) fn is_structural_or_data_summary(key: &str) -> bool {
     matches!(
         key,
         "SIMPLE"
@@ -951,9 +990,9 @@ fn float_slice(pixels: &PixelData) -> anyhow::Result<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_product_pair_with, write_products};
+    use super::{publish_product_pair_with, write_products, write_reason_mask};
     use crate::fits_image::read_image;
-    use fitskit::{FitsFile, HduData, HeaderValue, ImageData, PixelData};
+    use fitskit::{FitsFile, HduData, HeaderValue, ImageData, Keyword, PixelData};
     use sha2::{Digest, Sha256};
     use std::fs;
 
@@ -1007,6 +1046,38 @@ mod tests {
         assert!(fail_second_publish(&staged_image, &image, &staged_mask, &mask).is_err());
         assert!(!image.exists());
         assert!(!mask.exists());
+    }
+
+    #[test]
+    fn reason_plane_normalizes_legacy_value_history_without_continue_cards() {
+        let temp = tempfile::tempdir().unwrap();
+        let reason = temp.path().join("reason.fits");
+        let history =
+            "legacy generated history record with enough text to require an OGIP continuation card";
+        let mut fits = FitsFile::with_primary_image(ImageData::new(
+            vec![2, 2],
+            PixelData::F64(vec![1.0, 2.0, 3.0, 4.0]),
+        ));
+        fits.primary_mut().header.push(Keyword::with_value(
+            "HISTORY",
+            HeaderValue::String(history.into()),
+            None,
+        ));
+        write_reason_mask(&fits.primary().header, &reason, 2, 2, &[0, 1, 2, 3]).unwrap();
+
+        let bytes = fs::read(&reason).unwrap();
+        assert!(!bytes.windows(8).any(|window| window == b"CONTINUE"));
+        let output = FitsFile::from_file(reason).unwrap();
+        let history_text = output
+            .primary()
+            .header
+            .iter()
+            .filter(|keyword| keyword.name == "HISTORY")
+            .filter_map(|keyword| keyword.comment.as_deref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(history_text.contains(history));
+        output.primary().verify_datasum().unwrap();
     }
 
     #[test]

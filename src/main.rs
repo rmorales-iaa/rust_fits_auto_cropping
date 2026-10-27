@@ -10,6 +10,7 @@ mod model;
 mod output_layout;
 mod pipeline;
 mod preview;
+mod reason_mask;
 mod report;
 mod writer;
 

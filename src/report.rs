@@ -49,7 +49,7 @@ pub fn write(
 ) -> anyhow::Result<()> {
     let count = |f: fn(&OutcomeKind) -> bool| outcomes.iter().filter(|o| f(&o.status)).count();
     let summary = Summary {
-        schema_version: 6,
+        schema_version: 7,
         run_id,
         created_utc: Utc::now().to_rfc3339(),
         program: env!("CARGO_PKG_NAME"),
@@ -77,7 +77,7 @@ pub fn write(
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason_code,reason,width,height,source_sha256,original_undefined_pixels,candidate_mask_pixels,candidate_undefined_pixels,candidate_proposed_overlap_pixels,proposed_mask_pixels,proposed_undefined_pixels,applied_artifact_pixels,applied_artifact_undefined_pixels,masked_pixels,crop_excluded_undefined_pixels,crop_applied_undefined_pixels,crop_artifact_pixels_retained,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,output_manifest,elapsed_ms\n",
+        "input,status,reason_code,reason,width,height,source_sha256,original_undefined_pixels,candidate_mask_pixels,candidate_undefined_pixels,candidate_proposed_overlap_pixels,proposed_mask_pixels,proposed_undefined_pixels,applied_artifact_pixels,applied_artifact_undefined_pixels,masked_pixels,crop_excluded_undefined_pixels,crop_applied_undefined_pixels,crop_artifact_pixels_retained,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_reason_mask,output_png,output_manifest,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -129,6 +129,10 @@ pub fn write(
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
             o.output_mask
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            o.output_reason_mask
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),

@@ -10,8 +10,8 @@ use crate::{
     model::{FileOutcome, OutcomeKind},
     output_layout::{OutputLayout, ProductCategory},
     preview::write_crop_preview,
-    report,
-    writer::{write_cropped_products, write_products},
+    reason_mask, report,
+    writer::{write_cropped_products, write_products, write_reason_mask},
 };
 use anyhow::{Context, bail};
 use chrono::Utc;
@@ -56,6 +56,7 @@ struct ProductOptions {
     dry_run: bool,
     overwrite: bool,
     png_preview: bool,
+    reason_mask: bool,
 }
 impl std::fmt::Display for BatchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -135,7 +136,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let mut logger = Logger::create(&run_dir, &run_id)?;
     logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output_root":layout.root(),"run_directory":&run_dir,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
         "source_heuristics_sha256":source_heuristics_hash,"effective_heuristics_sha256":heuristics_hash,
-        "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"algorithm_version":heuristics.heuristics.reference_model.algorithm_version(heuristics.heuristics.evidence_model),"git_revision":env!("RUST_FITS_GIT_REVISION"),"git_dirty":env!("RUST_FITS_GIT_DIRTY")=="true","executable_sha256":executable_sha256,"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
+        "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"algorithm_version":heuristics.heuristics.reference_model.algorithm_version(heuristics.heuristics.evidence_model),"git_revision":env!("RUST_FITS_GIT_REVISION"),"git_dirty":env!("RUST_FITS_GIT_DIRTY")=="true","executable_sha256":executable_sha256,"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run,"reason_mask":args.reason_mask}))?;
     let mut paths = discover(&input, config.processing.recursive)?;
     paths.sort();
     logger.event(&run_id,"discovery_complete",serde_json::json!({"candidate_fits_files":paths.len(),"workers":workers,"memory_budget_mib":config.processing.memory_budget_mib,"maximum_image_mib":config.processing.maximum_image_mib}))?;
@@ -161,6 +162,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
                         dry_run: args.dry_run,
                         overwrite: args.overwrite,
                         png_preview: args.png,
+                        reason_mask: args.reason_mask,
                     },
                 );
                 match logger.lock() {
@@ -495,6 +497,22 @@ fn process_one(
                     } else {
                         None
                     };
+                    let wants_reason_mask = options.reason_mask
+                        && (crop_accepted
+                            || matches!(config.processing.mode, ProcessingMode::Mask));
+                    let reason_mask_path = if wants_reason_mask {
+                        match layout.reason_mask_path(rel) {
+                            Ok(path) => Some(path),
+                            Err(error) => {
+                                outcome.status = OutcomeKind::Error;
+                                outcome.reason_code = "output_path_error";
+                                outcome.reason = error.to_string();
+                                return finish(outcome, timer);
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let manifest_path = match layout.manifest_path(rel) {
                         Ok(path) => path,
                         Err(error) => {
@@ -508,6 +526,9 @@ fn process_one(
                         && (path_exists(&image_path)
                             || path_exists(&mask_path)
                             || path_exists(&manifest_path)
+                            || reason_mask_path
+                                .as_ref()
+                                .is_some_and(|path| path_exists(path))
                             || png_path.as_ref().is_some_and(|path| path_exists(path)))
                     {
                         outcome.status = OutcomeKind::Error;
@@ -567,6 +588,16 @@ fn process_one(
                                     );
                                     return finish(outcome, timer);
                                 }
+                                if let Some(reason_mask) = &reason_mask_path
+                                    && let Err(cleanup_error) = remove_existing_product(reason_mask)
+                                {
+                                    outcome.status = OutcomeKind::Error;
+                                    outcome.reason_code = "output_cleanup_error";
+                                    outcome.reason = format!(
+                                        "{e}; could not remove stale reason-plane product: {cleanup_error}"
+                                    );
+                                    return finish(outcome, timer);
+                                }
                                 if let Some(preview) = &png_path
                                     && let Err(cleanup_error) = remove_existing_product(preview)
                                 {
@@ -618,6 +649,43 @@ fn process_one(
                     }
                     outcome.output_image = Some(image_path);
                     outcome.output_mask = has_mask.then_some(mask_path);
+                    if let Some(reason_path) = reason_mask_path {
+                        let crop_exclusion = crop_accepted.then(|| {
+                            let region = crop.expect("accepted crop has a region");
+                            (0..image.width * image.height)
+                                .map(|i| !region.retains(i % image.width, i / image.width))
+                                .collect::<Vec<_>>()
+                        });
+                        let action_exclusion = crop_exclusion.as_deref().unwrap_or(&detection.mask);
+                        let codes = match reason_mask::build(
+                            &image.values,
+                            &detection.mask,
+                            action_exclusion,
+                        ) {
+                            Ok(codes) => codes,
+                            Err(error) => {
+                                outcome.status = OutcomeKind::Error;
+                                outcome.reason_code = "reason_plane_error";
+                                outcome.reason = error.to_string();
+                                return finish(outcome, timer);
+                            }
+                        };
+                        if let Err(error) = write_reason_mask(
+                            &image.source_fits.primary().header,
+                            &reason_path,
+                            image.width,
+                            image.height,
+                            &codes,
+                        ) {
+                            outcome.status = OutcomeKind::Error;
+                            outcome.reason_code = "reason_plane_write_error";
+                            outcome.reason = format!(
+                                "science/mask products were written but the optional reason plane failed: {error:#}"
+                            );
+                            return finish(outcome, timer);
+                        }
+                        outcome.output_reason_mask = Some(reason_path);
+                    }
                     if has_mask {
                         outcome.masked_pixels = if crop_accepted {
                             outcome.artifact_pixels_removed + outcome.unmasked_pixels_sacrificed
@@ -791,6 +859,7 @@ fn publish_completion_manifest(
             has_mask.then_some(outcome.output_mask.as_deref()).flatten(),
         ),
         ("preview", outcome.output_png.as_deref()),
+        ("reason_mask", outcome.output_reason_mask.as_deref()),
     ] {
         let Some(path) = path else { continue };
         let run_relative = path
