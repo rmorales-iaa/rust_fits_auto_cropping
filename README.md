@@ -21,7 +21,7 @@ Pass `--help` for all options. The input and output directory trees must not ove
 
 `output/images/` contains processed or unchanged copies; `output/masks/` contains companion uint8 masks where one means newly masked. `output/reports/<run-id>/` contains JSON and CSV summaries. `output/logger/` contains UTC ISO-timestamped JSON Lines activity logs. Integer image pixels use a safe FITS `BLANK` sentinel; float pixels use NaN. Retained raw samples, dimensions and the original header are checked after writing; checksum cards are regenerated.
 
-Runtime settings live in [input/config.toml](input/config.toml). Read the [user guide](input/doc/user-guide.md), [configuration reference](input/doc/configuration.md), [architecture](input/doc/architecture.md), and [validation record](input/doc/validation.md). Cropping is not implemented; this release preserves the pixel grid and WCS. Gzip-compressed FITS images are not supported.
+Operational settings live in [input/config.toml](input/config.toml), and science decision rules live in [input/heuristics.toml](input/heuristics.toml). Read the [user guide](input/doc/user-guide.md), [configuration reference](input/doc/configuration.md), [architecture](input/doc/architecture.md), [algorithm limits](input/doc/algorithm.md), and [validation record](input/doc/validation.md). Crop mode is deferred; this release preserves the pixel grid and WCS. Gzip-compressed and multi-HDU inputs are ignored.
 
 ## Project development
 

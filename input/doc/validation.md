@@ -31,11 +31,12 @@ The recorded run classified **13 clipped, 4 kept, 0 ignored and 8 errors**. The 
 
 Main outputs:
 
-- Summary: `/fast_disk/tmp/clippling_test/output/reports/20261027T103158.895551663Z/summary.json`
-- Per-image decisions and diagnostics: `/fast_disk/tmp/clippling_test/output/reports/20261027T103158.895551663Z/per-image.csv`
+- Summary: `/fast_disk/tmp/clippling_test/output/reports/20261027T103352.466257843Z/summary.json`
+- Per-image decisions and diagnostics: `/fast_disk/tmp/clippling_test/output/reports/20261027T103352.466257843Z/per-image.csv`
 - Science products: `/fast_disk/tmp/clippling_test/output/images/`
 - Companion masks: `/fast_disk/tmp/clippling_test/output/masks/`
 - Activity logs: `/fast_disk/tmp/clippling_test/output/logger/`
+- Benchmark measurements: `/fast_disk/tmp/clippling_test/output/benchmarks/benchmark-summary.json`
 
 ## FITS interoperability
 
