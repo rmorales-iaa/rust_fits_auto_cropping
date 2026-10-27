@@ -12,80 +12,55 @@ impl CropRect {
     pub fn area(self) -> usize {
         self.width * self.height
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CropRegion {
-    Rectangle(CropRect),
-    Circle {
-        bounds: CropRect,
-        center_x: usize,
-        center_y: usize,
-        radius: f64,
-        retained_pixels: usize,
-    },
-}
-
-impl CropRegion {
     pub fn bounds(self) -> CropRect {
-        match self {
-            Self::Rectangle(rect) => rect,
-            Self::Circle { bounds, .. } => bounds,
-        }
+        self
     }
 
     pub fn retained_pixels(self) -> usize {
-        match self {
-            Self::Rectangle(rect) => rect.area(),
-            Self::Circle {
-                retained_pixels, ..
-            } => retained_pixels,
-        }
+        self.area()
     }
 
     pub fn shape_name(self) -> &'static str {
-        match self {
-            Self::Rectangle(_) => "rectangle",
-            Self::Circle { .. } => "circle",
-        }
+        "rectangle"
     }
 
     pub fn retains(self, x: usize, y: usize) -> bool {
-        match self {
-            Self::Rectangle(rect) => {
-                x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
-            }
-            Self::Circle {
-                center_x,
-                center_y,
-                radius,
-                ..
-            } => {
-                (x as f64 - center_x as f64).powi(2) + (y as f64 - center_y as f64).powi(2)
-                    <= radius * radius
-            }
-        }
+        let rect = self.bounds();
+        x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
     }
 }
 
-/// Choose the geometry that retains the most unmasked sample centers.
-/// Rectangle wins ties; both candidates are derived exclusively from the pixel mask.
-pub fn largest_clean_region(mask: &[bool], width: usize, height: usize) -> Option<CropRegion> {
+/// Choose the maximum-area axis-aligned rectangle containing only unmasked samples.
+///
+/// FITS crop products are kept fully rectangular: no circular bounding box with
+/// newly undefined corner samples is emitted. The guarantee is optimality over
+/// all axis-aligned rectangles for this detector mask, not ground-truth validity.
+pub fn largest_clean_region(mask: &[bool], width: usize, height: usize) -> Option<CropRect> {
     let rectangle = largest_unmasked_rectangle(mask, width, height)?;
     let Some(circle) = largest_unmasked_circle(mask, width, height) else {
-        return Some(CropRegion::Rectangle(rectangle));
+        return Some(rectangle);
     };
-    if circle.retained_pixels > rectangle.area() {
-        Some(CropRegion::Circle {
-            bounds: circle.bounds,
-            center_x: circle.center_x,
-            center_y: circle.center_y,
-            radius: circle.radius,
-            retained_pixels: circle.retained_pixels,
-        })
-    } else {
-        Some(CropRegion::Rectangle(rectangle))
+    if circle.retained_pixels <= rectangle.area() {
+        return Some(rectangle);
     }
+
+    // A circle can be the cleaner/higher-area field proposal, but FITS crop
+    // output must remain wholly rectangular. Fit the maximum clean rectangle
+    // inside the winning conservative circle, including the detector mask.
+    let mut outside_circle_or_artifact = vec![true; mask.len()];
+    let radius_squared = circle.radius * circle.radius;
+    for y in circle.bounds.y..circle.bounds.y + circle.bounds.height {
+        for x in circle.bounds.x..circle.bounds.x + circle.bounds.width {
+            let index = y * width + x;
+            let dx = x as f64 - circle.center_x as f64;
+            let dy = y as f64 - circle.center_y as f64;
+            if !mask[index] && dx * dx + dy * dy <= radius_squared {
+                outside_circle_or_artifact[index] = false;
+            }
+        }
+    }
+    largest_unmasked_rectangle(&outside_circle_or_artifact, width, height).or(Some(rectangle))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -371,6 +346,31 @@ mod tests {
     }
 
     #[test]
+    fn production_crop_selector_returns_only_the_maximal_clean_rectangle() {
+        let (width, height) = (11, 11);
+        let mut mask = vec![true; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                if (x as f64 - 5.0).powi(2) + (y as f64 - 5.0).powi(2) <= 25.0 {
+                    mask[y * width + x] = false;
+                }
+            }
+        }
+        let selected = largest_clean_region(&mask, width, height).unwrap();
+        let rect = selected;
+        assert!(rect.area() > 0);
+        assert!(
+            (rect.y..rect.y + rect.height)
+                .all(|y| (rect.x..rect.x + rect.width).all(|x| !mask[y * width + x]))
+        );
+        assert_eq!(
+            rect.area(),
+            largest_unmasked_rectangle(&mask, width, height)
+                .unwrap()
+                .area()
+        );
+    }
+    #[test]
     fn exact_circle_transform_matches_brute_force_small_grid_oracle() {
         let (width, height) = (4, 3);
         for pattern in 1_u16..(1 << (width * height)) - 1 {
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn circular_field_retains_more_pixels_than_its_clean_rectangle() {
+    fn circle_candidate_is_converted_to_the_maximum_inscribed_rectangle() {
         let (width, height) = (128, 128);
         let mut mask = vec![true; width * height];
         for y in 0..height {
@@ -469,25 +469,29 @@ mod tests {
                 }
             }
         }
-        let region = largest_clean_region(&mask, width, height).unwrap();
-        assert!(matches!(region, CropRegion::Circle { .. }));
-        let CropRegion::Circle {
-            center_x,
-            center_y,
-            radius,
-            retained_pixels,
-            ..
-        } = region
-        else {
-            unreachable!()
-        };
-        assert!(
-            retained_pixels
-                > largest_unmasked_rectangle(&mask, width, height)
-                    .unwrap()
-                    .area()
-        );
-        assert!(!mask[center_y * width + center_x]);
-        assert!(radius > 50.0);
+        let circle = largest_unmasked_circle(&mask, width, height).unwrap();
+        let unconstrained = largest_unmasked_rectangle(&mask, width, height).unwrap();
+        assert!(circle.retained_pixels > unconstrained.area());
+        let mut outside_circle = vec![true; mask.len()];
+        for y in circle.bounds.y..circle.bounds.y + circle.bounds.height {
+            for x in circle.bounds.x..circle.bounds.x + circle.bounds.width {
+                let dx = x as f64 - circle.center_x as f64;
+                let dy = y as f64 - circle.center_y as f64;
+                if !mask[y * width + x] && dx * dx + dy * dy <= circle.radius * circle.radius {
+                    outside_circle[y * width + x] = false;
+                }
+            }
+        }
+        let expected = largest_unmasked_rectangle(&outside_circle, width, height).unwrap();
+        let selected = largest_clean_region(&mask, width, height).unwrap();
+        assert_eq!(selected, expected);
+        assert!(selected.area() < unconstrained.area());
+        assert!((selected.y..selected.y + selected.height).all(|y| {
+            (selected.x..selected.x + selected.width).all(|x| {
+                let dx = x as f64 - circle.center_x as f64;
+                let dy = y as f64 - circle.center_y as f64;
+                !mask[y * width + x] && dx * dx + dy * dy <= circle.radius * circle.radius
+            })
+        }));
     }
 }

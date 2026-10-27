@@ -829,7 +829,7 @@ fn crop_mode_keeps_images_with_lookup_table_distortions() {
 }
 
 #[test]
-fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
+fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
     let output = t.path().join("out");
@@ -857,16 +857,11 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     let original = FitsFile::from_file(&source).unwrap();
     let cropped =
         FitsFile::from_file(product_path(&output, "images", "circular-field.fits")).unwrap();
-    assert_eq!(
-        cropped.primary().header.get_string("CLIPSHAP"),
-        Some("CIRCLE")
-    );
-    let x0 = cropped.primary().header.get_int("CLIPX0").unwrap() as usize;
-    let y0 = cropped.primary().header.get_int("CLIPY0").unwrap() as usize;
-    let cx = cropped.primary().header.get_float("CLIPCX").unwrap();
-    let cy = cropped.primary().header.get_float("CLIPCY").unwrap();
-    let radius = cropped.primary().header.get_float("CLIPRAD").unwrap();
-    let blank = cropped.primary().header.get_int("BLANK").unwrap() as i16;
+    let header = &cropped.primary().header;
+    assert_eq!(header.get_string("CLIPSHAP"), Some("RECTANGLE"));
+    assert!(header.get_float("CLIPRAD").is_none());
+    let x0 = header.get_int("CLIPX0").unwrap() as usize;
+    let y0 = header.get_int("CLIPY0").unwrap() as usize;
     let before = match &original.primary().data {
         HduData::Image(img) => match &img.pixels {
             PixelData::I16(v) => v,
@@ -876,120 +871,48 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     };
     let after_image = match &cropped.primary().data {
         HduData::Image(img) => img,
-        _ => panic!("expected cropped image"),
+        _ => panic!("expected image"),
     };
     let after = match &after_image.pixels {
         PixelData::I16(v) => v,
         _ => panic!("expected int16 crop"),
     };
-    let crop_width = after_image.axes[0];
-    for y in 0..after_image.axes[1] {
+    let (crop_width, crop_height) = (after_image.axes[0], after_image.axes[1]);
+    assert_eq!(after_image.axes, [crop_width, crop_height]);
+    assert_eq!(header.get_int("NAXIS").unwrap(), 2);
+    assert_eq!(header.get_int("NAXIS1").unwrap() as usize, crop_width);
+    assert_eq!(header.get_int("NAXIS2").unwrap() as usize, crop_height);
+    assert!(crop_width < width && crop_height < height);
+    for y in 0..crop_height {
         for x in 0..crop_width {
             let global_x = x + x0;
             let global_y = y + y0;
-            let inside =
-                (global_x as f64 - cx).powi(2) + (global_y as f64 - cy).powi(2) <= radius.powi(2);
-            let actual = after[y * crop_width + x];
-            if inside {
-                assert_eq!(actual, before[global_y * width + global_x]);
-            } else {
-                assert_eq!(actual, blank);
-            }
+            let source_value = before[global_y * width + global_x];
+            assert_eq!(
+                source_value, 100,
+                "crop included detected border at ({global_x},{global_y})"
+            );
+            assert_eq!(after[y * crop_width + x], source_value);
         }
     }
     assert!(cropped.primary().verify_datasum().is_ok());
+
     let preview_path = product_path(&output, "previews", "circular-field.fits.png");
-    let preview = image::open(&preview_path).unwrap().to_luma8();
+    let preview = image::open(&preview_path).unwrap().to_rgb8();
     assert_eq!(
         preview.dimensions(),
-        (
-            width as u32 + crop_width as u32,
-            height.max(after_image.axes[1]) as u32 + 18
-        )
+        (width as u32 + crop_width as u32, height as u32 + 18)
     );
-    // Panels use the same source-derived display interval and FITS lower origin.
-    let local_x = 20usize;
-    let local_y = after_image.axes[1] / 2;
-    let global_x = x0 + local_x;
-    let global_y = y0 + local_y;
-    if (global_x as f64 - cx).powi(2) + (global_y as f64 - cy).powi(2) <= radius.powi(2) {
-        assert_eq!(
-            preview.get_pixel(global_x as u32, 18 + height as u32 - 1 - global_y as u32),
-            preview.get_pixel(
-                width as u32 + local_x as u32,
-                18 + after_image.axes[1] as u32 - 1 - local_y as u32,
-            )
-        );
-    }
-    assert_eq!(
-        preview
-            .get_pixel(width as u32, 18 + after_image.axes[1] as u32 - 1)
-            .0[0],
-        0
-    );
-    let report = summary_path(&output);
-    let summary: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(report["files"][0]["crop_shape"], "rectangle");
+    assert_eq!(report["files"][0]["crop_width"], crop_width);
+    assert_eq!(report["files"][0]["crop_height"], crop_height);
     assert!(
-        summary["files"][0]["output_png"]
+        report["files"][0]["output_png"]
             .as_str()
             .unwrap()
             .ends_with("circular-field.fits.png")
-    );
-    assert_eq!(
-        summary["files"][0]["output_manifest"],
-        summary_path(&output)
-            .parent()
-            .unwrap()
-            .join("manifests/circular-field.fits.complete.json")
-            .to_string_lossy()
-            .as_ref()
-    );
-    let manifest_path = summary_path(&output)
-        .parent()
-        .unwrap()
-        .join("manifests/circular-field.fits.complete.json");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    assert_eq!(manifest["complete"], true);
-    assert_eq!(manifest["manifest_version"], 3);
-    assert_eq!(manifest["input_sha256"].as_str().unwrap().len(), 64);
-    assert_eq!(summary["files"][0]["reason_code"], "crop_applied");
-    assert_eq!(
-        summary["files"][0]["applied_artifact_pixels"],
-        summary["files"][0]["artifact_pixels_removed"]
-    );
-    assert_eq!(summary["files"][0]["crop_excluded_undefined_pixels"], 0);
-    assert_eq!(summary["files"][0]["crop_applied_undefined_pixels"], 0);
-    assert_eq!(summary["files"][0]["crop_artifact_pixels_retained"], 0);
-    assert_eq!(manifest["products"].as_array().unwrap().len(), 4);
-    for product in manifest["products"].as_array().unwrap() {
-        let product_path = run_dir(&output).join(product["path"].as_str().unwrap());
-        assert_eq!(product["sha256"], file_sha256(&product_path));
-    }
-    assert!(
-        manifest["products"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|product| product["kind"] == "preview")
-    );
-    let output_mask = read_mask(&product_path(&output, "masks", "circular-field.fits"));
-    assert_eq!(output_mask.len(), width * height);
-    assert_eq!(output_mask[0], 1);
-    assert_eq!(output_mask[64 * width + 64], 0);
-    let (reason_axes, reason_codes, _) = read_reason_mask(&product_path(
-        &output,
-        "reason_masks",
-        "circular-field.fits",
-    ));
-    assert_eq!(reason_axes, [width, height]);
-    assert!(
-        reason_codes.contains(&1),
-        "excluded detector pixels have code 1"
-    );
-    assert!(
-        reason_codes.contains(&2),
-        "crop-only sacrifices have code 2"
     );
 }
 

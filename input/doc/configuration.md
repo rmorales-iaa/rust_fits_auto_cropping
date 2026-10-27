@@ -10,7 +10,7 @@ Operational settings live in `input/config.toml`. Scientific decision thresholds
 | `processing.recursive` | false | Search subdirectories. `--recursive` enables this for a run. |
 | `processing.memory_budget_mib` | 2048 MiB | Shared estimated image workspace used to cap concurrent workers. |
 | `processing.maximum_image_mib` | 512 MiB | Per-image estimated workspace limit using 32 bytes per pixel; this is not a measured peak-allocation or process-RSS cap. |
-| `processing.mode` | `mask` | `mask` preserves dimensions and marks candidate pixels undefined; `crop` compares the exact maximum-area clean axis-aligned rectangle and conservative integer-centered circle, then selects the geometry retaining more pixel centers. A circle is stored in its rectangular bounding box, with pixels outside the circle undefined. CLI `--mode mask` or `--mode crop` overrides this setting. |
+| `processing.mode` | `mask` | `mask` preserves dimensions and marks candidate pixels undefined; `crop` compares the maximum clean rectangle with conservative circular support. If the circle contains more clean pixel centers, it writes that circle's exact maximum-area inscribed rectangle. Detector-proposed artifacts and originally undefined samples are excluded. The output is always a fully supported rectangle/square, and FITS `NAXIS1/2` match its width/height. A circular valid field may lose more pixels than a circular product would. CLI `--mode mask` or `--mode crop` overrides this setting. |
 
 CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. `--png` is an opt-in crop-mode display output, not a configuration key. Each invocation creates a new isolated run directory; `--overwrite` only permits collisions inside that run and does not remove older runs.
 

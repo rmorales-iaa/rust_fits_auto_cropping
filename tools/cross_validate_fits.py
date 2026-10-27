@@ -60,9 +60,6 @@ CARD_POLICY_ADDED = {
         "CLIPSHAP",
         "CLIPX0",
         "CLIPY0",
-        "CLIPCX",
-        "CLIPCY",
-        "CLIPRAD",
         "COMMENT",
     },
     "mask": {"CHECKSUM", "DATASUM", "CREATOR", "DATE", "HISTORY", "COMMENT"},
@@ -343,6 +340,8 @@ def verify_tree(
             original = np.asarray(source[0].data)
             actual = np.asarray(output[0].data)
             crop_shape = output[0].header.get("CLIPSHAP")
+            if crop_shape and crop_shape != "RECTANGLE":
+                raise AssertionError(f"{output_path}: crop output is not a rectangle")
             if source[0].header["BITPIX"] != output[0].header["BITPIX"]:
                 raise AssertionError(f"{output_path}: shape or BITPIX changed")
             is_crop = bool(crop_shape or x0 or y0 or original.shape != actual.shape)
@@ -351,29 +350,20 @@ def verify_tree(
                 expected = original[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]]
                 if expected.shape != actual.shape:
                     raise AssertionError(f"{output_path}: crop bounds exceed the source image")
-                yy, xx = np.indices(actual.shape)
-                if crop_shape == "CIRCLE":
-                    cx = float(output[0].header["CLIPCX"])
-                    cy = float(output[0].header["CLIPCY"])
-                    radius = float(output[0].header["CLIPRAD"])
-                    inside = (xx + x0 - cx) ** 2 + (yy + y0 - cy) ** 2 <= radius**2
-                    expected = expected.copy()
-                    if np.issubdtype(actual.dtype, np.floating):
-                        expected[~inside] = np.nan
-                        if not np.array_equal(expected, actual, equal_nan=True):
-                            raise AssertionError(f"{output_path}: circular crop samples do not match")
-                    else:
-                        blank = output[0].header.get("BLANK")
-                        if blank is None:
-                            raise AssertionError(f"{output_path}: integer circular crop has no BLANK")
-                        expected[~inside] = blank
-                        if not np.array_equal(expected, actual):
-                            raise AssertionError(f"{output_path}: circular crop samples do not match")
-                elif crop_shape == "RECTANGLE":
-                    if not np.array_equal(expected, actual):
-                        raise AssertionError(f"{output_path}: rectangular crop samples changed")
-                else:
-                    raise AssertionError(f"{output_path}: missing/unsupported crop geometry {crop_shape}")
+                header = output[0].header
+                if (
+                    int(header.get("NAXIS", -1)) != 2
+                    or int(header.get("NAXIS1", -1)) != actual.shape[1]
+                    or int(header.get("NAXIS2", -1)) != actual.shape[0]
+                ):
+                    raise AssertionError(f"{output_path}: NAXIS cards disagree with crop dimensions")
+                samples_equal = (
+                    np.array_equal(expected, actual, equal_nan=True)
+                    if np.issubdtype(actual.dtype, np.floating)
+                    else np.array_equal(expected, actual)
+                )
+                if not samples_equal:
+                    raise AssertionError(f"{output_path}: rectangular crop samples changed")
             elif original.shape != actual.shape:
                 raise AssertionError(f"{output_path}: dimensions changed without crop provenance")
             if mask_path.exists():
@@ -396,14 +386,8 @@ def verify_tree(
                     if not selected.any():
                         raise AssertionError(f"{mask_path}: empty mask product")
                     if is_crop:
-                        yy_source, xx_source = np.indices(original.shape)
-                        if crop_shape == "CIRCLE":
-                            keep = (xx_source - float(output[0].header["CLIPCX"])) ** 2 + (
-                                yy_source - float(output[0].header["CLIPCY"])
-                            ) ** 2 <= float(output[0].header["CLIPRAD"]) ** 2
-                        else:
-                            keep = np.zeros(original.shape, dtype=bool)
-                            keep[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]] = True
+                        keep = np.zeros(original.shape, dtype=bool)
+                        keep[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]] = True
                         if not np.array_equal(selected, ~keep):
                             raise AssertionError(f"{mask_path}: exclusion mask disagrees with crop geometry")
                     elif np.issubdtype(actual.dtype, np.floating):

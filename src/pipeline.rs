@@ -2,7 +2,7 @@
 use crate::{
     cli::Args,
     config::{Config, HeuristicsConfig, ProcessingMode},
-    crop::{CropRegion, largest_clean_region},
+    crop::largest_clean_region,
     detection::detect_border,
     durability::sync_parent,
     fits_image::{NoUnusedIntegerCode, is_gzip_compressed, read_image},
@@ -390,7 +390,13 @@ fn process_one(
                 let crop = if matches!(config.processing.mode, ProcessingMode::Crop)
                     && image.crop_wcs_unsupported.is_none()
                 {
-                    largest_clean_region(&detection.mask, image.width, image.height)
+                    let crop_exclusions: Vec<bool> = detection
+                        .mask
+                        .iter()
+                        .zip(&image.values)
+                        .map(|(&candidate, value)| candidate || !value.is_finite())
+                        .collect();
+                    largest_clean_region(&crop_exclusions, image.width, image.height)
                 } else {
                     None
                 };
@@ -430,17 +436,6 @@ fn process_one(
                     outcome.crop_width = Some(bounds.width);
                     outcome.crop_height = Some(bounds.height);
                     outcome.image_area_retained = rect.retained_pixels();
-                    if let CropRegion::Circle {
-                        center_x,
-                        center_y,
-                        radius,
-                        ..
-                    } = rect
-                    {
-                        outcome.crop_center_x = Some(center_x as f64);
-                        outcome.crop_center_y = Some(center_y as f64);
-                        outcome.crop_radius = Some(radius);
-                    }
                     outcome.artifact_pixels_removed = detection
                         .mask
                         .iter()

@@ -65,19 +65,21 @@ def main() -> int:
         source, _ = image_data(source_path)
         cropped, _ = image_data(cropped_path)
         header = fits.getheader(cropped_path)
+        if header.get("CLIPSHAP") != "RECTANGLE":
+            raise AssertionError(f"{cropped_path}: crop output is not a rectangular FITS image")
         x0 = int(header.get("CLIPX0", 0))
         y0 = int(header.get("CLIPY0", 0))
-        if header.get("CLIPSHAP") == "CIRCLE":
-            yy, xx = np.indices(source.shape)
-            dx = xx - float(header["CLIPCX"])
-            dy = yy - float(header["CLIPCY"])
-            retained = dx * dx + dy * dy <= float(header["CLIPRAD"]) ** 2
-        else:
-            retained = np.zeros(source.shape, dtype=bool)
-            retained[
-                y0 : y0 + cropped.shape[0],
-                x0 : x0 + cropped.shape[1],
-            ] = True
+        if (
+            int(header.get("NAXIS", -1)) != 2
+            or int(header.get("NAXIS1", -1)) != cropped.shape[1]
+            or int(header.get("NAXIS2", -1)) != cropped.shape[0]
+        ):
+            raise AssertionError(f"{cropped_path}: NAXIS cards disagree with the crop array shape")
+        retained = np.zeros(source.shape, dtype=bool)
+        retained[
+            y0 : y0 + cropped.shape[0],
+            x0 : x0 + cropped.shape[1],
+        ] = True
         kept_outline, cropped_outline = crop_outline_masks(retained)
         with Image.open(png_path) as opened:
             png = np.asarray(opened.convert("RGB"))

@@ -1,5 +1,5 @@
 //! Side-by-side native-scale crop previews with color-coded source-panel boundaries.
-use crate::{crop::CropRegion, durability::sync_parent, preview::zscale::ZScale};
+use crate::{crop::CropRect, durability::sync_parent, preview::zscale::ZScale};
 use anyhow::{Context, bail};
 use image::{ImageFormat, Rgb, RgbImage};
 use std::{fs, path::Path};
@@ -13,7 +13,7 @@ pub fn write_crop_preview(
     values: &[f64],
     source_width: usize,
     source_height: usize,
-    region: CropRegion,
+    region: CropRect,
 ) -> anyhow::Result<()> {
     if source_width.checked_mul(source_height) != Some(values.len()) {
         bail!("preview source dimensions do not match the pixel array");
@@ -92,7 +92,7 @@ pub fn write_crop_preview(
 }
 
 fn crop_boundary_color(
-    region: CropRegion,
+    region: CropRect,
     x: usize,
     y: usize,
     width: usize,
@@ -188,12 +188,12 @@ mod tests {
         let width = 24;
         let height = 12;
         let values: Vec<f64> = (0..width * height).map(|value| value as f64).collect();
-        let region = CropRegion::Rectangle(CropRect {
+        let region = CropRect {
             x: 4,
             y: 2,
             width: 12,
             height: 6,
-        });
+        };
         write_crop_preview(&output, &values, width, height, region).unwrap();
 
         let rendered = image::open(&output).unwrap().to_rgb8();
@@ -211,30 +211,5 @@ mod tests {
                 .0
         );
         assert_eq!(rendered.get_pixel(24, 29).0, [0, 0, 0]); // outside the selected crop.
-    }
-
-    #[test]
-    fn outlines_circle_with_green_kept_edge_and_red_excluded_edge() {
-        let region = CropRegion::Circle {
-            bounds: CropRect {
-                x: 2,
-                y: 2,
-                width: 9,
-                height: 9,
-            },
-            center_x: 6,
-            center_y: 6,
-            radius: 4.0,
-            retained_pixels: 49,
-        };
-        assert_eq!(
-            crop_boundary_color(region, 10, 6, 13, 13),
-            Some(Rgb([0, 255, 0]))
-        );
-        assert_eq!(
-            crop_boundary_color(region, 11, 6, 13, 13),
-            Some(Rgb([255, 0, 0]))
-        );
-        assert_eq!(crop_boundary_color(region, 6, 6, 13, 13), None);
     }
 }
