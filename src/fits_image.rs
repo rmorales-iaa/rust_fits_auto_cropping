@@ -1,11 +1,11 @@
 //! Rust-native FITS loading, eligibility checks, and detection-value conversion.
 use anyhow::{Context, bail};
 use fitskit::{FitsFile, HduData, Header, PixelData};
+use sha2::{Digest, Sha256};
 use std::{
     fmt,
     fs::File,
-    io::Read,
-    io::{Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -44,6 +44,8 @@ pub struct Image {
     pub crop_wcs_unsupported: Option<String>,
     /// Parsed source snapshot used by both classification and product writing.
     pub source_fits: FitsFile,
+    /// SHA-256 of the exact open source file used to build `source_fits`.
+    pub source_sha256: String,
 }
 
 /// Parse a FITS file using fitskit and validate the single-HDU 2D image contract.
@@ -52,7 +54,10 @@ pub fn read_image(
     maximum_image_mib: usize,
 ) -> anyhow::Result<Result<Image, Eligibility>> {
     // Inspect headers and seek over payloads before allocating parsed pixel buffers.
-    let (hdu_count, axes, bitpix) = preflight(path)?;
+    let mut source =
+        File::open(path).with_context(|| format!("opening FITS {}", path.display()))?;
+    let source_metadata = source.metadata()?;
+    let (hdu_count, axes, bitpix) = preflight(&mut source, path)?;
     if hdu_count != 1 {
         return Ok(Err(Eligibility::MultiHdu(hdu_count)));
     }
@@ -72,8 +77,19 @@ pub fn read_image(
             "image has {n} pixels; estimated workspace exceeds configured maximum_image_mib={maximum_image_mib}"
         );
     }
-    let file =
-        FitsFile::from_file(path).with_context(|| format!("opening FITS {}", path.display()))?;
+    source.seek(SeekFrom::Start(0))?;
+    let (file, source_sha256) = {
+        let mut reader = HashingReader::new(&mut source);
+        let file = FitsFile::from_reader(&mut reader)
+            .with_context(|| format!("opening FITS {}", path.display()))?;
+        (file, reader.finish())
+    };
+    let parsed_metadata = source.metadata()?;
+    if source_metadata.len() != parsed_metadata.len()
+        || source_metadata.modified().ok() != parsed_metadata.modified().ok()
+    {
+        bail!("source file changed while it was being parsed");
+    }
     let hdu = file.primary();
     let image = match &hdu.data {
         HduData::Image(image) => image,
@@ -140,7 +156,74 @@ pub fn read_image(
         metadata_warnings,
         crop_wcs_unsupported,
         source_fits: file,
+        source_sha256,
     }))
+}
+
+/// Hash bytes as fitskit reads them. Forward seeks are implemented by reading
+/// the skipped bytes, so FITS block padding is part of the digest too.
+struct HashingReader<'a> {
+    inner: &'a mut File,
+    hasher: Sha256,
+}
+
+impl<'a> HashingReader<'a> {
+    fn new(inner: &'a mut File) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> String {
+        format!("{:x}", self.hasher.finalize())
+    }
+}
+
+impl Read for HashingReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(output)?;
+        self.hasher.update(&output[..read]);
+        Ok(read)
+    }
+}
+
+impl Seek for HashingReader<'_> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let current = self.inner.stream_position()?;
+        let target = match position {
+            SeekFrom::Start(target) => target,
+            SeekFrom::Current(delta) => current
+                .checked_add_signed(delta)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid seek"))?,
+            SeekFrom::End(delta) => self
+                .inner
+                .metadata()?
+                .len()
+                .checked_add_signed(delta)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid seek"))?,
+        };
+        if target < current {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "FITS parser requested a backward seek while hashing",
+            ));
+        }
+        let mut remaining = target - current;
+        let mut buffer = [0_u8; 8192];
+        while remaining > 0 {
+            let chunk = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
+            let read = self.read(&mut buffer[..chunk])?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "FITS parser requested a seek past end of source",
+                ));
+            }
+            remaining -= read as u64;
+        }
+        Ok(target)
+    }
 }
 
 fn crop_wcs_unsupported(header: &Header) -> Option<String> {
@@ -185,8 +268,8 @@ pub fn is_gzip_compressed(path: &Path) -> anyhow::Result<bool> {
     Ok(count == signature.len() && signature == [0x1f, 0x8b])
 }
 
-fn preflight(path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
-    let mut file = File::open(path).with_context(|| format!("opening FITS {}", path.display()))?;
+fn preflight(file: &mut File, path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
+    file.seek(SeekFrom::Start(0))?;
     let file_len = file.metadata()?.len();
     let mut count = 0usize;
     let mut first_axes = Vec::new();
@@ -199,7 +282,7 @@ fn preflight(path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
         if position > file_len {
             bail!("FITS HDU exceeds file length");
         }
-        let header = Header::read_from(&mut file)
+        let header = Header::read_from(file)
             .with_context(|| format!("reading FITS header in {}", path.display()))?;
         if count == 0 {
             first_bitpix = header.require_int("BITPIX")?;
@@ -232,6 +315,7 @@ fn preflight(path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
     if count == 0 {
         bail!("FITS file contains no HDUs");
     }
+    file.seek(SeekFrom::Start(0))?;
     Ok((count, first_axes, first_bitpix))
 }
 

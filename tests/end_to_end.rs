@@ -211,6 +211,8 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     )
     .unwrap();
     assert_eq!(clean_manifest["complete"], true);
+    assert_eq!(clean_manifest["manifest_version"], 2);
+    assert_eq!(clean_manifest["input_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(clean_manifest["products"][0]["symlink"], true);
     let m = FitsFile::from_file(product_path(&output, "masks", "float.fits")).unwrap();
     assert_eq!(m.primary().header.get_float("CRPIX1"), Some(48.5));
@@ -738,6 +740,8 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     assert_eq!(manifest["complete"], true);
+    assert_eq!(manifest["manifest_version"], 2);
+    assert_eq!(manifest["input_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(manifest["products"].as_array().unwrap().len(), 3);
     assert!(
         manifest["products"]
@@ -981,7 +985,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 3);
+    assert_eq!(summary["schema_version"], 4);
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
     assert_eq!(summary["policy_version"], "heuristics-v1");
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);

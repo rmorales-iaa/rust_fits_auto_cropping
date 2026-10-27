@@ -883,6 +883,7 @@ mod tests {
     use super::write_products;
     use crate::fits_image::read_image;
     use fitskit::{FitsFile, HduData, HeaderValue, ImageData, PixelData};
+    use sha2::{Digest, Sha256};
     use std::fs;
 
     #[test]
@@ -953,7 +954,9 @@ mod tests {
             None,
         );
         original_file.to_file(&source).unwrap();
+        let expected_source_sha256 = format!("{:x}", Sha256::digest(fs::read(&source).unwrap()));
         let image = read_image(&source, 16).unwrap().unwrap();
+        assert_eq!(image.source_sha256, expected_source_sha256);
 
         let mut replacement = FitsFile::with_primary_image(ImageData::new(
             vec![width, height],

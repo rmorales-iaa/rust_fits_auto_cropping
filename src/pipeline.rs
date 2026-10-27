@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -313,6 +313,7 @@ fn process_one(
             );
             outcome.width = Some(image.width);
             outcome.height = Some(image.height);
+            outcome.source_sha256 = Some(image.source_sha256.clone());
             outcome.original_undefined_pixels =
                 image.values.iter().filter(|v| !v.is_finite()).count();
             outcome.proposed_mask_fraction = detection.candidate_fraction;
@@ -707,6 +708,12 @@ fn publish_completion_manifest(
         let metadata = fs::metadata(path)
             .with_context(|| format!("reading completed product metadata {}", path.display()))?;
         let symlink = fs::symlink_metadata(path)?.file_type().is_symlink();
+        if symlink && kind == "science_image" {
+            let actual_sha256 = hash_file(path)?;
+            if Some(actual_sha256.as_str()) != outcome.source_sha256.as_deref() {
+                bail!("kept-image symlink no longer resolves to the parsed source bytes");
+            }
+        }
         products.push(serde_json::json!({
             "kind": kind,
             "path": run_relative,
@@ -722,10 +729,11 @@ fn publish_completion_manifest(
         OutcomeKind::Error => "error",
     };
     let contents = serde_json::to_vec_pretty(&serde_json::json!({
-        "manifest_version": 1,
+        "manifest_version": 2,
         "complete": true,
         "run_id": run_id,
         "input": input_relative,
+        "input_sha256": outcome.source_sha256.as_deref(),
         "status": status,
         "completed_utc": Utc::now().to_rfc3339(),
         "products": products,
@@ -742,6 +750,21 @@ fn publish_completion_manifest(
         .with_context(|| format!("publishing completion manifest {}", manifest_path.display()))?;
     outcome.output_manifest = Some(manifest_path);
     Ok(())
+}
+
+fn hash_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("opening product for SHA-256 {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn eligibility_reason(reason: crate::fits_image::Eligibility) -> String {
