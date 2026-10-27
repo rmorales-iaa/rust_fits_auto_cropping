@@ -463,6 +463,7 @@ fn process_one(
                         Ok(path) => path,
                         Err(error) => {
                             outcome.status = OutcomeKind::Error;
+                            outcome.reason_code = "output_path_error";
                             outcome.reason = error.to_string();
                             return finish(outcome, timer);
                         }
@@ -471,6 +472,7 @@ fn process_one(
                         Ok(path) => path,
                         Err(error) => {
                             outcome.status = OutcomeKind::Error;
+                            outcome.reason_code = "output_path_error";
                             outcome.reason = error.to_string();
                             return finish(outcome, timer);
                         }
@@ -480,6 +482,7 @@ fn process_one(
                             Ok(path) => Some(path),
                             Err(error) => {
                                 outcome.status = OutcomeKind::Error;
+                                outcome.reason_code = "output_path_error";
                                 outcome.reason = error.to_string();
                                 return finish(outcome, timer);
                             }
@@ -491,6 +494,7 @@ fn process_one(
                         Ok(path) => path,
                         Err(error) => {
                             outcome.status = OutcomeKind::Error;
+                            outcome.reason_code = "output_path_error";
                             outcome.reason = error.to_string();
                             return finish(outcome, timer);
                         }
@@ -502,6 +506,7 @@ fn process_one(
                             || png_path.as_ref().is_some_and(|path| path_exists(path)))
                     {
                         outcome.status = OutcomeKind::Error;
+                        outcome.reason_code = "output_exists_error";
                         outcome.reason = "output exists; pass --overwrite".into();
                         return finish(outcome, timer);
                     }
@@ -509,6 +514,7 @@ fn process_one(
                         && let Err(error) = remove_existing_product(&manifest_path)
                     {
                         outcome.status = OutcomeKind::Error;
+                        outcome.reason_code = "output_cleanup_error";
                         outcome.reason = format!(
                             "could not invalidate previous completion manifest before replacing products: {error}"
                         );
@@ -542,6 +548,7 @@ fn process_one(
                             if options.overwrite {
                                 if let Err(cleanup_error) = remove_existing_product(&image_path) {
                                     outcome.status = OutcomeKind::Error;
+                                    outcome.reason_code = "output_cleanup_error";
                                     outcome.reason = format!(
                                         "{e}; could not remove stale image product: {cleanup_error}"
                                     );
@@ -549,6 +556,7 @@ fn process_one(
                                 }
                                 if let Err(cleanup_error) = remove_existing_product(&mask_path) {
                                     outcome.status = OutcomeKind::Error;
+                                    outcome.reason_code = "output_cleanup_error";
                                     outcome.reason = format!(
                                         "{e}; could not remove stale mask product: {cleanup_error}"
                                     );
@@ -558,6 +566,7 @@ fn process_one(
                                     && let Err(cleanup_error) = remove_existing_product(preview)
                                 {
                                     outcome.status = OutcomeKind::Error;
+                                    outcome.reason_code = "output_cleanup_error";
                                     outcome.reason = format!(
                                         "{e}; could not remove stale preview: {cleanup_error}"
                                     );
@@ -566,6 +575,7 @@ fn process_one(
                             }
                             if let Err(fallback_error) = create_kept_symlink(path, &image_path) {
                                 outcome.status = OutcomeKind::Error;
+                                outcome.reason_code = "kept_symlink_error";
                                 outcome.reason = format!(
                                     "{e}; keeping the source was required but symlink publication failed: {fallback_error}"
                                 );
@@ -585,6 +595,7 @@ fn process_one(
                                 false,
                             ) {
                                 outcome.status = OutcomeKind::Error;
+                                outcome.reason_code = "manifest_write_error";
                                 outcome.reason = format!(
                                     "source symlink was created but its completion manifest failed: {error:#}"
                                 );
@@ -592,6 +603,11 @@ fn process_one(
                             return finish(outcome, timer);
                         }
                         outcome.status = OutcomeKind::Error;
+                        outcome.reason_code = if has_mask {
+                            "product_write_error"
+                        } else {
+                            "kept_symlink_error"
+                        };
                         outcome.reason = e.to_string();
                         return finish(outcome, timer);
                     }
@@ -635,6 +651,7 @@ fn process_one(
                             region,
                         ) {
                             outcome.status = OutcomeKind::Error;
+                            outcome.reason_code = "preview_write_error";
                             outcome.reason = format!(
                                 "FITS crop products were written, but PNG preview failed: {error:#}"
                             );
@@ -646,6 +663,7 @@ fn process_one(
                         publish_completion_manifest(layout, rel, run_id, &mut outcome, has_mask)
                     {
                         outcome.status = OutcomeKind::Error;
+                        outcome.reason_code = "manifest_write_error";
                         outcome.reason = format!(
                             "products were written but the completion manifest failed: {error:#}"
                         );
@@ -656,6 +674,7 @@ fn process_one(
                     Ok(path) => path,
                     Err(error) => {
                         outcome.status = OutcomeKind::Error;
+                        outcome.reason_code = "output_path_error";
                         outcome.reason = error.to_string();
                         return finish(outcome, timer);
                     }
@@ -664,12 +683,14 @@ fn process_one(
                     Ok(path) => path,
                     Err(error) => {
                         outcome.status = OutcomeKind::Error;
+                        outcome.reason_code = "output_path_error";
                         outcome.reason = error.to_string();
                         return finish(outcome, timer);
                     }
                 };
                 if !options.overwrite && (path_exists(&image_path) || path_exists(&manifest_path)) {
                     outcome.status = OutcomeKind::Error;
+                    outcome.reason_code = "output_exists_error";
                     outcome.reason = "output exists; pass --overwrite".into();
                     return finish(outcome, timer);
                 }
@@ -677,6 +698,7 @@ fn process_one(
                     && let Err(error) = remove_existing_product(&manifest_path)
                 {
                     outcome.status = OutcomeKind::Error;
+                    outcome.reason_code = "output_cleanup_error";
                     outcome.reason = format!(
                         "could not invalidate previous completion manifest before replacing symlink: {error}"
                     );
@@ -684,6 +706,7 @@ fn process_one(
                 }
                 if let Err(e) = create_kept_symlink(path, &image_path) {
                     outcome.status = OutcomeKind::Error;
+                    outcome.reason_code = "kept_symlink_error";
                     outcome.reason = e.to_string();
                     return finish(outcome, timer);
                 }
@@ -692,6 +715,7 @@ fn process_one(
                     publish_completion_manifest(layout, rel, run_id, &mut outcome, false)
                 {
                     outcome.status = OutcomeKind::Error;
+                    outcome.reason_code = "manifest_write_error";
                     outcome.reason = format!(
                         "source symlink was created but its completion manifest failed: {error:#}"
                     );

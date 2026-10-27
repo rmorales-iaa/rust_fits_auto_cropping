@@ -1104,6 +1104,7 @@ fn corrupt_candidate_returns_batch_error_status_and_is_reported() {
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(v["errors"], 1);
+    assert_eq!(v["files"][0]["reason_code"], "input_read_error");
     assert!(
         !summary_path(&output)
             .parent()
