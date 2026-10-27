@@ -1,0 +1,25 @@
+# Derived science data and activity logs
+/output/
+# Build artifacts
+/target/
+# Local observations; create deterministic test fixtures in tests at runtime
+/input/data/
+*.fits
+*.fit
+*.fts
+*.fits.gz
+*.fit.gz
+*.fz
+# Local-only configuration and credentials
+/input/*.local.toml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Editor and Python caches
+.DS_Store
+*.swp
+__pycache__/
+.pytest_cache/
+.venv/
