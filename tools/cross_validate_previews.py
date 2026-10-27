@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independently validate crop PNG scaling, geometry, and orientation with Astropy."""
+"""Independently validate crop PNG scaling, colored outlines, geometry, and orientation."""
 from __future__ import annotations
 
 import argparse
@@ -30,6 +30,22 @@ def expected_u8(value: float, lower: float, upper: float) -> int:
     return int(np.rint(np.clip((value - lower) / span, 0, 1) * 255))
 
 
+def crop_outline_masks(retained: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return source-pixel masks for the green kept and red cropped outlines."""
+    height, width = retained.shape
+    padded = np.pad(retained, 1, mode="edge")
+    retained_neighbor = np.zeros_like(retained)
+    cropped_neighbor = np.zeros_like(retained)
+    for dy in range(-1, 2):
+        for dx in range(-1, 2):
+            if dx == 0 and dy == 0:
+                continue
+            neighbor = padded[1 + dy : 1 + dy + height, 1 + dx : 1 + dx + width]
+            retained_neighbor |= neighbor
+            cropped_neighbor |= ~neighbor
+    return retained & cropped_neighbor, ~retained & retained_neighbor
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("summary", type=Path, help="run summary.json")
@@ -51,22 +67,42 @@ def main() -> int:
         header = fits.getheader(cropped_path)
         x0 = int(header.get("CLIPX0", 0))
         y0 = int(header.get("CLIPY0", 0))
+        if header.get("CLIPSHAP") == "CIRCLE":
+            yy, xx = np.indices(source.shape)
+            dx = xx - float(header["CLIPCX"])
+            dy = yy - float(header["CLIPCY"])
+            retained = dx * dx + dy * dy <= float(header["CLIPRAD"]) ** 2
+        else:
+            retained = np.zeros(source.shape, dtype=bool)
+            retained[
+                y0 : y0 + cropped.shape[0],
+                x0 : x0 + cropped.shape[1],
+            ] = True
+        kept_outline, cropped_outline = crop_outline_masks(retained)
         with Image.open(png_path) as opened:
-            png = np.asarray(opened.convert("L"))
+            png = np.asarray(opened.convert("RGB"))
         height, width = source.shape
         crop_height, crop_width = cropped.shape
         expected_shape = (max(height, crop_height) + LABEL_HEIGHT, width + crop_width)
-        if png.shape != expected_shape:
+        if png.shape != (*expected_shape, 3):
             raise AssertionError(f"{png_path}: dimensions {png.shape} != {expected_shape}")
         finite = source[np.isfinite(source)]
         lower, upper = ZScaleInterval().get_limits(finite)
         rng = np.random.default_rng(0)
         points = [(int(rng.integers(width)), int(rng.integers(height))) for _ in range(args.samples)]
         for x, y in points:
-            actual = int(png[LABEL_HEIGHT + height - 1 - y, x])
+            actual = tuple(png[LABEL_HEIGHT + height - 1 - y, x])
             expected = expected_u8(float(source[y, x]), float(lower), float(upper))
-            if actual != expected:
-                raise AssertionError(f"{png_path}: source pixel ({x},{y}) maps to {actual}, expected {expected}")
+            if kept_outline[y, x]:
+                expected_rgb = (0, 255, 0)
+            elif cropped_outline[y, x]:
+                expected_rgb = (255, 0, 0)
+            else:
+                expected_rgb = (expected, expected, expected)
+            if actual != expected_rgb:
+                raise AssertionError(
+                    f"{png_path}: source pixel ({x},{y}) is {actual}, expected {expected_rgb}"
+                )
         # Validate pixels represented in both panels, including the FITS lower-origin transform.
         for _ in range(args.samples):
             x = int(rng.integers(crop_width))
@@ -81,17 +117,18 @@ def main() -> int:
                 dx = global_x - float(header["CLIPCX"])
                 dy = global_y - float(header["CLIPCY"])
                 if dx * dx + dy * dy > radius * radius:
-                    if int(png[right_y, right_x]) != 0:
+                    if tuple(png[right_y, right_x]) != (0, 0, 0):
                         raise AssertionError(f"{png_path}: circular exterior pixel is not black")
                     continue
             source_value = source[global_y, global_x]
             crop_value = cropped[y, x]
             if np.isfinite(crop_value):
-                left = int(png[LABEL_HEIGHT + height - 1 - global_y, global_x])
-                right = int(png[right_y, right_x])
+                right = tuple(png[right_y, right_x])
                 expected = expected_u8(float(source_value), float(lower), float(upper))
-                if left != right or right != expected:
-                    raise AssertionError(f"{png_path}: panel mismatch at source ({global_x},{global_y})")
+                if right != (expected, expected, expected):
+                    raise AssertionError(
+                        f"{png_path}: crop panel mismatch at source ({global_x},{global_y})"
+                    )
         count += 1
     print(f"Astropy ZScale and PNG geometry verified for {count} preview(s)")
     return 0
