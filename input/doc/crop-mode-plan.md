@@ -3,6 +3,8 @@
 Date: 2026-10-27. This plan implements the user's correction after inspecting
 `science#2007_01_11T20_23_31...11jan_0011.fits`.
 
+Historical implementation record. The current circle search is restricted to integer pixel centers with conservative clearance from masked pixel footprints; it is not a proven maximum over arbitrary subpixel circles or arbitrary usable regions. Counts below refer to detector candidates, not labeled invalid science. See the [audit](scientific-audit-2026-10-27.md) and [active plan](scientific-improvement-plan.md) for current limitations and future acceptance gates.
+
 ## Observed issue
 
 The initial mask-mode run rejected the input before detection because its `BITPIX=16` header has

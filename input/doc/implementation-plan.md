@@ -1,6 +1,6 @@
 # Implementation plan: rust_fits_auto_cropping
 
-Status: engineering implementation and requested evaluation completed locally on 2026-10-27, including follow-up circle/rectangle crop selection. The completed items below refer to engineering behavior, synthetic fixtures, and the supplied unlabeled dataset; they do not establish a scientific-release result.
+Status: historical baseline implementation plan. Engineering evaluation was recorded on 2026-10-27, including circle/rectangle cropping. A subsequent [deep audit](scientific-audit-2026-10-27.md) found correctness and scientific-validation gaps despite 47 passing tests. The [scientific improvement plan](scientific-improvement-plan.md) is now authoritative for future work. The proposals below, including source protection, multiscale inference, refined boundaries and interruption handling, are not all implemented; historical completion labels apply only to the recorded examples.
 
 ## Objective and scope
 
@@ -119,6 +119,6 @@ Before declaring completion, create a requirement-to-evidence table covering: on
 | 4. Safe mask writer | Implemented for supported FITS cases | Separate mask, undefined-value handling, headers, retained samples and checksums are verified; Astropy and fitsverify pass on synthetic and real products. |
 | 5. Optional crop mode | Implemented, opt-in | Maximum-area clean rectangle versus largest artifact-free circle; selects greater retained pixel count, reports artifact removal and unmasked loss, and applies the configured utility gate. FITS crop products retain raw stored samples, update NAXIS/CRPIX, and pass Astropy/fitsverify checks on the supplied frame set. |
 | 6. Performance | Measured | On 25 supplied files, 4 workers produced 1.71x observed throughput versus 1 worker; peak RSS was 853.3 MiB versus 273.6 MiB. Decisions and products matched. See [validation record](validation.md). |
-| 7. Release validation and documentation | Engineering evaluation completed locally | 40 tests, CLI help/version, independent FITS checker, detailed docs and supplied-data measurements are recorded in [validation.md](validation.md). The latest supplied set has 5 malformed quoted headers and no independent artifact labels; scientific thresholds and instrument-level performance remain unvalidated. |
+| 7. Release validation and documentation | Baseline checks passed; release gates open | 47 tests passed again during the deep audit; CLI help/version, independent FITS checker and supplied-data measurements are recorded in [validation.md](validation.md). Adversarial probes expose additional failures listed in the [audit](scientific-audit-2026-10-27.md). The supplied set has 5 malformed quoted headers and no independent artifact labels; scientific thresholds and instrument-level performance remain unvalidated. |
 
 The current processor is useful for controlled prototype evaluation, not unattended scientific production. Every detected mask must be reviewed against representative images before downstream measurements.

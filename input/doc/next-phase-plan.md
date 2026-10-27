@@ -2,6 +2,8 @@
 
 Date: 2026-10-27. This plan follows the initial implementation. It treats the supplied observations as an evaluation set, not as labeled truth. Raw input images must remain unchanged.
 
+Historical evaluation plan. The [scientific improvement plan](scientific-improvement-plan.md) now controls future research and optimization. The supplied frames have been repeatedly inspected during development and must not be reused as an untouched scientific hold-out.
+
 ## User requirements and decisions
 
 1. Test against `/fast_disk/tmp/clippling_test/input/` and place run artifacts/products under `/fast_disk/tmp/clippling_test/output/`.

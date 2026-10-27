@@ -6,6 +6,8 @@ The tracked template in `input/program-version.txt` is `0.0.0`. On a Cargo packa
 
 The ignored state is machine-local: a fresh checkout starts again from the tracked template. This counter identifies local builds and is not a substitute for a published release tag. Cargo package metadata in `Cargo.toml` remains separate from the application build counter.
 
+At the 2026-10-27 deep review, the package metadata was `0.1.0`, release executable `0.0.29`, and test compilation advanced local state to `0.0.30`. Inspect the actual executable with `--version`; the state file need not match every existing binary. The [active plan](scientific-improvement-plan.md) requires Git revision/dirty state, executable/config hashes and algorithm/schema identities for reproducible scientific provenance. Those additions are not yet implemented.
+
 ## Product provenance
 
 Every newly serialized science image, crop, or mask receives:

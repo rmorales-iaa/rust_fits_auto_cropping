@@ -17,6 +17,10 @@ Work and respond in English. Apply this contract to scientific FITS projects.
 - For pixel-artifact detection, derive classification evidence from image samples and mask geometry, not descriptive header cards. Use FITS structural, scaling and null metadata only as required to decode samples. Kept eligible images are symlinks to canonical sources; never write provenance through them. Add `CREATOR`, UTC `DATE` and timestamped `HISTORY` only to generated FITS products, and record run version/time in summary and logs.
 - This project uses a tracked `input/program-version.txt` template and local ignored `output/.state/program-version.txt` counter. Cargo package recompilations advance the three-part base-100 version. Check current branches/remotes before authorized merge/push; never invent a remote URL.
 
+## Scientific improvement reviews
+
+In rust_fits_auto_cropping, read the project memory, latest scientific audit and active scientific improvement plan under `input/doc/` before extending algorithms. Historical plans and passing tests are not proof that every stated invariant is implemented. Distinguish proposed artifact pixels, accepted exclusions, original undefined samples, geometric sacrifices and independently labeled valid/invalid science. Optimize valid retention and artifact removal under declared risk and source-preservation limits; never maximize mask size as a proxy for quality. Freeze data splits, estimands, tolerances and meaningful improvement thresholds before tuning. A planning review ends with an auditable plan and explicit unresolved implementation/data gates, not a scientific certification.
+
 ## Work cycle
 1. Explore existing code and Git state before editing. Preserve unrelated work.
 2. Before complex work, save a phased implementation plan in `input/doc/` with assumptions, acceptance criteria and tests. Track evidence against each phase. A planning-only request stops after delivering the plan.
