@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import json
 import re
 import shutil
 import subprocess
@@ -179,6 +180,13 @@ def verify_preserved_header(
         raise AssertionError(f"{path}: unexpected output header card {key}")
 
 
+def verify_passthrough_symlink(source: Path, output: Path) -> None:
+    if not output.is_symlink():
+        raise AssertionError(f"{output}: malformed/ignored input must be a symlink")
+    if output.resolve(strict=True) != source.resolve(strict=True):
+        raise AssertionError(f"{output}: pass-through symlink does not target its input")
+
+
 def verify_wcs(
     source: fits.Header,
     output: fits.Header,
@@ -287,15 +295,36 @@ def verify_wcs(
             raise AssertionError(f"{path}: WCS {code!r} output inverse residual exceeds 1e-6 pixel")
 
 
-def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tuple[int, int, int]:
+def verify_tree(
+    input_dir: Path, output_dir: Path, fitsverify: str | None
+) -> tuple[int, int, int, int]:
     images = sorted((output_dir / "images").rglob("*"))
     images = [path for path in images if path.is_file()]
-    checked_images = checked_masks = checked_reason_masks = 0
+    summary = json.loads((output_dir / "summary.json").read_text())
+    records = {Path(record["input"]): record for record in summary["files"]}
+    if summary.get("schema_version", 0) >= 8 and summary["output_images"] != len(images):
+        raise AssertionError(
+            f"summary reports {summary['output_images']} output images but found {len(images)}"
+        )
+    if summary.get("schema_version", 0) >= 8 and not summary["dry_run"] and len(images) != summary["total"]:
+        raise AssertionError(
+            f"one-to-one image count failed: {summary['total']} inputs, {len(images)} outputs"
+        )
+    checked_images = checked_masks = checked_reason_masks = passthrough_count = 0
     for output_path in images:
         relative = output_path.relative_to(output_dir / "images")
         source_path = input_dir / relative
         if not source_path.is_file():
             raise AssertionError(f"no matching input for output {output_path}")
+        record = records.get(relative)
+        if record is None:
+            raise AssertionError(f"{output_path}: no matching per-input summary record")
+        status = record["status"]
+        if status == "ignored" or (status == "error" and output_path.is_symlink()):
+            verify_passthrough_symlink(source_path, output_path)
+            passthrough_count += 1
+            checked_images += 1
+            continue
         mask_path = output_dir / "masks" / relative
         with open_one(source_path) as source, open_one(output_path) as output:
             if output_path.is_symlink():
@@ -443,7 +472,7 @@ def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tu
                 if "*** Error" in transcript or "Verification found" in transcript and re.search(r"\b[1-9]\d* error", transcript):
                     raise AssertionError(f"fitsverify rejected {path}:\n{transcript}")
         checked_images += 1
-    return checked_images, checked_masks, checked_reason_masks
+    return checked_images, checked_masks, checked_reason_masks, passthrough_count
 
 
 def main() -> int:
@@ -453,16 +482,24 @@ def main() -> int:
     parser.add_argument("--fitsverify", default=shutil.which("fitsverify"))
     args = parser.parse_args()
     try:
-        images, masks, reason_masks = verify_tree(args.input_dir, args.output_dir, args.fitsverify)
+        images, masks, reason_masks, passthrough = verify_tree(
+            args.input_dir, args.output_dir, args.fitsverify
+        )
     except Exception as error:  # surface the first concrete mismatch with a failure code
         print(f"cross-validation failed: {error}", file=sys.stderr)
         return 1
-    print(
-        f"Astropy verified {images} science images, {masks} masks and "
-        f"{reason_masks} reason planes"
-    )
+    if passthrough:
+        print(
+            f"Validated {images} output image entries ({passthrough} pass-through symlinks), "
+            f"{masks} masks and {reason_masks} reason planes"
+        )
+    else:
+        print(f"Astropy verified {images} science images, {masks} masks and {reason_masks} reason planes")
     if args.fitsverify:
-        print(f"fitsverify checked all science/mask/reason outputs using {args.fitsverify}")
+        print(
+            f"fitsverify checked all parsed science/mask/reason products using {args.fitsverify}; "
+            "pass-through symlinks were validated by target"
+        )
     return 0
 
 

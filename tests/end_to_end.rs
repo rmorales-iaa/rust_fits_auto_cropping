@@ -199,7 +199,8 @@ fn optional_reason_plane_records_actions_and_is_checksummed_in_manifest() {
 
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
-    assert_eq!(summary["schema_version"], 7);
+    assert_eq!(summary["schema_version"], 8);
+    assert_eq!(summary["output_images"], summary["total"]);
     assert_eq!(
         summary["files"][0]["output_reason_mask"],
         reason_path.to_string_lossy().as_ref()
@@ -1165,11 +1166,22 @@ fn multiple_hdus_are_ignored() {
         vec![2, 2],
         PixelData::U8(vec![1; 4]),
     )));
-    f.to_file(path).unwrap();
+    f.to_file(&path).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    assert!(!product_path(&output, "images", "multi.fits").exists());
+    let preserved = product_path(&output, "images", "multi.fits");
+    assert!(
+        fs::symlink_metadata(&preserved)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::canonicalize(preserved).unwrap(),
+        fs::canonicalize(path).unwrap()
+    );
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(v["output_images"], 1);
     assert_eq!(v["ignored"], 1);
 }
 
@@ -1267,7 +1279,11 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 7);
+    assert_eq!(summary["schema_version"], 8);
+    assert_eq!(
+        summary["output_images"], 0,
+        "dry-run writes no image products"
+    );
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
     assert_eq!(summary["policy_version"], "heuristics-v1");
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);
@@ -1301,15 +1317,35 @@ fn corrupt_candidate_returns_batch_error_status_and_is_reported() {
     );
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["output_images"], 1);
     assert_eq!(v["errors"], 1);
     assert_eq!(v["files"][0]["reason_code"], "input_read_error");
+    let original = input.join("broken.fits");
+    let preserved = product_path(&output, "images", "broken.fits");
     assert!(
-        !summary_path(&output)
-            .parent()
+        fs::symlink_metadata(&preserved)
             .unwrap()
-            .join("manifests/broken.fits.complete.json")
-            .exists()
+            .file_type()
+            .is_symlink()
     );
+    assert_eq!(
+        fs::canonicalize(&preserved).unwrap(),
+        fs::canonicalize(&original).unwrap()
+    );
+    assert_eq!(fs::read(&preserved).unwrap(), fs::read(&original).unwrap());
+    assert!(
+        v["files"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("source preserved unchanged by symlink")
+    );
+    let manifest_path = run_dir(&output).join("manifests/broken.fits.complete.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["complete"], true);
+    assert_eq!(manifest["status"], "error");
+    assert_eq!(manifest["products"][0]["symlink"], true);
 }
 
 #[test]
@@ -1395,9 +1431,37 @@ fn compressed_and_multi_hdu_fits_are_ignored() {
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(v["total"], 4);
+    assert_eq!(v["output_images"], v["total"]);
     assert_eq!(v["ignored"], 4);
     assert_eq!(v["errors"], 0);
-    assert!(!product_path(&output, "images", "multi.fits").exists());
+    for name in [
+        "multi.fits",
+        "compressed.fits.gz",
+        "compressed-but-named-fits.fits",
+        "tile-compressed.fits.fz",
+    ] {
+        let source = input.join(name);
+        let preserved = product_path(&output, "images", name);
+        assert!(
+            fs::symlink_metadata(&preserved)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::canonicalize(&preserved).unwrap(),
+            fs::canonicalize(&source).unwrap()
+        );
+        assert_eq!(fs::read(&preserved).unwrap(), fs::read(&source).unwrap());
+        let manifest_path = run_dir(&output)
+            .join("manifests")
+            .join(format!("{name}.complete.json"));
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["complete"], true);
+        assert_eq!(manifest["status"], "ignored");
+        assert_eq!(manifest["products"][0]["symlink"], true);
+    }
 }
 
 #[test]

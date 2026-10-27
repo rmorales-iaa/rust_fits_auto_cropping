@@ -214,6 +214,10 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         .iter()
         .filter(|o| matches!(o.status, OutcomeKind::Ignored))
         .count();
+    let output_images = outcomes
+        .iter()
+        .filter(|outcome| outcome.output_image.is_some())
+        .count();
     let errors = outcomes
         .iter()
         .filter(|o| matches!(o.status, OutcomeKind::Error))
@@ -222,12 +226,13 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         log.event(
             &run_id,
             "run_finished",
-            serde_json::json!({"total":outcomes.len(),"clipped":clipped,"proposed":proposed,
+            serde_json::json!({"total":outcomes.len(),"output_images":output_images,"clipped":clipped,"proposed":proposed,
         "kept":kept,"ignored":ignored,"errors":errors,"dry_run":args.dry_run,"elapsed_ms":started.elapsed().as_millis()}),
         )?;
     }
     println!(
-        "Run {run_id}: {clipped} clipped, {proposed} proposed, {kept} kept, {ignored} ignored, {errors} errors"
+        "Run {run_id}: {output_images}/{} input images published, {clipped} clipped, {proposed} proposed, {kept} kept, {ignored} ignored, {errors} errors",
+        outcomes.len()
     );
     if errors > 0 {
         return Err(BatchFailure {
@@ -292,6 +297,9 @@ fn process_one(
             "compressed FITS is not supported by this build",
         );
         outcome.reason_code = "compressed_ignored";
+        if !options.dry_run {
+            publish_passthrough_image(path, rel, run_id, layout, options.overwrite, &mut outcome);
+        }
         return finish(outcome, timer);
     }
     let result = match read_image(path, config.processing.maximum_image_mib) {
@@ -303,12 +311,32 @@ fn process_one(
                 format!("ineligible image: {}", eligibility_reason(reason)),
             );
             outcome.reason_code = reason_code;
+            if !options.dry_run {
+                publish_passthrough_image(
+                    path,
+                    rel,
+                    run_id,
+                    layout,
+                    options.overwrite,
+                    &mut outcome,
+                );
+            }
             outcome
         }
         Err(error) => {
             let mut outcome =
                 FileOutcome::new(rel.to_path_buf(), OutcomeKind::Error, format!("{error:#}"));
             outcome.reason_code = "input_read_error";
+            if !options.dry_run {
+                publish_passthrough_image(
+                    path,
+                    rel,
+                    run_id,
+                    layout,
+                    options.overwrite,
+                    &mut outcome,
+                );
+            }
             outcome
         }
         Ok(Ok(image)) => {
@@ -800,6 +828,77 @@ fn process_one(
     finish(result, timer)
 }
 
+fn publish_passthrough_image(
+    input_path: &Path,
+    relative: &Path,
+    run_id: &str,
+    layout: &OutputLayout,
+    overwrite: bool,
+    outcome: &mut FileOutcome,
+) {
+    let image_path = match layout.product_path(ProductCategory::Image, relative) {
+        Ok(path) => path,
+        Err(error) => {
+            outcome.status = OutcomeKind::Error;
+            outcome.reason_code = "output_path_error";
+            outcome
+                .reason
+                .push_str(&format!("; could not create pass-through path: {error}"));
+            return;
+        }
+    };
+    let manifest_path = match layout.manifest_path(relative) {
+        Ok(path) => path,
+        Err(error) => {
+            outcome.status = OutcomeKind::Error;
+            outcome.reason_code = "output_path_error";
+            outcome.reason.push_str(&format!(
+                "; could not create completion-manifest path: {error}"
+            ));
+            return;
+        }
+    };
+    if !overwrite && (path_exists(&image_path) || path_exists(&manifest_path)) {
+        outcome.status = OutcomeKind::Error;
+        outcome.reason_code = "output_exists_error";
+        outcome
+            .reason
+            .push_str("; pass-through output already exists");
+        return;
+    }
+    if overwrite {
+        for existing in [&manifest_path, &image_path] {
+            if let Err(error) = remove_existing_product(existing) {
+                outcome.status = OutcomeKind::Error;
+                outcome.reason_code = "output_cleanup_error";
+                outcome
+                    .reason
+                    .push_str(&format!("; could not replace pass-through output: {error}"));
+                return;
+            }
+        }
+    }
+    if let Err(error) = create_kept_symlink(input_path, &image_path) {
+        outcome.status = OutcomeKind::Error;
+        outcome.reason_code = "input_fallback_symlink_error";
+        outcome
+            .reason
+            .push_str(&format!("; could not preserve input by symlink: {error:#}"));
+        return;
+    }
+    outcome.output_image = Some(image_path);
+    outcome
+        .reason
+        .push_str("; source preserved unchanged by symlink");
+    if let Err(error) = publish_completion_manifest(layout, relative, run_id, outcome, false) {
+        outcome.status = OutcomeKind::Error;
+        outcome.reason_code = "manifest_write_error";
+        outcome.reason.push_str(&format!(
+            "; pass-through symlink manifest failed: {error:#}"
+        ));
+    }
+}
+
 fn create_kept_symlink(from: &Path, to: &Path) -> anyhow::Result<()> {
     let parent = to.parent().context("output path has no parent")?;
     let target = fs::canonicalize(from)
@@ -871,7 +970,10 @@ fn publish_completion_manifest(
         let content_sha256 = hash_file(path)?;
         if symlink
             && kind == "science_image"
-            && Some(content_sha256.as_str()) != outcome.source_sha256.as_deref()
+            && outcome
+                .source_sha256
+                .as_deref()
+                .is_some_and(|source_sha256| source_sha256 != content_sha256)
         {
             bail!("kept-image symlink no longer resolves to the parsed source bytes");
         }

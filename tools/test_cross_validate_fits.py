@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import tempfile
 from unittest.mock import patch
 
 import numpy as np
@@ -11,6 +12,7 @@ from astropy.io.fits import Header
 
 from tools.cross_validate_fits import (
     verify_preserved_header,
+    verify_passthrough_symlink,
     verify_reason_codes,
     verify_wcs,
 )
@@ -165,6 +167,36 @@ class VerifyHeaderPolicyTests(unittest.TestCase):
         output["MYSTERY"] = 42
         with self.assertRaisesRegex(AssertionError, "unexpected output header card MYSTERY"):
             verify_preserved_header(source, output, Path("mask.fits"), "mask")
+
+
+class VerifyPassThroughTests(unittest.TestCase):
+    def test_malformed_input_is_accepted_only_as_symlink_to_same_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "broken.fits"
+            source.write_bytes(b"not a valid FITS file")
+            images = root / "images"
+            images.mkdir()
+            output = images / source.name
+            output.symlink_to(source)
+            verify_passthrough_symlink(source, output)
+
+            other = root / "other.fits"
+            other.write_bytes(b"different malformed data")
+            output.unlink()
+            output.symlink_to(other)
+            with self.assertRaisesRegex(AssertionError, "does not target its input"):
+                verify_passthrough_symlink(source, output)
+
+    def test_passthrough_product_cannot_be_a_regular_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "unsupported.fits"
+            source.write_bytes(b"unsupported")
+            output = root / "output.fits"
+            output.write_bytes(source.read_bytes())
+            with self.assertRaisesRegex(AssertionError, "must be a symlink"):
+                verify_passthrough_symlink(source, output)
 
 
 if __name__ == "__main__":

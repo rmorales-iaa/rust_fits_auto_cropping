@@ -13,6 +13,7 @@ pub struct Summary<'a> {
     pub program: &'static str,
     pub version: &'static str,
     pub total: usize,
+    pub output_images: usize,
     pub clipped: usize,
     pub proposed: usize,
     pub kept: usize,
@@ -49,12 +50,16 @@ pub fn write(
 ) -> anyhow::Result<()> {
     let count = |f: fn(&OutcomeKind) -> bool| outcomes.iter().filter(|o| f(&o.status)).count();
     let summary = Summary {
-        schema_version: 7,
+        schema_version: 8,
         run_id,
         created_utc: Utc::now().to_rfc3339(),
         program: env!("CARGO_PKG_NAME"),
         version: env!("RUST_FITS_AUTO_CROPPING_VERSION"),
         total: outcomes.len(),
+        output_images: outcomes
+            .iter()
+            .filter(|outcome| outcome.output_image.is_some())
+            .count(),
         clipped: count(|s| matches!(s, OutcomeKind::Clipped)),
         proposed: count(|s| matches!(s, OutcomeKind::Proposed)),
         kept: count(|s| matches!(s, OutcomeKind::Kept)),

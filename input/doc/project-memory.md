@@ -1,6 +1,6 @@
 # Project memory
 
-Updated: 2026-10-27, after independent reason-plane semantics and FITS metadata-card validation.
+Updated: 2026-10-27, after one-to-one pass-through output support and FITS validation.
 
 ## Identity and active work
 
@@ -12,10 +12,10 @@ Updated: 2026-10-27, after independent reason-plane semantics and FITS metadata-
 ## Persistent user and science contracts
 
 - Classification depends on pixel statistics and geometry only. Structural/scaling/null metadata is necessary for decoding; WCS metadata is necessary for output preservation. Descriptive header values do not steer the detector. Evaluation groups may use instrument/night metadata without making it a classifier feature.
-- Process single-HDU 2D images; ignore compressed/multi-HDU inputs. No resampling or source intensity modification beyond explicit exclusion. Preserve raw retained samples and original observations.
+- Process eligible single-HDU 2D images; compressed/multi-HDU and malformed inputs are not classified, but normal runs preserve every discovered FITS path as exactly one `images/` entry. Unsupported and malformed inputs are annotated and passed through as canonical-source symlinks. No resampling or source intensity modification beyond explicit exclusion. Preserve raw retained samples and original observations.
 - Maximize valid science retained and true artifact area removed under a declared valid-loss and source-preservation budget. A larger mask is not inherently better. Candidate artifacts, original undefined samples, uncertain boundaries and geometric sacrifice are different quantities.
 - Mask mode remains the default. Current crop mode compares an exact axis-aligned clean rectangle with a conservative integer-centered circle and applies heuristic utility. Freeform mask/auto/extra crop families in the active plan are proposed extensions, not current CLI options.
-- Kept eligible images are canonical source symlinks. Generated products carry version/time provenance and checksums. Preserve source headers through kept links.
+- Kept eligible images and unsupported/malformed pass-throughs are canonical source symlinks. Generated products carry version/time provenance and checksums. Preserve source headers through kept links.
 - Each invocation uses `<output>/runs/<run-id>/` for images, masks, previews, reports and ISO activity logging. Validate output paths and overlap; preserve prior runs and unrelated files. Build state is ignored under `output/.state/`.
 - Keep bounded concurrency, separate runtime/science TOML, small modules and coherent local commits. Do not claim actual memory bounds or scientific accuracy from estimates or passing unit tests alone.
 
@@ -69,3 +69,7 @@ Updated: 2026-10-27, after independent reason-plane semantics and FITS metadata-
 ## Latest independent cross-validation update — 2026-10-27
 
 `tools/cross_validate_fits.py` now compares preserved source card values and comments, applies per-product changed-card allowlists, rejects unexpected cards, requires dimensionless mask/reason products, and validates `PIXACT1` codes against source undefined pixels and the binary exclusion mask. Its 12 synthetic Python tests pass. Astropy checked 20 science outputs, 16 masks and 16 reason planes from run `20261027T202641.065615444Z`; fitsverify checked the generated FITS products. Astropy warned about deprecated legacy WCS cards and inconsistent DATE-OBS/MJD-OBS in source headers; some inverse SIP residuals were unavailable. The tested 9×9 primary/alternate WCS map and synthetic SIP/CD cases do not constitute full-convention WCS coverage.
+
+## One-to-one FITS output behavior — 2026-10-27
+
+Normal-run summary schema 8 reports `total` discovered FITS inputs and `output_images` published entries. Malformed/read-failure and unsupported/ignored FITS inputs remain annotated (`error` or `ignored`) and are symlinked unchanged into the matching path under `images/`; their manifests hash the pass-through product. Successful normal runs therefore have equal input/output-image counts. A symlink-publication failure is explicit and may leave the count short; dry-run intentionally has zero output images. Tests cover malformed, multi-HDU, gzip-signature and tiled-compressed inputs, canonical targets, source-byte preservation, manifests and dry-run. See [output parity plan](output-parity-plan.md).
