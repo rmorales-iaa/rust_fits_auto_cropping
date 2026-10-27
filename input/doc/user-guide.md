@@ -26,6 +26,14 @@ cargo run --release -- --input-dir input/data --output-dir output --dry-run
 
 Use `--recursive` to search subdirectories, `--heuristics PATH` to select a separate science-rule file, `--mode crop` to choose the larger pixel-derived circle/rectangle (`mask` is the default), `--threads N` to cap workers, `--memory-budget-mib N` to set the total image workspace budget, and `--overwrite` to replace existing products. `--help` lists the current options. Input and output trees may not overlap. Originals are never edited.
 
+To review accepted crop geometry visually, add `--png` while running in crop mode:
+
+```bash
+cargo run --release -- --input-dir input/data --output-dir output --mode crop --png --recursive
+```
+
+Each accepted crop gets `output/png/<input-relative-path>.png`: source image at left, crop result at right, shared source-derived ZScale, labeled panels, native pixel scale and FITS lower-origin orientation. Invalid values and pixels outside a circular crop render black. Previews are diagnostic displays; FITS files remain the science products. The path is included in each JSON/CSV record. The flag is rejected unless the effective processing mode is `crop`.
+
 ## Products
 
 Each run receives a UTC run ID. Processed images and masks retain the input-relative path under `output/images/` and `output/masks/`; an unchanged eligible image is a symlink to its canonical source in `output/images/`. Generated FITS products include `CREATOR` (program and build version), `DATE` (UTC product time), and a nanosecond UTC `HISTORY` entry. Symlinked kept images retain the original source bytes and header unchanged, while reports and logs identify the current run version. `output/reports/<run-id>/summary.json` contains totals, program/version and per-file details; `per-image.csv` is convenient for spreadsheets. Activity events live in `output/logger/` as JSON Lines with an ISO-8601 UTC timestamp on each entry. A candidate finishes as clipped, kept, ignored or error. Exit status is 0 for no per-file errors, 1 when one or more files fail, and 2 for fatal startup/configuration errors.

@@ -9,7 +9,7 @@ use std::path::PathBuf;
     version = env!("FITS_AUTO_CLIPPING_VERSION"),
     about = "Detect and mask or crop border artifacts in single-HDU two-dimensional FITS images.",
     long_about = "Detect statistically supported border patterns using image pixel values. Non-structural FITS header metadata is not evidence for the detector. Mask mode preserves image dimensions; crop mode compares maximum-area clean rectangles and artifact-free circles and applies a configurable loss-versus-removal utility rule.",
-    after_help = "Examples:\n  fits-auto-clipping --input-dir input/data --output-dir output\n  fits-auto-clipping --input-dir input/data --output-dir output --recursive --mode crop --threads 4\n  fits-auto-clipping --input-dir input/data --output-dir output --dry-run\n\nUnchanged eligible images are symlinks under output/images/ and keep their source headers unchanged. Generated FITS products receive CREATOR, DATE and HISTORY provenance cards. Multi-HDU and compressed FITS inputs are ignored. Exit codes: 0 complete; 1 one or more file errors; 2 startup/configuration error."
+    after_help = "Examples:\n  fits-auto-clipping --input-dir input/data --output-dir output\n  fits-auto-clipping --input-dir input/data --output-dir output --recursive --mode crop --threads 4\n  fits-auto-clipping --input-dir input/data --output-dir output --recursive --mode crop --png\n  fits-auto-clipping --input-dir input/data --output-dir output --dry-run\n\n--png requires crop mode and writes one labeled before/after ZScale PNG for every accepted crop under output/png/. Unchanged eligible images are symlinks under output/images/ and keep their source headers unchanged. Generated FITS products receive CREATOR, DATE and HISTORY provenance cards. Multi-HDU and compressed FITS inputs are ignored. Exit codes: 0 complete; 1 one or more file errors; 2 startup/configuration error."
 )]
 pub struct Args {
     /// Input directory containing FITS images.
@@ -27,6 +27,9 @@ pub struct Args {
     /// Product mode: preserve dimensions with masks, or crop to the larger clean rectangle/circle.
     #[arg(long, value_enum)]
     pub mode: Option<ProcessingMode>,
+    /// Write a ZScale before/after PNG preview for every accepted crop (requires crop mode).
+    #[arg(long)]
+    pub png: bool,
     /// Include nested directories in input discovery.
     #[arg(long)]
     pub recursive: bool,

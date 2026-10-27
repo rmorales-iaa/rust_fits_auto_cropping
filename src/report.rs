@@ -40,7 +40,7 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason,width,height,masked_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,elapsed_ms\n",
+        "input,status,reason,width,height,masked_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -77,6 +77,10 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
             o.output_mask
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            o.output_png
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),

@@ -69,6 +69,21 @@ fn invoke_recursive(input: &Path, output: &Path, cfg: &Path) -> std::process::Ex
         .unwrap()
 }
 
+fn invoke_png(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
+    Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+        .args(["--input-dir"])
+        .arg(input)
+        .args(["--output-dir"])
+        .arg(output)
+        .args(["--config"])
+        .arg(cfg)
+        .args(["--heuristics"])
+        .arg(cfg.parent().unwrap().join("heuristics.toml"))
+        .args(["--mode", "crop", "--png"])
+        .status()
+        .unwrap()
+}
+
 fn artifact() -> Vec<f64> {
     let mut data = vec![100.0; 96 * 96];
     for y in 0..16 {
@@ -422,7 +437,7 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     }
     let source = input.join("circular-field.fits");
     create_fits(&source, 16, width, height, &pixels);
-    assert!(invoke(&input, &output, &config_path).success());
+    assert!(invoke_png(&input, &output, &config_path).success());
 
     let original = FitsFile::from_file(&source).unwrap();
     let cropped = FitsFile::from_file(output.join("images/circular-field.fits")).unwrap();
@@ -467,6 +482,49 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
         }
     }
     assert!(cropped.primary().verify_datasum().is_ok());
+    let preview_path = output.join("png/circular-field.fits.png");
+    let preview = image::open(&preview_path).unwrap().to_luma8();
+    assert_eq!(
+        preview.dimensions(),
+        (
+            width as u32 + crop_width as u32,
+            height.max(after_image.axes[1]) as u32 + 18
+        )
+    );
+    // Panels use the same source-derived display interval and FITS lower origin.
+    let local_x = 20usize;
+    let local_y = after_image.axes[1] / 2;
+    let global_x = x0 + local_x;
+    let global_y = y0 + local_y;
+    if (global_x as f64 - cx).powi(2) + (global_y as f64 - cy).powi(2) <= radius.powi(2) {
+        assert_eq!(
+            preview.get_pixel(global_x as u32, 18 + height as u32 - 1 - global_y as u32),
+            preview.get_pixel(
+                width as u32 + local_x as u32,
+                18 + after_image.axes[1] as u32 - 1 - local_y as u32,
+            )
+        );
+    }
+    assert_eq!(
+        preview
+            .get_pixel(width as u32, 18 + after_image.axes[1] as u32 - 1)
+            .0[0],
+        0
+    );
+    let report = fs::read_dir(output.join("reports"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("summary.json");
+    let summary: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert!(
+        summary["files"][0]["output_png"]
+            .as_str()
+            .unwrap()
+            .ends_with("circular-field.fits.png")
+    );
     let output_mask = read_mask(&output.join("masks/circular-field.fits"));
     assert_eq!(output_mask.len(), width * height);
     assert_eq!(output_mask[0], 1);
@@ -530,6 +588,28 @@ fn crop_mode_keeps_source_when_valid_pixel_loss_dominates() {
             .unwrap()
             .contains("rejected; source retained")
     );
+}
+
+#[test]
+fn png_flag_requires_effective_crop_mode() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let result = Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+        .args(["--input-dir"])
+        .arg(&input)
+        .args(["--output-dir"])
+        .arg(&output)
+        .args(["--config"])
+        .arg(input.join("config.toml"))
+        .arg("--png")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--png requires crop mode"));
+    assert!(!output.join("png").exists());
 }
 
 #[test]

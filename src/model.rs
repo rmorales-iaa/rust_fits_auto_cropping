@@ -40,6 +40,7 @@ pub struct FileOutcome {
     pub unmasked_pixels_sacrificed: usize,
     pub output_image: Option<PathBuf>,
     pub output_mask: Option<PathBuf>,
+    pub output_png: Option<PathBuf>,
     pub elapsed_ms: u128,
 }
 
@@ -73,6 +74,7 @@ impl FileOutcome {
             unmasked_pixels_sacrificed: 0,
             output_image: None,
             output_mask: None,
+            output_png: None,
             elapsed_ms: 0,
         }
     }

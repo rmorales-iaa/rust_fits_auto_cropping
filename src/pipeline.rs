@@ -7,6 +7,7 @@ use crate::{
     fits_image::read_image,
     logger::Logger,
     model::{FileOutcome, OutcomeKind},
+    preview::{preview_path, write_crop_preview},
     report,
     writer::{write_cropped_products, write_products},
 };
@@ -45,6 +46,12 @@ impl std::error::Error for RunError {}
 struct BatchFailure {
     count: usize,
     run_id: String,
+}
+#[derive(Clone, Copy)]
+struct ProductOptions {
+    dry_run: bool,
+    overwrite: bool,
+    png_preview: bool,
 }
 impl std::fmt::Display for BatchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -102,6 +109,9 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     if let Some(mode) = args.mode {
         config.processing.mode = mode;
     }
+    if args.png && !matches!(config.processing.mode, ProcessingMode::Crop) {
+        bail!("--png requires crop mode (set processing.mode = \"crop\" or pass --mode crop)");
+    }
     if config.processing.memory_budget_mib < config.processing.maximum_image_mib {
         bail!("memory budget must be >= maximum image workspace");
     }
@@ -145,8 +155,11 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
                     &output,
                     &config,
                     &heuristics,
-                    args.dry_run,
-                    args.overwrite,
+                    ProductOptions {
+                        dry_run: args.dry_run,
+                        overwrite: args.overwrite,
+                        png_preview: args.png,
+                    },
                 );
                 match logger.lock() {
                     Ok(mut log) => {
@@ -231,8 +244,7 @@ fn process_one(
     output: &Path,
     config: &Config,
     heuristics: &HeuristicsConfig,
-    dry: bool,
-    overwrite: bool,
+    options: ProductOptions,
 ) -> FileOutcome {
     let timer = Instant::now();
     let rel = path.strip_prefix(input).unwrap_or(path);
@@ -354,9 +366,11 @@ fn process_one(
                         if crop_accepted { "accepted" } else { "rejected; source retained" }
                     ));
                 }
-                if !dry {
+                if !options.dry_run {
                     let image_path = output.join("images").join(rel);
                     let mask_path = output.join("masks").join(rel);
+                    let png_path =
+                        (options.png_preview && crop_accepted).then(|| preview_path(output, rel));
                     if let Some(p) = image_path.parent()
                         && let Err(e) = fs::create_dir_all(p)
                     {
@@ -371,7 +385,11 @@ fn process_one(
                         outcome.reason = e.to_string();
                         return finish(outcome, timer);
                     }
-                    if !overwrite && (image_path.exists() || mask_path.exists()) {
+                    if !options.overwrite
+                        && (image_path.exists()
+                            || mask_path.exists()
+                            || png_path.as_ref().is_some_and(|path| path.exists()))
+                    {
                         outcome.status = OutcomeKind::Error;
                         outcome.reason = "output exists; pass --overwrite".into();
                         return finish(outcome, timer);
@@ -407,10 +425,27 @@ fn process_one(
                     }
                     outcome.output_image = Some(image_path);
                     outcome.output_mask = has_mask.then_some(mask_path);
+                    if crop_accepted && let Some(preview) = png_path {
+                        let region = crop.expect("accepted crop has a region");
+                        if let Err(error) = write_crop_preview(
+                            &preview,
+                            &image.values,
+                            image.width,
+                            image.height,
+                            region,
+                        ) {
+                            outcome.status = OutcomeKind::Error;
+                            outcome.reason = format!(
+                                "FITS crop products were written, but PNG preview failed: {error:#}"
+                            );
+                            return finish(outcome, timer);
+                        }
+                        outcome.output_png = Some(preview);
+                    }
                 }
-            } else if !dry {
+            } else if !options.dry_run {
                 let image_path = output.join("images").join(rel);
-                if !overwrite && image_path.exists() {
+                if !options.overwrite && image_path.exists() {
                     outcome.status = OutcomeKind::Error;
                     outcome.reason = "output exists; pass --overwrite".into();
                     return finish(outcome, timer);

@@ -76,6 +76,12 @@ The final crop-mode run took 4.22 s and reached 894,476 KiB peak RSS on four wor
 
 Crop mode is opt-in. It selects the circle or rectangle retaining more pixel centers, then compares evidence-weighted artifact removal against unmasked pixels sacrificed. The example crop passes the current configurable utility rule but still requires human review; the utility is not a calibrated scientific loss model. Crop WCS checks passed with Astropy on the supplied outputs.
 
+### Optional ZScale crop previews
+
+The `--mode crop --png` smoke run used the same 25 supplied frames and four workers. It wrote 16 side-by-side PNGs for the 16 accepted crops; the four kept files and five files with malformed headers had no preview. The five errors match the pre-existing `INSAPNAM` issue above. Output PNG bytes totaled 183,634,118. Wall time was 4.54 seconds and peak RSS was 911,572 KiB (one warm run; not a benchmark distribution). The prior crop-only run was 4.22 seconds and 894,476 KiB, so the rough difference includes PNG rendering/encoding and run-to-run variation.
+
+`tools/cross_validate_previews.py` independently checked all 16 PNGs with Astropy `ZScaleInterval` and Pillow: panel dimensions, 1,000 sampled source intensity mappings per image, matching source/crop samples at retained pixels, FITS lower-origin orientation and black circular exterior. All passed with program version `0.0.16`. Synthetic tests also cover preview labels/orientation, shared-panel scaling, circular exterior masking and flag/mode validation. This confirms display interoperability for this dataset; it does not validate the scientific crop decisions.
+
 Scientific rules live in `input/heuristics.toml`. The detector reports candidate evidence, a configurable artifact-benefit diagnostic, valid-pixel-loss penalty and net utility for candidates, including those rejected by support/area gates. These are transparent heuristic units, not probabilities, p-values or measured photometric loss. The default thresholds are provisional and not empirically calibrated. A real science release requires labeled, instrument-specific development data and held-out evaluation.
 
 ## Required scientific acceptance work

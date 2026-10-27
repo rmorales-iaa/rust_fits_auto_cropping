@@ -7,6 +7,7 @@ mod fits_image;
 mod logger;
 mod model;
 mod pipeline;
+mod preview;
 mod report;
 mod writer;
 
