@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod crop;
 mod detection;
+mod durability;
 mod fits_image;
 mod logger;
 mod model;

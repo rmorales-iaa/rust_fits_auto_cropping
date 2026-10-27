@@ -4,6 +4,7 @@ use crate::{
     config::{Config, HeuristicsConfig, ProcessingMode},
     crop::{CropRegion, largest_clean_region},
     detection::detect_border,
+    durability::sync_parent,
     fits_image::{NoUnusedIntegerCode, is_gzip_compressed, read_image},
     logger::Logger,
     model::{FileOutcome, OutcomeKind},
@@ -737,6 +738,7 @@ fn create_kept_symlink(from: &Path, to: &Path) -> anyhow::Result<()> {
     create_file_symlink(&target, &temporary_link)?;
     fs::rename(&temporary_link, to)
         .with_context(|| format!("publishing kept-image symlink {}", to.display()))?;
+    sync_parent(to)?;
     Ok(())
 }
 
@@ -765,6 +767,7 @@ fn remove_existing_product(path: &Path) -> anyhow::Result<()> {
     if path_exists(path) {
         fs::remove_file(path)
             .with_context(|| format!("removing stale product {}", path.display()))?;
+        sync_parent(path)?;
     }
     Ok(())
 }
@@ -835,6 +838,7 @@ fn publish_completion_manifest(
         .persist(&manifest_path)
         .map_err(|error| error.error)
         .with_context(|| format!("publishing completion manifest {}", manifest_path.display()))?;
+    sync_parent(&manifest_path)?;
     outcome.output_manifest = Some(manifest_path);
     Ok(())
 }

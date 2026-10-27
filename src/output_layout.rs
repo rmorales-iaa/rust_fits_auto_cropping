@@ -1,4 +1,5 @@
 //! Safe creation and path derivation for one isolated processing run.
+use crate::durability::{sync_directory, sync_parent};
 use anyhow::{Context, bail};
 use std::{
     ffi::OsString,
@@ -39,15 +40,18 @@ impl OutputLayout {
         if input_root.starts_with(&root) || root.starts_with(input_root) {
             bail!("input and output directories must not overlap");
         }
+        sync_parent(&root)?;
 
         let runs = root.join("runs");
         ensure_plain_directory(&runs)?;
         let run = runs.join(run_id);
         fs::create_dir(&run)
             .with_context(|| format!("creating unique run output directory {}", run.display()))?;
+        sync_parent(&run)?;
         for name in ["images", "masks", "previews", "manifests"] {
             fs::create_dir(run.join(name))?;
         }
+        sync_directory(&run)?;
         Ok(Self { root, run })
     }
 
@@ -174,7 +178,10 @@ fn ensure_plain_directory(path: &Path) -> anyhow::Result<()> {
         }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                sync_parent(path)?;
+                Ok(())
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 ensure_plain_directory(path)
             }

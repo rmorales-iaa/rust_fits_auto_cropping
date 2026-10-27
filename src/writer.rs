@@ -1,6 +1,9 @@
 //! FITS products written with the pure-Rust fitskit crate.
-use crate::crop::{CropRect, CropRegion};
 use crate::fits_image::{Image, unused_integer_value};
+use crate::{
+    crop::{CropRect, CropRegion},
+    durability::sync_parent,
+};
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
 use fitskit::{FitsFile, HduData, Header, HeaderValue, ImageData, Keyword, PixelData};
@@ -242,7 +245,16 @@ where
 {
     let image_backup = backup_existing(image_path)?;
     let mask_backup = backup_existing(mask_path)?;
-    let result = publish(staged_image, image_path).and_then(|()| publish(staged_mask, mask_path));
+    let result = publish(staged_image, image_path)
+        .and_then(|()| publish(staged_mask, mask_path))
+        .and_then(|()| sync_parent(image_path))
+        .and_then(|()| {
+            if image_path.parent() == mask_path.parent() {
+                Ok(())
+            } else {
+                sync_parent(mask_path)
+            }
+        });
     if let Err(error) = result {
         let image_rollback = restore_backup(image_path, image_backup);
         let mask_rollback = restore_backup(mask_path, mask_backup);
@@ -724,6 +736,7 @@ fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
     let temp = NamedTempFile::new_in(parent)?;
     let bytes = bytes_with_valid_checksum(file)?;
     fs::write(temp.path(), bytes)?;
+    temp.as_file().sync_all()?;
     FitsFile::from_file(temp.path())
         .context("reopening generated FITS")?
         .primary()
@@ -731,6 +744,7 @@ fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
     temp.persist(destination)
         .map_err(|e| e.error)
         .with_context(|| format!("publishing FITS {}", destination.display()))?;
+    sync_parent(destination)?;
     Ok(())
 }
 
@@ -806,6 +820,8 @@ fn backup_existing(path: &Path) -> anyhow::Result<Option<NamedTempFile>> {
     }
     let backup = NamedTempFile::new_in(path.parent().context("output path has no parent")?)?;
     fs::copy(path, backup.path())?;
+    backup.as_file().sync_all()?;
+    sync_parent(path)?;
     Ok(Some(backup))
 }
 
@@ -815,6 +831,7 @@ fn restore_backup(path: &Path, backup: Option<NamedTempFile>) -> anyhow::Result<
     } else if path.exists() {
         fs::remove_file(path)?;
     }
+    sync_parent(path)?;
     Ok(())
 }
 

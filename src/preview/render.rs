@@ -1,5 +1,5 @@
 //! Side-by-side native-scale grayscale panels for accepted crops.
-use crate::{crop::CropRegion, preview::zscale::ZScale};
+use crate::{crop::CropRegion, durability::sync_parent, preview::zscale::ZScale};
 use anyhow::{Context, bail};
 use image::{GrayImage, ImageFormat, Luma};
 use std::{fs, path::Path};
@@ -84,6 +84,7 @@ pub fn write_crop_preview(
     temporary
         .persist(destination)
         .map_err(|error| error.error)?;
+    sync_parent(destination)?;
     Ok(())
 }
 

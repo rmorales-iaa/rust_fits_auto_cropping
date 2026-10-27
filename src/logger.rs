@@ -1,4 +1,5 @@
 //! Append-only JSON Lines activity logger with a UTC timestamp on every event.
+use crate::durability::sync_parent;
 use anyhow::Context;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -26,11 +27,13 @@ impl Logger {
             Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ"),
             run_id
         );
+        let path = output.join(filename);
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
-            .open(output.join(filename))
+            .open(&path)
             .context("creating activity log")?;
+        sync_parent(&path).context("persisting activity log directory entry")?;
         Ok(Self { file })
     }
     pub fn event<T: Serialize>(
