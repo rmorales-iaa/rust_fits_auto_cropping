@@ -1,16 +1,6 @@
-# Initial conservative detector settings. These require validation against real data.
-[detector]
-tile_size = 32
-minimum_border_tiles = 2
-minimum_abs_z_score = 8.0
-maximum_tile_noise_ratio = 0.20
-minimum_spatial_correlation = 0.95
-minimum_mask_fraction = 0.01
-maximum_mask_fraction = 0.50
-
+# Operational settings. Science decision thresholds are in heuristics.toml.
 [processing]
-threads = 0 # 0 selects available logical CPUs
+threads = 0 # 0 selects available logical CPUs, bounded by the memory budget.
 recursive = false
 memory_budget_mib = 2048
 maximum_image_mib = 512
-mode = "mask" # crop mode is not yet implemented

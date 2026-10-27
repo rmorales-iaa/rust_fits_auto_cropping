@@ -10,11 +10,12 @@ The tool marks clipped samples as undefined in a copy of the original image. It 
 
 ## Install and run
 
-Install Rust 1.88 or newer with a stable toolchain. FITS I/O uses a pure-Rust crate and requires no CFITSIO installation. Build and run from the repository root:
+Install Rust 1.88 or newer with a stable toolchain. FITS I/O uses a pure-Rust crate and requires no CFITSIO installation. Operational settings and science rules are separate files. Build and run from the repository root:
 
 ```bash
 cargo build --release
 cargo run --release -- --input-dir input/data --output-dir output --config input/config.toml
+cargo run --release -- --input-dir input/data --output-dir output --recursive --config input/config.toml --heuristics input/heuristics.toml
 ```
 
 For a dry run that writes reports and logs without science image or mask products:
@@ -23,7 +24,7 @@ For a dry run that writes reports and logs without science image or mask product
 cargo run --release -- --input-dir input/data --output-dir output --dry-run
 ```
 
-Use `--recursive` to search subdirectories, `--threads N` to cap workers, `--memory-budget-mib N` to set the total image workspace budget, and `--overwrite` to replace existing products. `--help` lists the current options. Input and output trees may not overlap. Originals are never edited.
+Use `--recursive` to search subdirectories, `--heuristics PATH` to select a separate science-rule file, `--threads N` to cap workers, `--memory-budget-mib N` to set the total image workspace budget, and `--overwrite` to replace existing products. `--help` lists the current options. Input and output trees may not overlap. Originals are never edited.
 
 ## Products
 
@@ -31,7 +32,7 @@ Each run receives a UTC run ID. Processed images and masks retain the input-rela
 
 ## Configuration
 
-Edit `input/config.toml`; see [configuration reference](configuration.md). Invalid values stop the run before input processing. CLI resource/discovery flags override matching settings. Save the effective configuration and hash in run-start log details. Default detection thresholds are starting values, not validated instrument-independent settings.
+Edit `input/config.toml` for worker/discovery/memory settings and `input/heuristics.toml` for clipping decisions; see [configuration reference](configuration.md). Invalid values stop the run before input processing. Effective settings and hashes are recorded in the run-start log. Detector rules are reviewable thresholds, not validated instrument-independent settings or calibrated probabilities. Ambiguous images are kept unchanged.
 
 ## Safe interpretation
 

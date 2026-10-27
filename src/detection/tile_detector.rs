@@ -1,6 +1,6 @@
 //! Candidate mask from robust tile contrast, tile noise and border connectivity.
 use super::{correlation::lag_one_correlation, robust::location_scale};
-use crate::config::DetectorConfig;
+use crate::config::HeuristicRules;
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -11,6 +11,10 @@ pub struct Detection {
     pub accepted: bool,
     pub reason: String,
     pub score: f64,
+    pub evidence_ratio: f64,
+    pub artifact_benefit: f64,
+    pub valid_pixel_loss: f64,
+    pub net_utility: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -19,12 +23,13 @@ struct Tile {
     sigma: f64,
     correlation: Option<f64>,
     candidate: bool,
+    evidence_ratio: f64,
 }
 
 /// Detect low-variance or strongly shifted tiles connected to the frame boundary.
 /// The method deliberately abstains on weak contrast, inadequate interior support,
 /// small regions and excessive masks. It is a conservative baseline requiring empirical validation.
-pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorConfig) -> Detection {
+pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules) -> Detection {
     let empty = || Detection {
         mask: vec![false; data.len()],
         candidate_tiles: 0,
@@ -32,6 +37,10 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
         accepted: false,
         reason: "insufficient valid data".into(),
         score: 0.0,
+        evidence_ratio: 0.0,
+        artifact_benefit: 0.0,
+        valid_pixel_loss: 0.0,
+        net_utility: 0.0,
     };
     if width < cfg.tile_size * 3
         || height < cfg.tile_size * 3
@@ -65,6 +74,7 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
                 sigma,
                 correlation,
                 candidate: false,
+                evidence_ratio: 0.0,
             });
         }
     }
@@ -108,7 +118,7 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
         .max(noise_scale)
         .max(f64::EPSILON * center.abs().max(1.0));
     let mut best_score: f64 = 0.0;
-    for (i, tile) in tiles.iter_mut().enumerate() {
+    for tile in &mut tiles {
         let delta = (tile.median - center).abs() / scale;
         let quiet = typical_noise > 0.0
             && tile.sigma.is_finite()
@@ -117,12 +127,16 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
             .correlation
             .is_some_and(|r| r >= cfg.minimum_spatial_correlation);
         let uniform_contrast = tile.sigma <= f64::EPSILON && noise_scale <= f64::EPSILON;
+        tile.evidence_ratio = if delta.is_finite() {
+            delta / cfg.minimum_abs_z_score
+        } else {
+            0.0
+        };
         tile.candidate =
             delta >= cfg.minimum_abs_z_score && (quiet || correlated || uniform_contrast);
         if delta.is_finite() {
             best_score = best_score.max(delta.min(1.0e6));
         }
-        let _ = i;
     }
     // Flood-fill only candidates connected to an edge; isolated sources/features remain intact.
     let mut seen = vec![false; tiles.len()];
@@ -159,7 +173,32 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
         }
     }
     let count = accepted_tiles.iter().filter(|v| **v).count();
-    let fraction = count as f64 / tiles.len() as f64;
+    let selected_evidence: Vec<f64> = tiles
+        .iter()
+        .zip(&accepted_tiles)
+        .filter_map(|(tile, selected)| selected.then_some(tile.evidence_ratio))
+        .collect();
+    let (evidence_ratio, _) = location_scale(&selected_evidence);
+    let evidence_ratio = evidence_ratio.min(cfg.maximum_evidence_ratio).max(0.0);
+    let selected_pixels: usize = accepted_tiles
+        .iter()
+        .enumerate()
+        .filter(|(_, selected)| **selected)
+        .map(|(ti, _)| {
+            let tx = ti % cols;
+            let ty = ti / cols;
+            (((tx + 1) * cfg.tile_size).min(width) - tx * cfg.tile_size)
+                * (((ty + 1) * cfg.tile_size).min(height) - ty * cfg.tile_size)
+        })
+        .sum();
+    let fraction = selected_pixels as f64 / data.len() as f64;
+    // Report the same clip-versus-keep evidence for every non-empty candidate,
+    // including candidates rejected by area or support gates. This makes an
+    // abstention auditable without implying that the score is calibrated.
+    let artifact_benefit = fraction * evidence_ratio;
+    let valid_pixel_loss =
+        cfg.valid_pixel_loss_cost * fraction / (1.0 - fraction).max(f64::EPSILON);
+    let net_utility = artifact_benefit - valid_pixel_loss;
     if count < cfg.minimum_border_tiles {
         return Detection {
             mask: vec![false; data.len()],
@@ -168,6 +207,10 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
             accepted: false,
             reason: "border component below minimum tile count".into(),
             score: best_score,
+            evidence_ratio,
+            artifact_benefit,
+            valid_pixel_loss,
+            net_utility,
         };
     }
     if fraction < cfg.minimum_mask_fraction {
@@ -178,6 +221,10 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
             accepted: false,
             reason: "candidate below minimum mask fraction".into(),
             score: best_score,
+            evidence_ratio,
+            artifact_benefit,
+            valid_pixel_loss,
+            net_utility,
         };
     }
     if fraction > cfg.maximum_mask_fraction {
@@ -188,6 +235,26 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
             accepted: false,
             reason: "candidate exceeds maximum mask fraction".into(),
             score: best_score,
+            evidence_ratio,
+            artifact_benefit,
+            valid_pixel_loss,
+            net_utility,
+        };
+    }
+    if evidence_ratio < cfg.minimum_evidence_ratio || net_utility < cfg.minimum_net_utility {
+        return Detection {
+            mask: vec![false; data.len()],
+            candidate_tiles: count,
+            candidate_fraction: fraction,
+            accepted: false,
+            reason: format!(
+                "candidate retained: artifact benefit {artifact_benefit:.4} minus valid-pixel loss {valid_pixel_loss:.4} gives utility {net_utility:.4}, below configured clip rule"
+            ),
+            score: best_score,
+            evidence_ratio,
+            artifact_benefit,
+            valid_pixel_loss,
+            net_utility,
         };
     }
     let mut mask = vec![false; data.len()];
@@ -207,8 +274,14 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &DetectorCo
         candidate_tiles: count,
         candidate_fraction: fraction,
         accepted: true,
-        reason: "border-connected tile anomaly passed configured gates".into(),
+        reason: format!(
+            "clip accepted: evidence ratio {evidence_ratio:.3}; artifact benefit {artifact_benefit:.4}; valid-pixel loss {valid_pixel_loss:.4}; net utility {net_utility:.4}"
+        ),
         score: best_score,
+        evidence_ratio,
+        artifact_benefit,
+        valid_pixel_loss,
+        net_utility,
     }
 }
 

@@ -11,6 +11,7 @@ Requires Rust 1.88+. FITS reading and writing use the pure-Rust [`fitskit`](http
 ```bash
 cargo build --release
 cargo run --release -- --input-dir input/data --output-dir output --config input/config.toml
+cargo run --release -- --input-dir input/data --output-dir output --recursive --config input/config.toml --heuristics input/heuristics.toml
 cargo run --release -- --input-dir input/data --output-dir output --dry-run
 ```
 

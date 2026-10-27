@@ -18,6 +18,9 @@ pub struct Args {
     /// TOML configuration. Defaults to input/config.toml when present.
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// Science heuristic rules. Defaults to input/heuristics.toml.
+    #[arg(long)]
+    pub heuristics: Option<PathBuf>,
     /// Include nested directories in input discovery.
     #[arg(long)]
     pub recursive: bool,

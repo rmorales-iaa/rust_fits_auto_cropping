@@ -36,7 +36,7 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason,width,height,masked_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,output_image,output_mask,elapsed_ms\n",
+        "input,status,reason,width,height,masked_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,output_image,output_mask,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -50,6 +50,10 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
             format!("{:.8}", o.proposed_mask_fraction),
             o.candidate_tiles.to_string(),
             format!("{:.6}", o.score),
+            format!("{:.6}", o.evidence_ratio),
+            format!("{:.6}", o.artifact_benefit),
+            format!("{:.6}", o.valid_pixel_loss),
+            format!("{:.6}", o.net_utility),
             o.output_image
                 .as_ref()
                 .map(|p| p.display().to_string())

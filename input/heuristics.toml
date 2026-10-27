@@ -1,0 +1,15 @@
+# Provisional science decisions. Validate and calibrate for each instrument.
+[heuristics]
+tile_size = 16
+minimum_border_tiles = 2
+minimum_abs_z_score = 8.0
+maximum_tile_noise_ratio = 0.20
+minimum_spatial_correlation = 0.95
+minimum_mask_fraction = 0.005
+maximum_mask_fraction = 0.50
+
+# Clip-versus-keep tradeoff. These are diagnostic evidence units, not probabilities.
+minimum_evidence_ratio = 1.25
+maximum_evidence_ratio = 5.0
+valid_pixel_loss_cost = 1.5
+minimum_net_utility = 0.001

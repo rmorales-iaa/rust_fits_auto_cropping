@@ -1,8 +1,8 @@
 //! FITS products written with the pure-Rust fitskit crate.
 use crate::fits_image::Image;
 use anyhow::{Context, bail};
-use fitskit::{FitsFile, HduData, HeaderValue, ImageData, Keyword, PixelData};
-use std::{fs, path::Path};
+use fitskit::{FitsFile, HduData, Header, HeaderValue, ImageData, Keyword, PixelData};
+use std::{fs, io::Cursor, path::Path};
 use tempfile::NamedTempFile;
 
 /// Create a uint8 mask image with WCS and non-structural source cards.
@@ -155,7 +155,7 @@ fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
         .parent()
         .context("FITS destination has no parent")?;
     let temp = NamedTempFile::new_in(parent)?;
-    let bytes = file.to_bytes_with_checksum()?;
+    let bytes = bytes_with_valid_checksum(file)?;
     fs::write(temp.path(), bytes)?;
     FitsFile::from_file(temp.path())
         .context("reopening generated FITS")?
@@ -165,6 +165,69 @@ fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
         .map_err(|e| e.error)
         .with_context(|| format!("publishing FITS {}", destination.display()))?;
     Ok(())
+}
+
+/// Stamp checksums over the exact serialized HDU bytes, then verify the FITS
+/// one's-complement invariant before any output is published.
+fn bytes_with_valid_checksum(file: &FitsFile) -> anyhow::Result<Vec<u8>> {
+    if file.len() != 1 {
+        bail!("science and mask outputs must contain exactly one HDU");
+    }
+    let mut staged = file.clone();
+    for hdu in &mut staged.hdus {
+        hdu.header
+            .keywords
+            .retain(|card| !matches!(card.name.as_str(), "CHECKSUM" | "DATASUM"));
+        let datasum = hdu.datasum();
+        hdu.header.set(
+            "DATASUM",
+            HeaderValue::String(datasum.to_string()),
+            Some("data unit checksum"),
+        );
+        hdu.header.set(
+            "CHECKSUM",
+            HeaderValue::String("0000000000000000".into()),
+            Some("HDU checksum"),
+        );
+    }
+    let mut bytes = staged.to_bytes()?;
+    let mut cursor = Cursor::new(bytes.as_slice());
+    let _header = Header::read_from(&mut cursor)?;
+    let header_len = usize::try_from(cursor.position())?;
+    let data_len = staged.primary().data_byte_len();
+    let padded_data_len = data_len
+        .checked_add(2879)
+        .ok_or_else(|| anyhow::anyhow!("FITS data length overflow"))?
+        / 2880
+        * 2880;
+    let hdu_end = header_len
+        .checked_add(padded_data_len)
+        .ok_or_else(|| anyhow::anyhow!("FITS output length overflow"))?;
+    if hdu_end != bytes.len() {
+        bail!("serialized FITS length does not match its header/data layout");
+    }
+    let card = bytes[..header_len]
+        .chunks_exact(80)
+        .position(|card| card.get(..8).is_some_and(|key| key == b"CHECKSUM"))
+        .map(|index| index * 80)
+        .context("serialized FITS has no CHECKSUM card")?;
+    // FITS checksum cards use the conventional fixed comment column. The
+    // generic parsed-header serializer places short-string comments earlier;
+    // normalize this reserved card before calculating its checksum.
+    bytes[card + 28..card + 80].fill(b' ');
+    bytes[card + 31..card + 33].copy_from_slice(b"/ ");
+    bytes[card + 33..card + 45].copy_from_slice(b"HDU checksum");
+    let sum = fitskit::checksum::checksum(&bytes[..hdu_end]);
+    let encoded = fitskit::checksum::encode_checksum(sum, true);
+    if encoded.len() != 16 {
+        bail!("FITS checksum encoder returned an invalid value");
+    }
+    bytes[card + 11..card + 27].copy_from_slice(encoded.as_bytes());
+    let verified = fitskit::checksum::checksum(&bytes[..hdu_end]);
+    if verified != 0xffff_ffff && verified != 0 {
+        bail!("serialized FITS CHECKSUM invariant failed: {verified:#010x}");
+    }
+    Ok(bytes)
 }
 
 fn backup_existing(path: &Path) -> anyhow::Result<Option<NamedTempFile>> {

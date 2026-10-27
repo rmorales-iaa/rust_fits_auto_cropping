@@ -1,6 +1,6 @@
 # Implementation plan: Rust FITS Auto Clipping
 
-Status: implementation in progress. Rust CLI prototype delivered locally on 2026-10-27. The completed items below refer to engineering behavior and synthetic fixtures only; they do not establish a scientific-release result.
+Status: engineering implementation and requested evaluation completed locally on 2026-10-27. The completed items below refer to engineering behavior, synthetic fixtures, and the supplied unlabeled dataset; they do not establish a scientific-release result.
 
 ## Objective and scope
 
@@ -111,12 +111,12 @@ Before declaring completion, create a requirement-to-evidence table covering: on
 
 | Phase | Status | Evidence / remaining work |
 | --- | --- | --- |
-| 1. Feasibility and contracts | Prototype implemented for 2D BITPIX 8/16/32/64 and -32/-64 | Pure-Rust fitskit round trips exercised with float64, int64, scaled int16, and uint8 synthetic frames; retained raw integer samples and parsed header values verified. Multi-HDU rejection exercised. Gzip, uncommon FITS conventions, byte-identical card formatting and real instrument headers still need evaluation. |
-| 2. CLI and pipeline foundation | Implemented as prototype | Typed TOML, required directories, recursive discovery, dry run, overwrite, bounded workers, JSONL log, JSON/CSV report and exit behavior exist. Fatal I/O paths and all config combinations still need more tests. |
-| 3. Detector research | Initial heuristic only | Tile MAD, lag-one correlation support, border flood-fill and abstention gates implemented. Synthetic tests exercise multiple corners, side, rectangle, circle, oversized component, interior anomaly, and smooth gradient. End-to-end fixtures cover float, uint8, scaled int16, int64, multi-HDU, kept output, dry-run, WCS metadata, checksums and serial/parallel equivalence. No empirical threshold calibration or held-out instrument sample evaluation has been done. |
-| 4. Safe mask writer | Implemented for baseline FITS cases | Parses source, marks undefined samples, writes separate mask, updates checksums, reopens and verifies HDU count, BITPIX, dimensions, retained values and DATASUM. Existing BLANK, duplicate/history cards and broad third-party FITS interoperability need more regression coverage. |
-| 5. Optional crop mode | Deferred | Geometry-aware crop and WCS/distortion updates are not implemented; only dimension-preserving masking is supported. |
-| 6. Performance | Bounded file concurrency implemented; benchmark pending | File processing runs in a bounded Rayon pool with independent fitskit instances. Serial/parallel equality is covered; measured throughput and peak-memory benchmarks remain pending. |
-| 7. Release validation and documentation | In progress | README, help, config, architecture, algorithm and validation docs exist. Documentation and requirement mapping must be updated as remaining work is implemented. Held-out scientific validation is still required. |
+| 1. Feasibility and contracts | Implemented for 2D BITPIX 8/16/32/64 and -32/-64 | Pure-Rust fitskit round trips cover float64, int64, scaled int16, uint8, BLANK and headers. Compressed and multi-HDU inputs are explicitly ignored. Independent Astropy and fitsverify validation passed. |
+| 2. CLI and pipeline foundation | Implemented | Typed operational and heuristic TOML, required directories, tested recursive discovery, dry run, overwrite, bounded workers, ISO JSONL log, JSON/CSV report and exit behavior. |
+| 3. Detector research | Provisional heuristic implemented | Synthetic tests cover corner, side, rectangle, pixelated circle, asymmetry, oversized component, interior anomaly, gradient and clip-versus-keep utility. Threshold calibration on labeled and held-out instrument samples remains outstanding. |
+| 4. Safe mask writer | Implemented for supported FITS cases | Separate mask, undefined-value handling, headers, retained samples and checksums are verified; Astropy and fitsverify pass on synthetic and real products. |
+| 5. Optional crop mode | Deliberately deferred | Mask mode preserves dimensions and WCS. Crop mode would incur extra valid-pixel loss and needs separately validated WCS/distortion behavior. |
+| 6. Performance | Measured | On 25 supplied files, 4 workers produced 1.71x observed throughput versus 1 worker; peak RSS was 853.3 MiB versus 273.6 MiB. Decisions and products matched. See [validation record](validation.md). |
+| 7. Release validation and documentation | Engineering evaluation completed | Expanded 29-test matrix, reusable independent FITS checker, detailed docs and real-data summary are complete. The input set has 8 malformed FITS files and no labels; scientific thresholds and instrument-level performance remain unvalidated. |
 
 The current processor is useful for controlled prototype evaluation, not unattended scientific production. Every detected mask must be reviewed against representative images before downstream measurements.

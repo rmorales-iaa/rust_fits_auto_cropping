@@ -1,7 +1,7 @@
 //! Directory orchestration, bounded parallel processing, and report/log finalization.
 use crate::{
     cli::Args,
-    config::Config,
+    config::{Config, HeuristicsConfig},
     detection::detect_border,
     fits_image::read_image,
     logger::Logger,
@@ -91,6 +91,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         bail!("input and output directories must not overlap");
     }
     let (mut config, config_text) = Config::load(args.config.as_deref())?;
+    let (heuristics, heuristics_text) = HeuristicsConfig::load(args.heuristics.as_deref())?;
     if let Some(threads) = args.threads {
         config.processing.threads = threads;
     }
@@ -105,6 +106,8 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     }
     let source_config_hash = format!("{:x}", Sha256::digest(config_text.as_bytes()));
     let config_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&config)?));
+    let source_heuristics_hash = format!("{:x}", Sha256::digest(heuristics_text.as_bytes()));
+    let heuristics_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&heuristics)?));
     let requested = if config.processing.threads == 0 {
         rayon::current_num_threads().max(1)
     } else {
@@ -116,11 +119,13 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let run_id = Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
     let mut logger = Logger::create(&output, &run_id)?;
     logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output":output,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
-        "version":env!("CARGO_PKG_VERSION"),"threads":config.processing.threads,"effective_config":config,"dry_run":args.dry_run}))?;
+        "source_heuristics_sha256":source_heuristics_hash,"effective_heuristics_sha256":heuristics_hash,
+        "version":env!("CARGO_PKG_VERSION"),"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
     let mut paths = discover(&input, config.processing.recursive)?;
     paths.sort();
     logger.event(&run_id,"discovery_complete",serde_json::json!({"candidate_fits_files":paths.len(),"workers":workers,"memory_budget_mib":config.processing.memory_budget_mib,"maximum_image_mib":config.processing.maximum_image_mib}))?;
     let config = Arc::new(config);
+    let heuristics = Arc::new(heuristics);
     let logger = Arc::new(Mutex::new(logger));
     let logger_failed = Arc::new(AtomicBool::new(false));
     let pool = rayon::ThreadPoolBuilder::new()
@@ -130,8 +135,15 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         paths
             .par_iter()
             .map(|path| {
-                let outcome =
-                    process_one(path, &input, &output, &config, args.dry_run, args.overwrite);
+                let outcome = process_one(
+                    path,
+                    &input,
+                    &output,
+                    &config,
+                    &heuristics,
+                    args.dry_run,
+                    args.overwrite,
+                );
                 match logger.lock() {
                     Ok(mut log) => {
                         if log.event(&run_id, "file_finished", &outcome).is_err() {
@@ -214,6 +226,7 @@ fn process_one(
     input: &Path,
     output: &Path,
     config: &Config,
+    heuristics: &HeuristicsConfig,
     dry: bool,
     overwrite: bool,
 ) -> FileOutcome {
@@ -237,10 +250,14 @@ fn process_one(
             OutcomeKind::Ignored,
             format!("ineligible image: {}", eligibility_reason(reason)),
         ),
-        Err(error) => FileOutcome::new(rel.to_path_buf(), OutcomeKind::Error, error.to_string()),
+        Err(error) => FileOutcome::new(rel.to_path_buf(), OutcomeKind::Error, format!("{error:#}")),
         Ok(Ok(image)) => {
-            let detection =
-                detect_border(&image.values, image.width, image.height, &config.detector);
+            let detection = detect_border(
+                &image.values,
+                image.width,
+                image.height,
+                &heuristics.heuristics,
+            );
             let mut outcome = FileOutcome::new(
                 rel.to_path_buf(),
                 if detection.accepted {
@@ -255,6 +272,10 @@ fn process_one(
             outcome.proposed_mask_fraction = detection.candidate_fraction;
             outcome.candidate_tiles = detection.candidate_tiles;
             outcome.score = detection.score;
+            outcome.evidence_ratio = detection.evidence_ratio;
+            outcome.artifact_benefit = detection.artifact_benefit;
+            outcome.valid_pixel_loss = detection.valid_pixel_loss;
+            outcome.net_utility = detection.net_utility;
             if detection.accepted {
                 let n = detection.mask.iter().filter(|v| **v).count();
                 outcome.masked_pixels = n;

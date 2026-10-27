@@ -108,6 +108,22 @@ fn preflight(path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
             .with_context(|| format!("reading FITS header in {}", path.display()))?;
         if count == 0 {
             first_bitpix = header.require_int("BITPIX")?;
+            if first_bitpix > 0
+                && let Some(blank) = header.get_int("BLANK")
+            {
+                let (min, max) = match first_bitpix {
+                    8 => (0, 255),
+                    16 => (i16::MIN as i64, i16::MAX as i64),
+                    32 => (i32::MIN as i64, i32::MAX as i64),
+                    64 => (i64::MIN, i64::MAX),
+                    _ => bail!("unsupported integer BITPIX={first_bitpix}"),
+                };
+                if !(min..=max).contains(&blank) {
+                    bail!(
+                        "BLANK value {blank} is outside the stored BITPIX={first_bitpix} range [{min}, {max}]"
+                    );
+                }
+            }
             let naxis = header.require_int("NAXIS")?;
             if !(0..=999).contains(&naxis) {
                 bail!("invalid NAXIS={naxis}");

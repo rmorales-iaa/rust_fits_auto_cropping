@@ -1,6 +1,6 @@
 use super::*;
-fn config() -> DetectorConfig {
-    DetectorConfig {
+fn config() -> HeuristicRules {
+    HeuristicRules {
         tile_size: 8,
         minimum_border_tiles: 2,
         minimum_abs_z_score: 6.0,
@@ -8,6 +8,10 @@ fn config() -> DetectorConfig {
         minimum_spatial_correlation: 0.95,
         minimum_mask_fraction: 0.01,
         maximum_mask_fraction: 0.35,
+        minimum_evidence_ratio: 1.25,
+        maximum_evidence_ratio: 5.0,
+        valid_pixel_loss_cost: 1.5,
+        minimum_net_utility: 0.001,
     }
 }
 #[test]
@@ -82,6 +86,12 @@ fn rejects_a_connected_region_that_would_mask_too_much() {
     assert!(!found.accepted);
     assert_eq!(found.reason, "candidate exceeds maximum mask fraction");
     assert!(found.candidate_fraction > 0.20);
+    assert!(found.artifact_benefit > 0.0);
+    assert!(found.valid_pixel_loss > 0.0);
+    assert_eq!(
+        found.net_utility,
+        found.artifact_benefit - found.valid_pixel_loss
+    );
 }
 #[test]
 fn smooth_sky_gradient_without_border_seam_is_retained() {
@@ -146,4 +156,22 @@ fn detects_multiple_asymmetric_corner_components() {
     assert!(found.mask[0]);
     assert!(found.mask[h * w - 1]);
     assert!(!found.mask[48 * w + 48]);
+}
+
+#[test]
+fn weak_net_utility_keeps_the_image_and_reports_the_tradeoff() {
+    let (w, h) = (96, 96);
+    let mut data = vec![100.0; w * h];
+    for y in 0..24 {
+        for x in 0..24 {
+            data[y * w + x] = 0.0;
+        }
+    }
+    let mut rules = config();
+    rules.valid_pixel_loss_cost = 100.0;
+    let found = detect_border(&data, w, h, &rules);
+    assert!(!found.accepted);
+    assert!(found.candidate_fraction > 0.0);
+    assert!(found.valid_pixel_loss > found.artifact_benefit);
+    assert!(found.reason.contains("candidate retained"));
 }

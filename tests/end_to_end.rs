@@ -1,5 +1,6 @@
 use fitskit::{FitsFile, Hdu, HduData, HeaderValue, ImageData, PixelData};
-use std::{fs, path::Path, process::Command};
+use flate2::{Compression, write::GzEncoder};
+use std::{fs, io::Write, path::Path, process::Command};
 use tempfile::tempdir;
 
 fn create_fits(path: &Path, bitpix: i64, width: usize, height: usize, data: &[f64]) {
@@ -31,7 +32,12 @@ fn create_fits(path: &Path, bitpix: i64, width: usize, height: usize, data: &[f6
 
 fn config(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
-    fs::write(dir.join("config.toml"), "[detector]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\n[processing]\nthreads=2\nrecursive=false\nmemory_budget_mib=1024\nmaximum_image_mib=256\nmode=\"mask\"\n").unwrap();
+    fs::write(
+        dir.join("config.toml"),
+        "[processing]\nthreads=2\nrecursive=false\nmemory_budget_mib=1024\nmaximum_image_mib=256\n",
+    )
+    .unwrap();
+    fs::write(dir.join("heuristics.toml"), "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\n").unwrap();
 }
 
 fn invoke(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
@@ -42,6 +48,23 @@ fn invoke(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
         .arg(output)
         .args(["--config"])
         .arg(cfg)
+        .args(["--heuristics"])
+        .arg(cfg.parent().unwrap().join("heuristics.toml"))
+        .status()
+        .unwrap()
+}
+
+fn invoke_recursive(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
+    Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+        .args(["--input-dir"])
+        .arg(input)
+        .args(["--output-dir"])
+        .arg(output)
+        .args(["--config"])
+        .arg(cfg)
+        .args(["--heuristics"])
+        .arg(cfg.parent().unwrap().join("heuristics.toml"))
+        .arg("--recursive")
         .status()
         .unwrap()
 }
@@ -189,6 +212,100 @@ fn byte_images_get_in_range_blank_sentinel() {
 }
 
 #[test]
+fn existing_blank_pixels_remain_undefined_and_are_not_newly_masked() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let mut raw = vec![100i16; 96 * 96];
+    for y in 0..16 {
+        for x in 0..24 {
+            raw[y * 96 + x] = 0;
+        }
+    }
+    raw[48 * 96 + 48] = i16::MIN;
+    let mut file = FitsFile::with_primary_image(ImageData::new(vec![96, 96], PixelData::I16(raw)));
+    file.primary_mut()
+        .header
+        .set("BLANK", HeaderValue::Integer(i16::MIN as i64), None);
+    file.to_file(input.join("with-blank.fits")).unwrap();
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let mask = read_mask(&output.join("masks/with-blank.fits"));
+    assert_eq!(mask[48 * 96 + 48], 0);
+    let out = FitsFile::from_file(output.join("images/with-blank.fits")).unwrap();
+    assert_eq!(out.primary().header.get_int("BLANK"), Some(i16::MIN as i64));
+    let img = match &out.primary().data {
+        HduData::Image(v) => v,
+        _ => panic!("expected image"),
+    };
+    assert!(matches!(&img.pixels, PixelData::I16(v) if v[48*96+48] == i16::MIN));
+}
+
+#[test]
+fn out_of_range_blank_is_reported_before_writing_products() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    create_fits(&input.join("invalid-blank.fits"), 16, 96, 96, &artifact());
+    let mut file = FitsFile::from_file(input.join("invalid-blank.fits")).unwrap();
+    file.primary_mut()
+        .header
+        .set("BLANK", HeaderValue::Integer(32768), None);
+    file.to_file(input.join("invalid-blank.fits")).unwrap();
+    assert_eq!(
+        invoke(&input, &output, &input.join("config.toml")).code(),
+        Some(1)
+    );
+    assert!(!output.join("images/invalid-blank.fits").exists());
+    let report = fs::read_dir(output.join("reports"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("summary.json");
+    let result: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert!(
+        result["files"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("outside the stored BITPIX=16 range")
+    );
+}
+
+#[test]
+fn int32_and_odd_rectangular_images_keep_dimensions() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let (width, height) = (97, 89);
+    let mut data = vec![100.0; width * height];
+    for y in 0..16 {
+        for x in 0..24 {
+            data[y * width + x] = 0.0;
+        }
+    }
+    create_fits(&input.join("odd-int32.fits"), 32, width, height, &data);
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let out = FitsFile::from_file(output.join("images/odd-int32.fits")).unwrap();
+    let mask = read_mask(&output.join("masks/odd-int32.fits"));
+    assert_eq!(mask.len(), width * height);
+    let img = match &out.primary().data {
+        HduData::Image(v) => v,
+        _ => panic!("expected image"),
+    };
+    assert_eq!(img.axes, vec![width, height]);
+    assert!(
+        matches!(&img.pixels, PixelData::I32(v) if v[0] == out.primary().header.get_int("BLANK").unwrap() as i32 && v[(height-1)*width+width-1] == 100)
+    );
+}
+
+#[test]
 fn multiple_hdus_are_ignored() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
@@ -240,17 +357,51 @@ fn serial_and_parallel_workers_produce_identical_masks() {
             .arg(output)
             .args(["--config"])
             .arg(input.join("config.toml"))
+            .args(["--heuristics"])
+            .arg(input.join("heuristics.toml"))
             .args(["--threads", threads])
             .status()
             .unwrap()
     };
     assert!(run(&serial, "1").success());
     assert!(run(&parallel, "4").success());
+    let summary = |root: &Path| {
+        let path = fs::read_dir(root.join("reports"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("summary.json");
+        serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap()
+    };
+    let serial_files = summary(&serial)["files"].as_array().unwrap().clone();
+    let parallel_files = summary(&parallel)["files"].as_array().unwrap().clone();
+    assert_eq!(serial_files.len(), parallel_files.len());
+    for (a, b) in serial_files.iter().zip(&parallel_files) {
+        for key in [
+            "input",
+            "status",
+            "candidate_tiles",
+            "score",
+            "evidence_ratio",
+            "artifact_benefit",
+            "valid_pixel_loss",
+            "net_utility",
+        ] {
+            assert_eq!(a[key], b[key], "parallel mismatch in {key}");
+        }
+    }
     for name in ["a.fits", "b.fits"] {
-        assert_eq!(
-            read_mask(&serial.join("masks").join(name)),
-            read_mask(&parallel.join("masks").join(name))
-        );
+        let serial_mask = serial.join("masks").join(name);
+        let parallel_mask = parallel.join("masks").join(name);
+        assert_eq!(serial_mask.exists(), parallel_mask.exists());
+        if serial_mask.exists() {
+            assert_eq!(read_mask(&serial_mask), read_mask(&parallel_mask));
+        } else {
+            assert!(serial.join("images").join(name).exists());
+            assert!(parallel.join("images").join(name).exists());
+        }
     }
 }
 
@@ -269,6 +420,8 @@ fn dry_run_writes_reports_and_log_without_products() {
         .arg(&output)
         .args(["--config"])
         .arg(input.join("config.toml"))
+        .args(["--heuristics"])
+        .arg(input.join("heuristics.toml"))
         .arg("--dry-run")
         .status()
         .unwrap();
@@ -317,7 +470,9 @@ fn explicit_overwrite_replaces_a_complete_output_pair() {
             .args(["--output-dir"])
             .arg(&output)
             .args(["--config"])
-            .arg(input.join("config.toml"));
+            .arg(input.join("config.toml"))
+            .args(["--heuristics"])
+            .arg(input.join("heuristics.toml"));
         if overwrite {
             cmd.arg("--overwrite");
         }
@@ -331,4 +486,66 @@ fn explicit_overwrite_replaces_a_complete_output_pair() {
             .len()
             == 1
     );
+}
+
+#[test]
+fn compressed_and_multi_hdu_fits_are_ignored() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let regular = input.join("multi.fits");
+    create_fits(&regular, -32, 96, 96, &artifact());
+    let mut multi = FitsFile::from_file(&regular).unwrap();
+    multi.push_extension(Hdu::image_extension(ImageData::new(
+        vec![2, 2],
+        PixelData::U8(vec![1; 4]),
+    )));
+    multi.to_file(&regular).unwrap();
+    let plain = input.join("compressed-source.fits");
+    create_fits(&plain, -32, 96, 96, &artifact());
+    let fits_bytes = fs::read(&plain).unwrap();
+    let mut gz = GzEncoder::new(
+        fs::File::create(input.join("compressed.fits.gz")).unwrap(),
+        Compression::fast(),
+    );
+    gz.write_all(&fits_bytes).unwrap();
+    gz.finish().unwrap();
+    fs::remove_file(plain).unwrap();
+    let image = ImageData::new(vec![96, 96], PixelData::I16(vec![7; 96 * 96]));
+    let compressed = image
+        .compress(&fitskit::CompressOptions::default())
+        .unwrap();
+    let mut tiled = FitsFile::with_empty_primary();
+    tiled.push_extension(compressed);
+    tiled
+        .to_file(input.join("tile-compressed.fits.fz"))
+        .unwrap();
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let report = fs::read_dir(output.join("reports"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("summary.json");
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(v["total"], 3);
+    assert_eq!(v["ignored"], 3);
+    assert_eq!(v["errors"], 0);
+    assert!(!output.join("images/multi.fits").exists());
+}
+
+#[test]
+fn recursive_flag_discovers_nested_fits() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let nested = input.join("night1");
+    let output = t.path().join("out");
+    fs::create_dir_all(&nested).unwrap();
+    config(&input);
+    create_fits(&nested.join("candidate.fits"), -32, 96, 96, &artifact());
+    assert!(invoke_recursive(&input, &output, &input.join("config.toml")).success());
+    assert!(output.join("images/night1/candidate.fits").exists());
 }
