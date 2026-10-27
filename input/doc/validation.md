@@ -191,3 +191,27 @@ Before production use, assemble licensed and documented annotated frames across 
 Added an opt-in `robust_affine` reference model that fits a bounded Huber plane to finite central-interior tile medians. The default remains `central_tiles`; model identity is recorded in the run-start event and summary. Synthetic unit/integration cases verify exact affine-gradient null retention, separable border-seam detection, one-outlier resistance, and abstention on insufficient or rank-deficient support. The full Rust suite passes 70 tests (42 unit, 24 end-to-end, 4 version); the four WCS-checker tests pass, Python compilation succeeds, formatting is clean, and strict Clippy passes.
 
 This experiment has not been run against labeled observatory frames or evaluated for source masking, uncertainty coverage, boundary error, photometric bias, and threshold calibration. Its existence does not close P2 and does not change the default algorithm.
+
+
+### Interleaved release performance trials (2026-10-27)
+
+A release `0.1.1` binary ran crop mode without PNG on `/fast_disk/tmp/clippling_test/input/` (25 files), with one warm-up per worker count followed by 10 measured runs each at 1 and 4 workers. The measured schedule was randomized with seed `20261027`; each trial had a separate run directory. A standard-library Python harness invoked GNU `/usr/bin/time`, retained logs and products, recorded binary/config hashes and checked a canonical per-image decision digest. Command:
+
+```bash
+python3 tools/benchmark_release.py \
+  --binary target/release/rust_fits_auto_cropping \
+  --input-dir /fast_disk/tmp/clippling_test/input \
+  --output-dir /fast_disk/tmp/clippling_test/output/rust_fits_auto_cropping-benchmark-20261027-final \
+  --config input/config.toml --heuristics input/heuristics.toml \
+  --runs 10 --warmup-runs 1 --workers 1 4 \
+  --memory-budget-mib 2048 --seed 20261027
+```
+
+| Workers | Measured trials | Median wall time (range) | Median peak RSS (range) |
+| ---: | ---: | ---: | ---: |
+| 1 | 10 | 16.22 s (14.26–44.17 s) | 312,116 KiB (311,616–312,276 KiB) |
+| 4 | 10 | 4.495 s (3.89–10.68 s) | 945,900 KiB (768,488–1,028,208 KiB) |
+
+All warm-up and measured runs had the same decision digest, `402f1ff5…`, and the same summary: 16 clipped, 4 kept, 5 errors from the known malformed quoted headers, 0 ignored. The benchmark evidence, per-trial logs, time records, reports and products are under `/fast_disk/tmp/clippling_test/output/rust_fits_auto_cropping-benchmark-20261027-final/`; `benchmark-summary.json` includes the complete values and digest. Independent Astropy plus `fitsverify` validation passed on the final measured run (`20261027T175236.101190405Z`): 20 science images and 16 masks. Legacy FITS cards generated expected Astropy deprecation/date warnings, and inverse WCS residuals were unavailable for several SIP cases even though forward coordinates matched. A preceding trial set without explicit warm-ups is separately preserved at `/fast_disk/tmp/clippling_test/output/rust_fits_auto_cropping-benchmark-20261027-run2/` and is not used for these medians.
+
+The wall-time tails are large, especially in serial runs, and there is only one host and one repeatedly inspected development corpus. This measures worker-count tradeoffs, not a code revision speedup. It does not establish a hard memory bound, cold/warm performance separation or science quality; G5 and scientific release gates remain open.
