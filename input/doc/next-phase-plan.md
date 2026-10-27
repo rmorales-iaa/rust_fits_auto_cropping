@@ -12,6 +12,8 @@ Date: 2026-10-27. This plan follows the initial implementation. It treats the su
 6. Ignore compressed FITS and every file with more than one HDU; add direct regression coverage for both.
 7. Put science decision rules in a separate `input/heuristics.toml` file. Preserve conservative abstention: a candidate must have connected border support, contrast and spatial evidence, and stay within configurable area limits. A proposed mask is accepted only when evidence for artifact removal outweighs the configured penalty for losing potentially valid pixels. The current data has no ground-truth labels, so this policy can be evaluated for behavior and reviewability but its thresholds cannot be scientifically calibrated from this set alone.
 8. Expose `--recursive` as a CLI input to traverse nested directories; keep recursive traversal opt-in.
+9. Maintain a three-part local build counter from `input/program-version.txt` and add program/version/UTC creation cards to generated FITS products. Summaries must also identify the program/version so unchanged symlink products retain run provenance without modifying input headers.
+10. Publish unchanged eligible images as symlinks under `output/images/`, preserving input bytes; validate link targets independently.
 
 ## Phases and acceptance criteria
 
@@ -22,7 +24,7 @@ Date: 2026-10-27. This plan follows the initial implementation. It treats the su
 | C. FITS regression matrix | Add compressed `.fits.gz` and tile-compressed suffix cases, multi-HDU, pre-existing BLANK, all supported BITPIX, scaling, malformed/truncated data, small/odd sizes, output collisions and unchanged inputs | Unsupported compressed/multi-HDU inputs are ignored without science products; storage/WCS/checksum invariants pass; summary counts balance |
 | D. Independent interoperability | Validate produced science/mask FITS with Astropy and `fitsverify`; add a reusable checker and verify structural cards, data, checksums, WCS values, NaN/BLANK behavior | All test outputs and representative dataset outputs pass independent structural and checksum validation; any unsupported checker condition is documented |
 | E. Real-set run and benchmark | Run serial and bounded-parallel dry runs on the exact supplied set; measure elapsed time, files/s, pixels/s and peak RSS; compare per-file decisions and masks | Reproducible benchmark report records host, software versions, settings and counts; serial and parallel decisions are identical; memory stays within the configured budget plus documented process overhead |
-| F. Reconcile and commit | Update README/docs/validation record, inspect outputs and git diff, commit code/docs/tests only | Output artifacts remain outside Git; repository clean after a scoped local commit; open scientific limitations remain explicit |
+| F. Reconcile and commit | Update README/docs/help/skills/memory/validation record, inspect outputs and git diff, commit code/docs/tests only | Output artifacts remain outside Git; repository clean after a scoped local commit; open scientific limitations remain explicit |
 
 ## Decision policy to implement
 

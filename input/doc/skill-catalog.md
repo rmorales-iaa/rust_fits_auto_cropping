@@ -16,8 +16,8 @@ Explicit invocation example: `$scientific-fits-engineering`.
 | [scientific-tno-analysis](skills/scientific-tno-analysis/SKILL.md) | Assess image preprocessing for TNO and moving-object science, including faint targets, trails, occultation cadence and selection effects. |
 | [scientific-validation-performance](skills/scientific-validation-performance/SKILL.md) | Validate scientific numerical behavior and benchmark safe parallel execution with reproducible fixtures and independent checks. |
 
-The validation/performance skill is the additional recommended specialty. Photometry and astrometry are separate to keep their invariants clear. Existing astronomy skills were left unchanged.
+The validation/performance skill is the recommended numerical and benchmarking specialty. Photometry and astrometry are separate to keep their invariants clear. The astronomy, photometry, astrometry and TNO skills include FITS clipping-specific cautions: detector evidence is pixel-derived, crop loss requires an explicit utility comparison, generated products carry provenance cards, and unchanged outputs remain source symlinks. Install the entire bundle for the complete routing map.
 
-For another machine, copy the desired skill folders into `${CODEX_HOME:-$HOME/.codex}/skills/` after checking for name conflicts. The main skill routes to siblings; install the full bundle to retain all specialties. Validate with the skill-creator `quick_validate.py` script when available.
+For another machine, copy the desired skill folders into `${CODEX_HOME:-$HOME/.codex}/skills/` after checking for name conflicts. In this workspace the installed copies live in `/home/rafa/.codex/skills/`; keep them synchronized with the version-controlled sources when those sources change. The main skill routes to siblings; install the full bundle to retain all specialties. Validate with the skill-creator `quick_validate.py` script when available.
 
 Automatic Git registration applies to verified development milestones; it does not promise a filesystem watcher or version control of ignored scientific data. English is required for responses, help and project documentation.
