@@ -20,6 +20,7 @@ pub struct Image {
     pub values: Vec<f64>,
     pub bitpix: i64,
     pub blank_value: Option<i64>,
+    pub metadata_warnings: Vec<String>,
 }
 
 /// Parse a FITS file using fitskit and validate the single-HDU 2D image contract.
@@ -66,7 +67,15 @@ pub fn read_image(
     if !scale.is_finite() || scale == 0.0 || !zero.is_finite() {
         bail!("image has invalid BSCALE/BZERO values");
     }
-    let existing_blank = hdu.header.get_int("BLANK");
+    let declared_blank = hdu.header.get_int("BLANK");
+    let existing_blank = declared_blank.filter(|value| integer_value_in_range(bitpix, *value));
+    let mut metadata_warnings = Vec::new();
+    if let Some(declared) = declared_blank.filter(|_| existing_blank.is_none()) {
+        metadata_warnings.push(format!(
+            "ignored out-of-range BLANK={} for BITPIX={bitpix}; pixel statistics use stored image values",
+            declared
+        ));
+    }
     let (values, blank_value) = match &image.pixels {
         PixelData::U8(raw) => integer_values(raw, existing_blank, scale, zero, 8)?,
         PixelData::I16(raw) => integer_values(raw, existing_blank, scale, zero, 16)?,
@@ -87,6 +96,7 @@ pub fn read_image(
         values,
         bitpix,
         blank_value,
+        metadata_warnings,
     }))
 }
 
@@ -108,22 +118,6 @@ fn preflight(path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
             .with_context(|| format!("reading FITS header in {}", path.display()))?;
         if count == 0 {
             first_bitpix = header.require_int("BITPIX")?;
-            if first_bitpix > 0
-                && let Some(blank) = header.get_int("BLANK")
-            {
-                let (min, max) = match first_bitpix {
-                    8 => (0, 255),
-                    16 => (i16::MIN as i64, i16::MAX as i64),
-                    32 => (i32::MIN as i64, i32::MAX as i64),
-                    64 => (i64::MIN, i64::MAX),
-                    _ => bail!("unsupported integer BITPIX={first_bitpix}"),
-                };
-                if !(min..=max).contains(&blank) {
-                    bail!(
-                        "BLANK value {blank} is outside the stored BITPIX={first_bitpix} range [{min}, {max}]"
-                    );
-                }
-            }
             let naxis = header.require_int("NAXIS")?;
             if !(0..=999).contains(&naxis) {
                 bail!("invalid NAXIS={naxis}");
@@ -154,6 +148,16 @@ fn preflight(path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
         bail!("FITS file contains no HDUs");
     }
     Ok((count, first_axes, first_bitpix))
+}
+
+fn integer_value_in_range(bitpix: i64, value: i64) -> bool {
+    match bitpix {
+        8 => (0..=255).contains(&value),
+        16 => (i16::MIN as i64..=i16::MAX as i64).contains(&value),
+        32 => (i32::MIN as i64..=i32::MAX as i64).contains(&value),
+        64 => true,
+        _ => false,
+    }
 }
 
 fn integer_values<T>(

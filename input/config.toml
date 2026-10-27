@@ -4,3 +4,4 @@ threads = 0 # 0 selects available logical CPUs, bounded by the memory budget.
 recursive = false
 memory_budget_mib = 2048
 maximum_image_mib = 512
+mode = "mask" # mask preserves dimensions; crop selects the larger clean rectangle/circle.

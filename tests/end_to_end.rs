@@ -34,7 +34,7 @@ fn config(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
     fs::write(
         dir.join("config.toml"),
-        "[processing]\nthreads=2\nrecursive=false\nmemory_budget_mib=1024\nmaximum_image_mib=256\n",
+        "[processing]\nthreads=2\nrecursive=false\nmemory_budget_mib=1024\nmaximum_image_mib=256\nmode=\"mask\"\n",
     )
     .unwrap();
     fs::write(dir.join("heuristics.toml"), "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\n").unwrap();
@@ -113,11 +113,33 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     };
     assert!(matches!(&img.pixels,PixelData::F64(v) if v[0].is_nan() && v[95*96+95]==100.0));
     assert_eq!(f.primary().header.get_string("OBJECT"), Some("test-field"));
+    assert!(
+        f.primary()
+            .header
+            .get_string("CREATOR")
+            .unwrap()
+            .contains(env!("FITS_AUTO_CLIPPING_VERSION"))
+    );
+    let product_date = f.primary().header.get_string("DATE").unwrap();
+    assert!(product_date.len() >= 19 && product_date.contains('T'));
+    assert!(f.primary().header.iter().any(|card| {
+        card.name == "HISTORY"
+            && card
+                .comment
+                .as_deref()
+                .is_some_and(|value| value.contains("generated_utc="))
+    }));
     assert!(f.primary().verify_datasum().is_ok());
     let mask = read_mask(&output.join("masks/float.fits"));
     assert_eq!(mask.len(), 96 * 96);
     assert_eq!(mask[0], 1);
     assert_eq!(mask[95 * 96 + 95], 0);
+    assert!(
+        fs::symlink_metadata(output.join("images/clean.fits"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     let m = FitsFile::from_file(output.join("masks/float.fits")).unwrap();
     assert_eq!(m.primary().header.get_float("CRPIX1"), Some(48.5));
     assert_eq!(m.primary().header.get_string("CTYPE1"), Some("RA---TAN"));
@@ -129,6 +151,8 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
         .path()
         .join("summary.json");
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(v["program"], "fits-auto-clipping");
+    assert_eq!(v["version"], env!("FITS_AUTO_CLIPPING_VERSION"));
     assert_eq!(v["clipped"], 1);
     assert_eq!(v["kept"], 1);
     assert_eq!(v["total"], 2);
@@ -243,7 +267,7 @@ fn existing_blank_pixels_remain_undefined_and_are_not_newly_masked() {
 }
 
 #[test]
-fn out_of_range_blank_is_reported_before_writing_products() {
+fn out_of_range_blank_is_ignored_for_detection_and_replaced_in_masked_output() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
     let output = t.path().join("out");
@@ -255,11 +279,15 @@ fn out_of_range_blank_is_reported_before_writing_products() {
         .header
         .set("BLANK", HeaderValue::Integer(32768), None);
     file.to_file(input.join("invalid-blank.fits")).unwrap();
-    assert_eq!(
-        invoke(&input, &output, &input.join("config.toml")).code(),
-        Some(1)
-    );
-    assert!(!output.join("images/invalid-blank.fits").exists());
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let out = FitsFile::from_file(output.join("images/invalid-blank.fits")).unwrap();
+    let blank = out.primary().header.get_int("BLANK").unwrap();
+    assert!((-32768..=32767).contains(&blank));
+    let img = match &out.primary().data {
+        HduData::Image(v) => v,
+        _ => panic!("expected image"),
+    };
+    assert!(matches!(&img.pixels, PixelData::I16(v) if i64::from(v[0]) == blank));
     let report = fs::read_dir(output.join("reports"))
         .unwrap()
         .next()
@@ -268,11 +296,239 @@ fn out_of_range_blank_is_reported_before_writing_products() {
         .path()
         .join("summary.json");
     let result: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(result["errors"], 0);
     assert!(
         result["files"][0]["reason"]
             .as_str()
             .unwrap()
-            .contains("outside the stored BITPIX=16 range")
+            .contains("ignored out-of-range BLANK=32768")
+    );
+}
+
+#[test]
+fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference_pixels() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let config_path = input.join("config.toml");
+    let config_text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("mode=\"mask\"", "mode=\"crop\"");
+    fs::write(&config_path, config_text).unwrap();
+
+    let (width, height) = (96, 96);
+    let mut data = vec![100.0; width * height];
+    for y in 0..16 {
+        for x in 0..width {
+            data[y * width + x] = 0.0;
+        }
+    }
+    let input_path = input.join("four-corners.fits");
+    create_fits(&input_path, 16, width, height, &data);
+    assert!(invoke(&input, &output, &config_path).success());
+
+    let original = FitsFile::from_file(&input_path).unwrap();
+    let cropped = FitsFile::from_file(output.join("images/four-corners.fits")).unwrap();
+    let before = match &original.primary().data {
+        HduData::Image(image) => match &image.pixels {
+            PixelData::I16(values) => values,
+            _ => panic!("expected int16 source"),
+        },
+        _ => panic!("expected image"),
+    };
+    let after = match &cropped.primary().data {
+        HduData::Image(image) => match &image.pixels {
+            PixelData::I16(values) => values,
+            _ => panic!("expected int16 crop"),
+        },
+        _ => panic!("expected image"),
+    };
+    let (crop_x, crop_y, crop_width, crop_height) = (0, 16, 96, 80);
+    assert_eq!(
+        cropped.primary().header.require_int("NAXIS1").unwrap(),
+        crop_width as i64
+    );
+    assert_eq!(
+        cropped.primary().header.require_int("NAXIS2").unwrap(),
+        crop_height as i64
+    );
+    assert_eq!(
+        cropped.primary().header.get_int("CLIPX0"),
+        Some(crop_x as i64)
+    );
+    assert_eq!(
+        cropped.primary().header.get_int("CLIPY0"),
+        Some(crop_y as i64)
+    );
+    assert_eq!(
+        cropped.primary().header.get_float("CRPIX1"),
+        original
+            .primary()
+            .header
+            .get_float("CRPIX1")
+            .map(|v| v - crop_x as f64)
+    );
+    assert_eq!(
+        cropped.primary().header.get_float("CRPIX2"),
+        original
+            .primary()
+            .header
+            .get_float("CRPIX2")
+            .map(|v| v - crop_y as f64)
+    );
+    for y in 0..crop_height {
+        let src = (crop_y + y) * width + crop_x;
+        let dst = y * crop_width;
+        assert_eq!(
+            &after[dst..dst + crop_width],
+            &before[src..src + crop_width]
+        );
+    }
+    assert!(cropped.primary().verify_datasum().is_ok());
+    let mask_file = FitsFile::from_file(output.join("masks/four-corners.fits")).unwrap();
+    assert_eq!(
+        mask_file.primary().header.require_int("NAXIS1").unwrap(),
+        width as i64
+    );
+    assert_eq!(
+        mask_file.primary().header.require_int("NAXIS2").unwrap(),
+        height as i64
+    );
+}
+
+#[test]
+fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let config_path = input.join("config.toml");
+    let config_text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("mode=\"mask\"", "mode=\"crop\"");
+    fs::write(&config_path, config_text).unwrap();
+
+    let (width, height) = (128, 128);
+    let mut pixels = vec![0.0; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            if (x as f64 - 63.5).powi(2) + (y as f64 - 63.5).powi(2) <= 56.0_f64.powi(2) {
+                pixels[y * width + x] = 100.0;
+            }
+        }
+    }
+    let source = input.join("circular-field.fits");
+    create_fits(&source, 16, width, height, &pixels);
+    assert!(invoke(&input, &output, &config_path).success());
+
+    let original = FitsFile::from_file(&source).unwrap();
+    let cropped = FitsFile::from_file(output.join("images/circular-field.fits")).unwrap();
+    assert_eq!(
+        cropped.primary().header.get_string("CLIPSHAP"),
+        Some("CIRCLE")
+    );
+    let x0 = cropped.primary().header.get_int("CLIPX0").unwrap() as usize;
+    let y0 = cropped.primary().header.get_int("CLIPY0").unwrap() as usize;
+    let cx = cropped.primary().header.get_float("CLIPCX").unwrap();
+    let cy = cropped.primary().header.get_float("CLIPCY").unwrap();
+    let radius = cropped.primary().header.get_float("CLIPRAD").unwrap();
+    let blank = cropped.primary().header.get_int("BLANK").unwrap() as i16;
+    let before = match &original.primary().data {
+        HduData::Image(img) => match &img.pixels {
+            PixelData::I16(v) => v,
+            _ => panic!("expected int16 input"),
+        },
+        _ => panic!("expected image"),
+    };
+    let after_image = match &cropped.primary().data {
+        HduData::Image(img) => img,
+        _ => panic!("expected cropped image"),
+    };
+    let after = match &after_image.pixels {
+        PixelData::I16(v) => v,
+        _ => panic!("expected int16 crop"),
+    };
+    let crop_width = after_image.axes[0];
+    for y in 0..after_image.axes[1] {
+        for x in 0..crop_width {
+            let global_x = x + x0;
+            let global_y = y + y0;
+            let inside =
+                (global_x as f64 - cx).powi(2) + (global_y as f64 - cy).powi(2) <= radius.powi(2);
+            let actual = after[y * crop_width + x];
+            if inside {
+                assert_eq!(actual, before[global_y * width + global_x]);
+            } else {
+                assert_eq!(actual, blank);
+            }
+        }
+    }
+    assert!(cropped.primary().verify_datasum().is_ok());
+    let output_mask = read_mask(&output.join("masks/circular-field.fits"));
+    assert_eq!(output_mask.len(), width * height);
+    assert_eq!(output_mask[0], 1);
+    assert_eq!(output_mask[64 * width + 64], 0);
+}
+
+#[test]
+fn crop_mode_keeps_source_when_valid_pixel_loss_dominates() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let config_path = input.join("config.toml");
+    let config_text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("mode=\"mask\"", "mode=\"crop\"");
+    fs::write(&config_path, config_text).unwrap();
+    let heuristic_path = input.join("heuristics.toml");
+    let heuristic_text = fs::read_to_string(&heuristic_path)
+        .unwrap()
+        .replace("valid_pixel_loss_cost=1.5", "valid_pixel_loss_cost=4.0");
+    fs::write(&heuristic_path, heuristic_text).unwrap();
+
+    let source = input.join("four-corners.fits");
+    create_fits(&source, 16, 96, 96, &artifact());
+    assert!(invoke(&input, &output, &config_path).success());
+
+    let kept = FitsFile::from_file(output.join("images/four-corners.fits")).unwrap();
+    assert_eq!(kept.primary().header.require_int("NAXIS1").unwrap(), 96);
+    assert_eq!(kept.primary().header.require_int("NAXIS2").unwrap(), 96);
+    assert_eq!(kept.primary().header.get_int("CLIPX0"), None);
+    assert!(
+        fs::symlink_metadata(output.join("images/four-corners.fits"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!output.join("masks/four-corners.fits").exists());
+    let report = fs::read_dir(output.join("reports"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("summary.json");
+    let result: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(result["kept"], 1);
+    assert!(
+        result["files"][0]["unmasked_pixels_sacrificed"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "{}",
+        result["files"][0]
+    );
+    assert!(result["files"][0]["net_utility"].as_f64().unwrap() < 0.0);
+    assert!(
+        result["files"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("rejected; source retained")
     );
 }
 

@@ -4,13 +4,13 @@
 
 Run from the repository root with the pinned pure-Rust FITS dependency:
 
-- `cargo test --all-targets` — 29 tests (15 unit, 14 end-to-end) pass.
+- `cargo test --all-targets` — 40 tests (19 unit, 17 end-to-end and 4 build-version checks) pass.
 - `cargo clippy --all-targets -- -D warnings` — pass.
 - `cargo fmt --all --check` — pass.
 - `cargo build --release` — pass.
 - `cargo tree` — FITS I/O uses `fitskit`; there is no `fitsio`/CFITSIO dependency.
 
-The integration matrix covers synthetic one-corner, one-side, rectangular, pixelated circular and asymmetric masks; smooth-gradient and interior-anomaly controls; decision utility; every supported BITPIX family; scaling and retained raw samples; BLANK retention and invalid BLANK rejection; malformed/truncated inputs; gzip and tiled-compressed inputs; multi-HDU files; non-ASCII/nested paths; `--recursive`; dry run; reports/logs; checksums and serial/parallel equivalence. The fixtures validate software invariants, not observatory-level detector recall.
+The integration matrix covers synthetic one-corner, one-side, rectangular, pixelated circular and asymmetric masks; smooth-gradient and interior-anomaly controls; mask/crop utility decisions; rectangle-vs-circle area selection; every supported BITPIX family; scaling and retained raw samples; BLANK retention and out-of-range BLANK handling; malformed/truncated inputs; gzip and tiled-compressed inputs; multi-HDU files; non-ASCII/nested paths; `--recursive`; dry run; reports/logs; checksums and serial/parallel equivalence. The fixtures validate software invariants, not observatory-level detector recall.
 
 ## Supplied real-data run
 
@@ -27,7 +27,7 @@ target/release/fits-auto-clipping \
   --recursive --threads 4 --memory-budget-mib 2048
 ```
 
-The recorded run classified **13 clipped, 4 kept, 0 ignored and 8 errors**. The exit status was 1 because the run correctly continued while reporting file-level errors. Five input headers have an unterminated quoted `INSAPNAM` value, and three `BITPIX=16` inputs specify out-of-range `BLANK=32768`. These malformed inputs were not repaired or rewritten. Since the supplied set has no independent artifact labels, the 13 masks are candidate proposals requiring instrument-aware review; this run does not calibrate scientific thresholds.
+The initial mask-mode baseline classified 13 clipped, 4 kept, 0 ignored and 8 errors. It predated the user-directed change to ignore invalid BLANK metadata for pixel analysis; its earlier report remains available for comparison. The final crop-mode run below is the current result. Five source headers still have an unterminated quoted `INSAPNAM` value and remain errors. The input set has no independent artifact labels, so accepted clips/crops are proposals requiring instrument-aware review and cannot calibrate scientific thresholds.
 
 Main outputs:
 
@@ -38,9 +38,26 @@ Main outputs:
 - Activity logs: `/fast_disk/tmp/clippling_test/output/logger/`
 - Benchmark measurements: `/fast_disk/tmp/clippling_test/output/benchmarks/benchmark-summary.json`
 
+### Final crop-mode run
+
+```bash
+target/release/fits-auto-clipping \
+  --input-dir /fast_disk/tmp/clippling_test/input \
+  --output-dir /fast_disk/tmp/clippling_test/output/crop-mode \
+  --config input/config.toml \
+  --heuristics input/heuristics.toml \
+  --recursive --mode crop --threads 4 --memory-budget-mib 2048
+```
+
+This run classified **16 clipped, 4 kept, 0 ignored and 5 errors**. It completed all readable inputs; the non-zero exit code reflects the five malformed quoted headers. The target frame had `BLANK=32768` with `BITPIX=16`; that out-of-range metadata was ignored for sample statistics, and the cropped output has a valid `BLANK` sentinel. The current run used program version `0.0.9`. Kept images are symlinks to the corresponding input files; generated crop/mask products include FITS program/version and UTC time cards. Source hashes still match the pre-run manifest.
+
+For the named target, crop mode selected a circle centered at `(840,840)` with radius `712.1133` pixels. Its FITS bounding box is `[128,1553) × [128,1553)`, or `1425×1425`. The circle retains 1,593,141 pixel centers, 31.5% more than the best clean rectangle (1,211,136); it removes 530,752 candidate pixels and sacrifices 503,723 unmasked pixels. The configured circle crop utility is `0.6542`, so the crop was accepted. The crop's corners inside the bounding box are marked undefined. Review the [crop preview](/fast_disk/tmp/clippling_test/output/diagnostics/target-circular-crop.png), [science product](/fast_disk/tmp/clippling_test/output/crop-mode/images/science%232007_01_11T20_23_31_000%23493-CAHA%23CAHA_2_2M%23OPEN%232002TC302%23500s%231626x1616%2311jan_0011.fits), and [run summary](/fast_disk/tmp/clippling_test/output/crop-mode/reports/20261027T105737.774681768Z/summary.json).
+
 ## FITS interoperability
 
-`tools/cross_validate_fits.py` opens science and mask products independently with Astropy and invokes `fitsverify` when installed. It checks readable FITS structure, HDU count, dimensions, BITPIX, checksum validity, WCS cards and consistency of the mask/product pixel data. The main run and both serial and parallel benchmark outputs passed: Astropy verified 17 science images and 13 mask products in each output tree. The synthetic test output passed the same checks. Independent checksum verification caught a non-canonical CHECKSUM card comment in an earlier writer version; the writer was corrected to checksum the exact serialized bytes and now passes both independent checkers.
+`tools/cross_validate_fits.py` opens science and mask products independently with Astropy and invokes `fitsverify` when installed. It checks readable FITS structure, HDU count, dimensions, BITPIX, checksums, raw crop samples, circle/rectangle exclusion masks, CRPIX updates and world coordinates at corresponding retained pixels. The final crop-mode run passed: Astropy verified 20 science images and 16 mask products, four unchanged images resolved through symlinks to their inputs, and fitsverify checked all generated products. The mask-mode baseline and both serial/parallel benchmark outputs also passed their earlier checks. Independent checksum verification caught a non-canonical CHECKSUM card comment in an earlier writer version; the writer was corrected to checksum the exact serialized bytes.
+
+Kept-image output paths are symlinks to their matching input paths. Cross-validation confirms each target resolves to the corresponding source. Generated FITS products are independently checked for program/version (`CREATOR`), UTC product date (`DATE`) and generation timestamp (`HISTORY`).
 
 ## Performance and memory
 
@@ -53,9 +70,11 @@ Measurements used the release binary and `/usr/bin/time -v`, processing the same
 
 Four workers gave 1.71x observed throughput and 3.20x peak RSS. The process stayed below the configured 2 GiB budget in this run; RSS includes runtime and parser overhead. Serial and parallel runs produced identical decisions and output-product hashes. The timing and memory logs, console outputs and input hash manifests are preserved in `output/benchmarks/`.
 
+The final crop-mode run took 4.18 s and reached 844,436 KiB peak RSS on four workers (single run; cache was warm). This included circle/rectangle selection and FITS output for 25 inputs. Do not compare this single timing directly with the earlier mask-mode serial/parallel results as a benchmark distribution.
+
 ## Crop decision and heuristic caveats
 
-Crop mode is not included. The mask mode handles irregular asymmetric boundaries while retaining dimensions and WCS. A crop would delete valid pixels beyond the mask and requires a separately validated WCS/distortion contract.
+Crop mode is opt-in. It selects the circle or rectangle retaining more pixel centers, then compares evidence-weighted artifact removal against unmasked pixels sacrificed. The example crop passes the current configurable utility rule but still requires human review; the utility is not a calibrated scientific loss model. Crop WCS checks passed with Astropy on the supplied outputs.
 
 Scientific rules live in `input/heuristics.toml`. The detector reports candidate evidence, a configurable artifact-benefit diagnostic, valid-pixel-loss penalty and net utility for candidates, including those rejected by support/area gates. These are transparent heuristic units, not probabilities, p-values or measured photometric loss. The default thresholds are provisional and not empirically calibrated. A real science release requires labeled, instrument-specific development data and held-out evaluation.
 

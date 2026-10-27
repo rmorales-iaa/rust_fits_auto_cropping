@@ -1,6 +1,6 @@
 # Implementation plan: Rust FITS Auto Clipping
 
-Status: engineering implementation and requested evaluation completed locally on 2026-10-27. The completed items below refer to engineering behavior, synthetic fixtures, and the supplied unlabeled dataset; they do not establish a scientific-release result.
+Status: engineering implementation and requested evaluation completed locally on 2026-10-27, including follow-up circle/rectangle crop selection. The completed items below refer to engineering behavior, synthetic fixtures, and the supplied unlabeled dataset; they do not establish a scientific-release result.
 
 ## Objective and scope
 
@@ -10,13 +10,13 @@ Rust is the implementation language. Use a pure-Rust FITS crate where it covers 
 
 ## Processing semantics and assumptions
 
-“Clipping” has two distinct meanings. The baseline will support **masking**, which marks invalid pixels without changing dimensions. This accommodates one-sided, corner, circular, rectangular and irregular borders while retaining the original pixel grid. A FITS image is rectangular; arbitrary shapes cannot be physically removed while retaining a conventional two-dimensional array. An optional **crop** mode will select a fully valid axis-aligned rectangle and reduce dimensions. Cropping can discard useful pixels outside that rectangle and must report that additional loss.
+“Clipping” has two distinct meanings. **Masking** marks invalid pixels without changing dimensions and supports arbitrary patterns. An opt-in **crop** mode compares the largest clean axis-aligned rectangle and largest artifact-free circle, choosing whichever retains more pixel centers. A circle is stored in its rectangular bounding box with undefined samples outside the circle. Cropping can discard useful pixels and must report that loss; a configured net-utility gate retains the source if the loss is too high.
 
 Default decisions are conservative: a high score alone is insufficient unless validated gates are met. Ambiguous cases are retained and marked `review_required`. No inpainting, resampling, flat-field correction or intensity normalization is in scope. Smooth vignetting with useful signal is not automatically an invalid border. Initially support ordinary FITS primary images; evaluate gzip inputs in the I/O phase. Tile-compressed images represented through extensions are ineligible under the one-HDU rule. Do not relax that rule for convenience.
 
 Masking uses IEEE NaN for floating data. For integer data, preserve original storage and scaling and select a raw integer BLANK sentinel absent from all retained valid samples, respecting existing undefined samples. If no collision-free representation is available, report an error without writing a processed product; do not silently convert 64-bit integers to inexact floats. A future explicitly requested conversion may be added with a precision contract. Zero is never a default invalid marker.
 
-A separate one-HDU binary mask FITS records rejected pixels and a sidecar records reasons; do not append a mask HDU to the science product. Distinguish pre-existing invalid pixels from newly rejected pixels in reporting. Kept eligible images are copied unchanged by default. Ignored and failed files produce report entries but no science image. A dry run writes proposed-mask diagnostics and reports without processed science copies.
+A separate one-HDU binary mask FITS records rejected pixels and a sidecar records reasons; do not append a mask HDU to the science product. Distinguish pre-existing invalid pixels from newly rejected pixels in reporting. Kept eligible images are symlinked unchanged by default. Ignored and failed files produce report entries but no science image. A dry run writes proposed-mask diagnostics and reports without processed science products.
 
 ## Proposed command and configuration
 
@@ -40,7 +40,7 @@ Canonicalize paths and reject identical or overlapping input/output directory tr
 5. **Evaluate geometry and evidence jointly.** Test side strips, rectangles, circular/elliptical illumination boundaries and unconstrained connected masks as candidate descriptions. Geometry is an optional prior, never forced symmetry. Require minimum area, border connection, reproducible contrast or noise change, and coherent evidence over scales. A circular illuminated field may imply four rejected corners; an isolated internal disk is outside the baseline border scope.
 6. **Control false positives.** Large correlated regions can be sky gradients, extended galaxies, nebulosity, scattered light or PSF halos. Compare against these confounders and a no-artifact hypothesis. Use spatially blocked resampling/held-out tiles if estimating uncertainty, accounting for spatial dependence and multiple candidate regions; do not interpret pixel count as independent sample count. Scores are diagnostic scores, not probabilities unless calibrated. Keep uncertain images unchanged.
 7. **Refine and validate the mask.** Apply only justified, bounded morphology; preserve source-protected boundaries, minimum retained area and maximum rejected fraction. Report excessive masks, poor interior support and conflicting evidence for review. Avoid destructive all-image masks. Record component areas, shapes, boundary support and reasons.
-8. **Apply the selected mode.** Mask only accepted invalid pixels, or derive a maximum-area all-valid rectangle with deterministic tie-breaking for crop mode. Require documented retained-area and additional-science-loss limits. If crop limits fail, retain for review rather than silently switching modes.
+8. **Apply the selected mode.** Mask only accepted invalid pixels, or compare the maximum-area all-valid rectangle with the largest artifact-free circle for crop mode. Select the geometry retaining more pixel centers, with deterministic tie-breaking. Report retained area and additional science loss; if utility is below its configured threshold, retain the source.
 
 This is an algorithm research proposal, not a claim of scientific readiness. Synthetic evidence can validate invariants, but real annotated instrument examples are required before claiming general applicability. A useful later extension is an instrument-specific profile or manually supplied mask; it is not required for the first automatic detector.
 
@@ -59,7 +59,7 @@ Keep a thin `src/main.rs`; pure algorithms in a library enable tests without the
 ```text
 input/config.toml                   editable runtime configuration
 input/doc/                          guides, methods, plan, references
-output/images/<relative-path>       processed or byte-preserved kept copies
+output/images/<relative-path>       processed products or symlinks to unchanged inputs
 output/masks/<relative-path>        separate mask FITS files
 output/diagnostics/<run-id>/         optional evidence and previews
 output/reports/<run-id>/             summary.json, per-image.csv, provenance.json
@@ -80,7 +80,7 @@ All implementation phases below are pending. Each phase ends with updated docume
 | 2. CLI and pipeline foundation | Cargo project, typed config, discovery, eligibility, atomic outputs, structured logger and summary schema | End-to-end no-op copy run, invalid-config/path tests, deterministic manifest and balanced counters; help/config guide available |
 | 3. Detector research | Seeded synthetic generator, source-aware robust features, components, conservative decision rules and evidence diagnostics | Ground-truth masks and null/confounder cases evaluated; thresholds selected on development data; algorithm documented and frozen before held-out evaluation |
 | 4. Safe mask writer | Apply masks, sentinel policy, header/checksum updates and provenance | Retained pixels exact, invalid semantics correct, one-HDU outputs; independent FITS-reader verification |
-| 5. Optional crop mode | Valid rectangle selection, loss limits, WCS/geometry updates | Exhaustive small-mask crop oracle tests; world coordinates agree at retained pixels; unsupported distortions fail safely |
+| 5. Optional crop mode | Valid rectangle/circle selection, loss limits, WCS/geometry updates | Geometry unit/integration tests and Astropy world-coordinate comparison for the supplied cropped frames |
 | 6. Performance | Bounded file-level scheduling, allocation/I/O improvements and memory accounting | Serial/parallel scientific outputs agree; measured throughput and peak memory for multiple sizes/worker counts; no shared FITS handles |
 | 7. Release validation and documentation | Full regression matrix, held-out real data, extensive help/README, guides and acceptance audit | Every requirement maps to code/tests; failures documented; reproducible benchmark/science report; scoped commit and clean task-owned worktree |
 
@@ -115,7 +115,7 @@ Before declaring completion, create a requirement-to-evidence table covering: on
 | 2. CLI and pipeline foundation | Implemented | Typed operational and heuristic TOML, required directories, tested recursive discovery, dry run, overwrite, bounded workers, ISO JSONL log, JSON/CSV report and exit behavior. |
 | 3. Detector research | Provisional heuristic implemented | Synthetic tests cover corner, side, rectangle, pixelated circle, asymmetry, oversized component, interior anomaly, gradient and clip-versus-keep utility. Threshold calibration on labeled and held-out instrument samples remains outstanding. |
 | 4. Safe mask writer | Implemented for supported FITS cases | Separate mask, undefined-value handling, headers, retained samples and checksums are verified; Astropy and fitsverify pass on synthetic and real products. |
-| 5. Optional crop mode | Deliberately deferred | Mask mode preserves dimensions and WCS. Crop mode would incur extra valid-pixel loss and needs separately validated WCS/distortion behavior. |
+| 5. Optional crop mode | Implemented, opt-in | Maximum-area clean rectangle versus largest artifact-free circle; selects greater retained pixel count, reports artifact removal and unmasked loss, and applies the configured utility gate. FITS crop products retain raw stored samples, update NAXIS/CRPIX, and pass Astropy/fitsverify checks on the supplied frame set. |
 | 6. Performance | Measured | On 25 supplied files, 4 workers produced 1.71x observed throughput versus 1 worker; peak RSS was 853.3 MiB versus 273.6 MiB. Decisions and products matched. See [validation record](validation.md). |
 | 7. Release validation and documentation | Engineering evaluation completed | Expanded 29-test matrix, reusable independent FITS checker, detailed docs and real-data summary are complete. The input set has 8 malformed FITS files and no labels; scientific thresholds and instrument-level performance remain unvalidated. |
 

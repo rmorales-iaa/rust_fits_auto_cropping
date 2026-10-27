@@ -16,6 +16,17 @@ pub struct ProcessingConfig {
     pub recursive: bool,
     pub memory_budget_mib: usize,
     pub maximum_image_mib: usize,
+    #[serde(default)]
+    pub mode: ProcessingMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
+pub enum ProcessingMode {
+    #[default]
+    Mask,
+    Crop,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,6 +72,12 @@ impl Config {
             bail!(
                 "memory_budget_mib must be at least maximum_image_mib, and both must be positive"
             );
+        }
+        if !matches!(
+            self.processing.mode,
+            ProcessingMode::Mask | ProcessingMode::Crop
+        ) {
+            bail!("processing.mode must be 'mask' or 'crop'");
         }
         Ok(())
     }
@@ -128,6 +145,7 @@ threads = 0
 recursive = false
 memory_budget_mib = 2048
 maximum_image_mib = 512
+mode = "mask"
 "#;
 
 const DEFAULT_HEURISTICS: &str = r#"

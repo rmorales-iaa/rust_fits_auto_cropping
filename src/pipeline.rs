@@ -1,13 +1,14 @@
 //! Directory orchestration, bounded parallel processing, and report/log finalization.
 use crate::{
     cli::Args,
-    config::{Config, HeuristicsConfig},
+    config::{Config, HeuristicsConfig, ProcessingMode},
+    crop::{CropRegion, largest_clean_region},
     detection::detect_border,
     fits_image::read_image,
     logger::Logger,
     model::{FileOutcome, OutcomeKind},
     report,
-    writer::write_products,
+    writer::{write_cropped_products, write_products},
 };
 use anyhow::{Context, bail};
 use chrono::Utc;
@@ -98,6 +99,9 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     if let Some(mib) = args.memory_budget_mib {
         config.processing.memory_budget_mib = mib;
     }
+    if let Some(mode) = args.mode {
+        config.processing.mode = mode;
+    }
     if config.processing.memory_budget_mib < config.processing.maximum_image_mib {
         bail!("memory budget must be >= maximum image workspace");
     }
@@ -120,7 +124,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let mut logger = Logger::create(&output, &run_id)?;
     logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output":output,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
         "source_heuristics_sha256":source_heuristics_hash,"effective_heuristics_sha256":heuristics_hash,
-        "version":env!("CARGO_PKG_VERSION"),"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
+        "version":env!("FITS_AUTO_CLIPPING_VERSION"),"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
     let mut paths = discover(&input, config.processing.recursive)?;
     paths.sort();
     logger.event(&run_id,"discovery_complete",serde_json::json!({"candidate_fits_files":paths.len(),"workers":workers,"memory_budget_mib":config.processing.memory_budget_mib,"maximum_image_mib":config.processing.maximum_image_mib}))?;
@@ -276,10 +280,80 @@ fn process_one(
             outcome.artifact_benefit = detection.artifact_benefit;
             outcome.valid_pixel_loss = detection.valid_pixel_loss;
             outcome.net_utility = detection.net_utility;
+            if !image.metadata_warnings.is_empty() {
+                outcome.reason.push_str("; ");
+                outcome.reason.push_str(&image.metadata_warnings.join("; "));
+            }
             if detection.accepted {
                 let n = detection.mask.iter().filter(|v| **v).count();
                 outcome.masked_pixels = n;
                 outcome.mask_fraction = n as f64 / (image.width * image.height) as f64;
+                let crop = if matches!(config.processing.mode, ProcessingMode::Crop) {
+                    largest_clean_region(&detection.mask, image.width, image.height)
+                } else {
+                    None
+                };
+                let mut crop_accepted = false;
+                if matches!(config.processing.mode, ProcessingMode::Crop) && crop.is_none() {
+                    outcome.status = OutcomeKind::Kept;
+                    outcome.reason = "no positive-area rectangle excludes every detected artifact pixel; image retained".into();
+                }
+                if let Some(rect) = crop {
+                    let total = image.width * image.height;
+                    let bounds = rect.bounds();
+                    let excluded: Vec<bool> = (0..total)
+                        .map(|i| !rect.retains(i % image.width, i / image.width))
+                        .collect();
+                    outcome.crop_shape = Some(rect.shape_name().to_owned());
+                    outcome.crop_origin_x = Some(bounds.x);
+                    outcome.crop_origin_y = Some(bounds.y);
+                    outcome.crop_width = Some(bounds.width);
+                    outcome.crop_height = Some(bounds.height);
+                    outcome.image_area_retained = rect.retained_pixels();
+                    if let CropRegion::Circle {
+                        center_x,
+                        center_y,
+                        radius,
+                        ..
+                    } = rect
+                    {
+                        outcome.crop_center_x = Some(center_x as f64);
+                        outcome.crop_center_y = Some(center_y as f64);
+                        outcome.crop_radius = Some(radius);
+                    }
+                    outcome.artifact_pixels_removed = detection
+                        .mask
+                        .iter()
+                        .zip(&excluded)
+                        .filter(|(candidate, excluded)| **candidate && **excluded)
+                        .count();
+                    outcome.unmasked_pixels_sacrificed = detection
+                        .mask
+                        .iter()
+                        .zip(&excluded)
+                        .filter(|(candidate, excluded)| !**candidate && **excluded)
+                        .count();
+                    let artifact_fraction = outcome.artifact_pixels_removed as f64 / total as f64;
+                    let valid_loss_fraction =
+                        outcome.unmasked_pixels_sacrificed as f64 / total as f64;
+                    outcome.artifact_benefit = artifact_fraction * detection.evidence_ratio;
+                    outcome.valid_pixel_loss = heuristics.heuristics.valid_pixel_loss_cost
+                        * valid_loss_fraction
+                        / (1.0 - valid_loss_fraction).max(f64::EPSILON);
+                    outcome.net_utility = outcome.artifact_benefit - outcome.valid_pixel_loss;
+                    crop_accepted =
+                        outcome.net_utility >= heuristics.heuristics.minimum_net_utility;
+                    if !crop_accepted {
+                        outcome.status = OutcomeKind::Kept;
+                    }
+                    outcome.reason.push_str(&format!(
+                        "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels and sacrifices {} unmasked pixels; crop utility {:.4} (benefit {:.4} - loss {:.4}) {}",
+                        rect.shape_name(), bounds.x, bounds.y, bounds.width, bounds.height, rect.retained_pixels(),
+                        outcome.artifact_pixels_removed, outcome.unmasked_pixels_sacrificed,
+                        outcome.net_utility, outcome.artifact_benefit, outcome.valid_pixel_loss,
+                        if crop_accepted { "accepted" } else { "rejected; source retained" }
+                    ));
+                }
                 if !dry {
                     let image_path = output.join("images").join(rel);
                     let mask_path = output.join("masks").join(rel);
@@ -302,15 +376,37 @@ fn process_one(
                         outcome.reason = "output exists; pass --overwrite".into();
                         return finish(outcome, timer);
                     }
-                    if let Err(e) =
-                        write_products(path, &image_path, &mask_path, &image, &detection.mask)
-                    {
+                    let (write_result, has_mask) = if crop_accepted {
+                        let region = crop.expect("accepted crop has a region");
+                        let excluded: Vec<bool> = (0..image.width * image.height)
+                            .map(|i| !region.retains(i % image.width, i / image.width))
+                            .collect();
+                        (
+                            write_cropped_products(
+                                path,
+                                &image_path,
+                                &mask_path,
+                                &excluded,
+                                &image,
+                                region,
+                            ),
+                            true,
+                        )
+                    } else if matches!(config.processing.mode, ProcessingMode::Mask) {
+                        (
+                            write_products(path, &image_path, &mask_path, &image, &detection.mask),
+                            true,
+                        )
+                    } else {
+                        (create_kept_symlink(path, &image_path), false)
+                    };
+                    if let Err(e) = write_result {
                         outcome.status = OutcomeKind::Error;
                         outcome.reason = e.to_string();
                         return finish(outcome, timer);
                     }
                     outcome.output_image = Some(image_path);
-                    outcome.output_mask = Some(mask_path);
+                    outcome.output_mask = has_mask.then_some(mask_path);
                 }
             } else if !dry {
                 let image_path = output.join("images").join(rel);
@@ -326,7 +422,7 @@ fn process_one(
                     outcome.reason = e.to_string();
                     return finish(outcome, timer);
                 }
-                if let Err(e) = copy_atomic(path, &image_path) {
+                if let Err(e) = create_kept_symlink(path, &image_path) {
                     outcome.status = OutcomeKind::Error;
                     outcome.reason = e.to_string();
                     return finish(outcome, timer);
@@ -339,12 +435,26 @@ fn process_one(
     finish(result, timer)
 }
 
-fn copy_atomic(from: &Path, to: &Path) -> anyhow::Result<()> {
+fn create_kept_symlink(from: &Path, to: &Path) -> anyhow::Result<()> {
     let parent = to.parent().context("output path has no parent")?;
-    let tmp = tempfile::NamedTempFile::new_in(parent)?;
-    fs::copy(from, tmp.path())?;
-    tmp.persist(to).map_err(|e| e.error)?;
+    let target = fs::canonicalize(from)
+        .with_context(|| format!("resolving kept input {}", from.display()))?;
+    let temporary = tempfile::tempdir_in(parent)?;
+    let temporary_link = temporary.path().join("kept-image");
+    create_file_symlink(&target, &temporary_link)?;
+    fs::rename(&temporary_link, to)
+        .with_context(|| format!("publishing kept-image symlink {}", to.display()))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
 }
 fn finish(mut outcome: FileOutcome, timer: Instant) -> FileOutcome {
     outcome.elapsed_ms = timer.elapsed().as_millis();

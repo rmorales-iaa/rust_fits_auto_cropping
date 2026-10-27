@@ -1,12 +1,13 @@
 //! CLI arguments. Directory paths are required to keep input and output provenance explicit.
+use crate::config::ProcessingMode;
 use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "fits-auto-clipping",
-    version,
-    about = "Conservatively detect and mask border artifacts in single-HDU 2D integer and floating-point FITS images."
+    version = env!("FITS_AUTO_CLIPPING_VERSION"),
+    about = "Conservatively detect and mask or crop border artifacts in single-HDU 2D integer and floating-point FITS images."
 )]
 pub struct Args {
     /// Input directory containing FITS images.
@@ -21,6 +22,9 @@ pub struct Args {
     /// Science heuristic rules. Defaults to input/heuristics.toml.
     #[arg(long)]
     pub heuristics: Option<PathBuf>,
+    /// Product mode: preserve dimensions with masks, or crop to a clean rectangle.
+    #[arg(long, value_enum)]
+    pub mode: Option<ProcessingMode>,
     /// Include nested directories in input discovery.
     #[arg(long)]
     pub recursive: bool,

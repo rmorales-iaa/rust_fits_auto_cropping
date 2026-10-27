@@ -10,6 +10,7 @@ Operational settings live in `input/config.toml`. Scientific decision thresholds
 | `processing.recursive` | false | Search subdirectories. `--recursive` enables this for a run. |
 | `processing.memory_budget_mib` | 2048 MiB | Shared estimated image workspace used to cap concurrent workers. |
 | `processing.maximum_image_mib` | 512 MiB | Per-image allocation cap. Current preflight estimate is 32 bytes per pixel. |
+| `processing.mode` | `mask` | `mask` preserves dimensions and marks candidate pixels undefined; `crop` compares the maximum-area clean rectangle and largest artifact-free circle, then selects the geometry retaining more pixel centers. A circle is stored in its rectangular bounding box, with pixels outside the circle undefined. CLI `--mode mask|crop` overrides this setting. |
 
 CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. Existing outputs require `--overwrite`.
 

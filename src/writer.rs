@@ -1,6 +1,8 @@
 //! FITS products written with the pure-Rust fitskit crate.
+use crate::crop::{CropRect, CropRegion};
 use crate::fits_image::Image;
 use anyhow::{Context, bail};
+use chrono::{SecondsFormat, Utc};
 use fitskit::{FitsFile, HduData, Header, HeaderValue, ImageData, Keyword, PixelData};
 use std::{fs, io::Cursor, path::Path};
 use tempfile::NamedTempFile;
@@ -12,6 +14,7 @@ pub fn write_mask(
     width: usize,
     height: usize,
     mask: &[bool],
+    history: &str,
 ) -> anyhow::Result<()> {
     if mask.len() != width.saturating_mul(height) {
         bail!("mask dimensions do not match its data");
@@ -27,9 +30,10 @@ pub fn write_mask(
             output.primary_mut().header.push(keyword.clone());
         }
     }
+    stamp_processing_metadata(&mut output.primary_mut().header);
     output.primary_mut().header.push(Keyword::commentary(
         "HISTORY",
-        "fits-auto-clipping: companion mask; 1 marks newly rejected pixels",
+        &format!("fits-auto-clipping: {history}"),
     ));
     publish_fits(&output, path)?;
     verify_mask_file(path, width, height, mask)
@@ -113,6 +117,7 @@ pub fn write_masked_image(
             _ => bail!("floating BITPIX does not match the pixel buffer"),
         }
     }
+    stamp_processing_metadata(&mut hdu.header);
     hdu.header.push(Keyword::commentary(
         "HISTORY",
         "fits-auto-clipping: border pixels marked undefined",
@@ -138,7 +143,16 @@ pub fn write_products(
         image.bitpix,
         image.blank_value,
     )
-    .and_then(|_| write_mask(source, mask_path, image.width, image.height, data_mask));
+    .and_then(|_| {
+        write_mask(
+            source,
+            mask_path,
+            image.width,
+            image.height,
+            data_mask,
+            "companion mask; 1 marks newly rejected pixels",
+        )
+    });
     if let Err(error) = result {
         let rollback =
             restore_backup(image_path, image_backup).and(restore_backup(mask_path, mask_backup));
@@ -146,6 +160,377 @@ pub fn write_products(
             bail!("output failed ({error}); restoring prior products also failed ({rollback})");
         }
         return Err(error);
+    }
+    Ok(())
+}
+
+/// Write a crop and a full-frame mask describing every source pixel excluded from it.
+pub fn write_cropped_products(
+    source: &Path,
+    image_path: &Path,
+    mask_path: &Path,
+    excluded_mask: &[bool],
+    image: &Image,
+    region: CropRegion,
+) -> anyhow::Result<()> {
+    let image_backup = backup_existing(image_path)?;
+    let mask_backup = backup_existing(mask_path)?;
+    let result = write_cropped_image(source, image_path, image, region).and_then(|_| {
+        write_mask(
+            source,
+            mask_path,
+            image.width,
+            image.height,
+            excluded_mask,
+            "crop exclusion mask; 1 marks pixels excluded from retained geometry",
+        )
+    });
+    if let Err(error) = result {
+        let rollback =
+            restore_backup(image_path, image_backup).and(restore_backup(mask_path, mask_backup));
+        if let Err(rollback) = rollback {
+            bail!(
+                "crop output failed ({error}); restoring prior products also failed ({rollback})"
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Crop raw stored values, preserve non-structural cards and shift all primary/alternate CRPIX.
+pub fn write_cropped_image(
+    source: &Path,
+    destination: &Path,
+    image_info: &Image,
+    region: CropRegion,
+) -> anyhow::Result<()> {
+    let mut output = FitsFile::from_file(source)
+        .with_context(|| format!("reading source FITS {}", source.display()))?;
+    if output.len() != 1 {
+        bail!("source changed: expected exactly one HDU");
+    }
+    let hdu = output.primary_mut();
+    let image = match &mut hdu.data {
+        HduData::Image(image) => image,
+        _ => bail!("source primary HDU is not an image"),
+    };
+    let width = image.axes.first().copied().context("missing image width")?;
+    let height = image.axes.get(1).copied().context("missing image height")?;
+    let rect = region.bounds();
+    if image.axes.len() != 2
+        || rect.width == 0
+        || rect.height == 0
+        || rect.x.checked_add(rect.width).is_none_or(|x| x > width)
+        || rect.y.checked_add(rect.height).is_none_or(|y| y > height)
+    {
+        bail!("crop rectangle is outside the source image");
+    }
+    let before = image.pixels.clone();
+    image.pixels = crop_region_pixel_data(
+        &image.pixels,
+        width,
+        region,
+        image_info.blank_value,
+        image_info.bitpix,
+    )?;
+    image.axes = vec![rect.width, rect.height];
+    for axis in 1..=2 {
+        let prefix = format!("CRPIX{axis}");
+        let offset = if axis == 1 { rect.x } else { rect.y } as f64;
+        let keys: Vec<String> = hdu
+            .header
+            .iter()
+            .filter(|card| is_crpix_keyword(&card.name, &prefix))
+            .map(|card| card.name.clone())
+            .collect();
+        for key in keys {
+            if let Some(value) = hdu.header.get_float(&key) {
+                hdu.header.set(
+                    &key,
+                    HeaderValue::Float(value - offset),
+                    Some("reference pixel after clipping crop"),
+                );
+            }
+        }
+    }
+    let bitpix = image.pixels.bitpix().to_i64();
+    if let Some(blank) = hdu.header.get_int("BLANK")
+        && !integer_value_in_range(bitpix, blank)
+    {
+        hdu.header.keywords.retain(|card| card.name != "BLANK");
+    }
+    if let CropRegion::Circle { .. } = region
+        && bitpix > 0
+    {
+        let blank = image_info
+            .blank_value
+            .context("integer circle crop has no valid BLANK sentinel")?;
+        hdu.header.set(
+            "BLANK",
+            HeaderValue::Integer(blank),
+            Some("undefined pixel value outside selected circle"),
+        );
+    }
+    hdu.header.set(
+        "CLIPX0",
+        HeaderValue::Integer(rect.x as i64),
+        Some("zero-based crop origin in original image"),
+    );
+    hdu.header.set(
+        "CLIPY0",
+        HeaderValue::Integer(rect.y as i64),
+        Some("zero-based crop origin in original image"),
+    );
+    hdu.header.set(
+        "CLIPSHAP",
+        HeaderValue::String(region.shape_name().to_ascii_uppercase()),
+        Some("pixel-derived crop geometry"),
+    );
+    if let CropRegion::Circle {
+        center_x,
+        center_y,
+        radius,
+        ..
+    } = region
+    {
+        hdu.header.set(
+            "CLIPCX",
+            HeaderValue::Float(center_x as f64),
+            Some("zero-based circle center in original image"),
+        );
+        hdu.header.set(
+            "CLIPCY",
+            HeaderValue::Float(center_y as f64),
+            Some("zero-based circle center in original image"),
+        );
+        hdu.header.set(
+            "CLIPRAD",
+            HeaderValue::Float(radius),
+            Some("artifact-free circle radius in pixels"),
+        );
+    }
+    stamp_processing_metadata(&mut hdu.header);
+    hdu.header.push(Keyword::commentary(
+        "HISTORY",
+        "fits-auto-clipping: largest axis-aligned rectangle free of detected artifacts",
+    ));
+    publish_fits(&output, destination)?;
+    verify_cropped_file(source, destination, &before, width, image_info, region)
+}
+
+fn stamp_processing_metadata(header: &mut Header) {
+    let now = Utc::now();
+    let creator = format!(
+        "{} v{}",
+        env!("CARGO_PKG_NAME"),
+        env!("FITS_AUTO_CLIPPING_VERSION")
+    );
+    header.set(
+        "CREATOR",
+        HeaderValue::String(creator.clone()),
+        Some("software that created this FITS product"),
+    );
+    header.set(
+        "DATE",
+        HeaderValue::String(now.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Some("UTC product creation date"),
+    );
+    header.push(Keyword::commentary(
+        "HISTORY",
+        &format!(
+            "generated_utc={} by {creator}",
+            now.to_rfc3339_opts(SecondsFormat::Nanos, true)
+        ),
+    ));
+}
+
+fn crop_pixel_data(pixels: &PixelData, source_width: usize, rect: CropRect) -> PixelData {
+    macro_rules! crop_values {
+        ($values:expr, $variant:ident) => {{
+            let mut cropped = Vec::with_capacity(rect.area());
+            for y in rect.y..rect.y + rect.height {
+                let start = y * source_width + rect.x;
+                cropped.extend_from_slice(&$values[start..start + rect.width]);
+            }
+            PixelData::$variant(cropped)
+        }};
+    }
+    match pixels {
+        PixelData::U8(v) => crop_values!(v, U8),
+        PixelData::I16(v) => crop_values!(v, I16),
+        PixelData::I32(v) => crop_values!(v, I32),
+        PixelData::I64(v) => crop_values!(v, I64),
+        PixelData::F32(v) => crop_values!(v, F32),
+        PixelData::F64(v) => crop_values!(v, F64),
+    }
+}
+
+fn crop_region_pixel_data(
+    pixels: &PixelData,
+    source_width: usize,
+    region: CropRegion,
+    blank_value: Option<i64>,
+    bitpix: i64,
+) -> anyhow::Result<PixelData> {
+    let rect = region.bounds();
+    let mut cropped = crop_pixel_data(pixels, source_width, rect);
+    if let CropRegion::Circle { .. } = region {
+        match &mut cropped {
+            PixelData::U8(values) => {
+                let blank =
+                    u8::try_from(blank_value.context("circle crop requires integer BLANK")?)?;
+                for y in 0..rect.height {
+                    for x in 0..rect.width {
+                        if !region.retains(rect.x + x, rect.y + y) {
+                            values[y * rect.width + x] = blank;
+                        }
+                    }
+                }
+            }
+            PixelData::I16(values) => {
+                let blank =
+                    i16::try_from(blank_value.context("circle crop requires integer BLANK")?)?;
+                for y in 0..rect.height {
+                    for x in 0..rect.width {
+                        if !region.retains(rect.x + x, rect.y + y) {
+                            values[y * rect.width + x] = blank;
+                        }
+                    }
+                }
+            }
+            PixelData::I32(values) => {
+                let blank =
+                    i32::try_from(blank_value.context("circle crop requires integer BLANK")?)?;
+                for y in 0..rect.height {
+                    for x in 0..rect.width {
+                        if !region.retains(rect.x + x, rect.y + y) {
+                            values[y * rect.width + x] = blank;
+                        }
+                    }
+                }
+            }
+            PixelData::I64(values) => {
+                let blank = blank_value.context("circle crop requires integer BLANK")?;
+                for y in 0..rect.height {
+                    for x in 0..rect.width {
+                        if !region.retains(rect.x + x, rect.y + y) {
+                            values[y * rect.width + x] = blank;
+                        }
+                    }
+                }
+            }
+            PixelData::F32(values) => {
+                for y in 0..rect.height {
+                    for x in 0..rect.width {
+                        if !region.retains(rect.x + x, rect.y + y) {
+                            values[y * rect.width + x] = f32::NAN;
+                        }
+                    }
+                }
+            }
+            PixelData::F64(values) => {
+                for y in 0..rect.height {
+                    for x in 0..rect.width {
+                        if !region.retains(rect.x + x, rect.y + y) {
+                            values[y * rect.width + x] = f64::NAN;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if bitpix > 0
+        && let CropRegion::Circle { .. } = region
+    {
+        let blank = blank_value.context("circle crop requires integer BLANK")?;
+        if !integer_value_in_range(bitpix, blank) {
+            bail!("circle crop BLANK sentinel is outside its stored BITPIX range");
+        }
+    }
+    Ok(cropped)
+}
+
+fn is_crpix_keyword(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.is_empty() || (suffix.len() == 1 && suffix.as_bytes()[0].is_ascii_uppercase())
+    })
+}
+
+fn integer_value_in_range(bitpix: i64, value: i64) -> bool {
+    match bitpix {
+        8 => (0..=255).contains(&value),
+        16 => (i16::MIN as i64..=i16::MAX as i64).contains(&value),
+        32 => (i32::MIN as i64..=i32::MAX as i64).contains(&value),
+        64 => true,
+        _ => false,
+    }
+}
+
+fn verify_cropped_file(
+    source: &Path,
+    destination: &Path,
+    before: &PixelData,
+    source_width: usize,
+    image_info: &Image,
+    region: CropRegion,
+) -> anyhow::Result<()> {
+    let rect = region.bounds();
+    let original = FitsFile::from_file(source)?;
+    let check = FitsFile::from_file(destination)?;
+    if check.len() != 1 {
+        bail!("cropped output does not contain exactly one HDU");
+    }
+    check.primary().verify_datasum()?;
+    let image = match &check.primary().data {
+        HduData::Image(image) => image,
+        _ => bail!("cropped output primary HDU is not an image"),
+    };
+    if image.axes != [rect.width, rect.height]
+        || image.pixels.to_bytes()
+            != crop_region_pixel_data(
+                before,
+                source_width,
+                region,
+                image_info.blank_value,
+                image_info.bitpix,
+            )?
+            .to_bytes()
+    {
+        bail!("cropped FITS shape or raw samples changed during writing");
+    }
+    if let CropRegion::Circle { .. } = region {
+        if image_info.bitpix > 0
+            && check.primary().header.get_int("BLANK") != image_info.blank_value
+        {
+            bail!("circular crop BLANK sentinel is missing or changed");
+        }
+        if check.primary().header.get_string("CLIPSHAP") != Some("CIRCLE") {
+            bail!("circular crop geometry card is missing");
+        }
+    }
+    for axis in 1..=2 {
+        let prefix = format!("CRPIX{axis}");
+        let old_header = &original.primary().header;
+        let new_header = &check.primary().header;
+        let offset = if axis == 1 { rect.x } else { rect.y } as f64;
+        for card in old_header
+            .iter()
+            .filter(|card| is_crpix_keyword(&card.name, &prefix))
+        {
+            if let Some(value) = old_header.get_float(&card.name)
+                && new_header
+                    .get_float(&card.name)
+                    .is_none_or(|actual| (actual - (value - offset)).abs() > 1e-10)
+            {
+                bail!(
+                    "cropped output has incorrect {}: expected {}, got {:?}",
+                    card.name,
+                    value - offset,
+                    new_header.get_float(&card.name)
+                );
+            }
+        }
     }
     Ok(())
 }

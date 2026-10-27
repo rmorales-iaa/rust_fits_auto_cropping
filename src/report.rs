@@ -9,6 +9,8 @@ use std::{fs, path::Path};
 pub struct Summary<'a> {
     pub run_id: &'a str,
     pub created_utc: String,
+    pub program: &'static str,
+    pub version: &'static str,
     pub total: usize,
     pub clipped: usize,
     pub kept: usize,
@@ -24,6 +26,8 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
     let summary = Summary {
         run_id,
         created_utc: Utc::now().to_rfc3339(),
+        program: env!("CARGO_PKG_NAME"),
+        version: env!("FITS_AUTO_CLIPPING_VERSION"),
         total: outcomes.len(),
         clipped: count(|s| matches!(s, OutcomeKind::Clipped)),
         kept: count(|s| matches!(s, OutcomeKind::Kept)),
@@ -36,7 +40,7 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason,width,height,masked_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,output_image,output_mask,elapsed_ms\n",
+        "input,status,reason,width,height,masked_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -54,6 +58,20 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
             format!("{:.6}", o.artifact_benefit),
             format!("{:.6}", o.valid_pixel_loss),
             format!("{:.6}", o.net_utility),
+            o.crop_shape.clone().unwrap_or_default(),
+            o.crop_origin_x.map_or_else(String::new, |v| v.to_string()),
+            o.crop_origin_y.map_or_else(String::new, |v| v.to_string()),
+            o.crop_width.map_or_else(String::new, |v| v.to_string()),
+            o.crop_height.map_or_else(String::new, |v| v.to_string()),
+            o.crop_center_x
+                .map_or_else(String::new, |v| format!("{v:.6}")),
+            o.crop_center_y
+                .map_or_else(String::new, |v| format!("{v:.6}")),
+            o.crop_radius
+                .map_or_else(String::new, |v| format!("{v:.6}")),
+            o.image_area_retained.to_string(),
+            o.artifact_pixels_removed.to_string(),
+            o.unmasked_pixels_sacrificed.to_string(),
             o.output_image
                 .as_ref()
                 .map(|p| p.display().to_string())
