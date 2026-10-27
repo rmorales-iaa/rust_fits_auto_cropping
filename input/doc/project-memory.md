@@ -77,3 +77,5 @@ Normal-run summary schema 8 reports `total` discovered FITS inputs and `output_i
 ## Crop preview boundary overlays — 2026-10-27
 
 Crop PNGs are RGB: the left source panel retains grayscale ZScale and receives a green inner contour for kept crop pixels plus a red outer contour on adjacent cropped pixels. The right panel remains a clean grayscale rendering. FITS science arrays are untouched. Rust tests assert rectangle and circle contour colors and source/crop alignment; `tools/cross_validate_previews.py` checks both colors, source ZScale away from contours, crop ZScale, geometry and orientation.
+
+Release `0.1.50`, run `20261027T224741.776915429Z`, generated 16 previews from the 25-file development corpus; all passed independent preview color/geometry validation. Astropy/fitsverify accepted 20 parseable science outputs, 16 masks and 16 reason planes, and the five malformed inputs retained annotated symlink entries. The locked Rust suite passes 84 tests; strict Clippy and formatting pass. See [validation record](validation.md). This is engineering/interoperability evidence, not a labeled scientific accuracy assessment.

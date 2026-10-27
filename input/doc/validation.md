@@ -235,6 +235,12 @@ Normal runs now produce one corresponding `images/<relative-path>` entry for eve
 
 Release `0.1.44` at clean Git revision `a1ef5a97967b` ran crop mode with previews and reason masks on `/fast_disk/tmp/clippling_test/input/`, using four workers and recursive discovery. Run `20261027T224357.086048273Z` reports `total=25`, `output_images=25`, 16 clipped, 4 kept, 0 ignored and 5 malformed-header errors. All five malformed inputs have annotated source symlinks; output symlinks preserve their original bytes. Astropy/fitsverify checked the 20 parseable image outputs, 16 masks and 16 reason planes; the independent preview checker verified all 16 PNGs. The run exits with status 1 because malformed input errors remain visible, even though every input has an output image entry. The science classification remains unvalidated on independent labels.
 
+### RGB crop-preview boundaries (2026-10-27)
+
+Release `0.1.50` ran with four workers, recursive discovery, crop mode, PNG previews and reason masks on `/fast_disk/tmp/clippling_test/input/`. Run `20261027T224741.776915429Z` reported 25 inputs and 25 published image entries: 16 clipped, 4 kept and 5 malformed-input errors. The malformed inputs were annotated and symlinked unchanged. All 16 RGB previews passed `tools/cross_validate_previews.py` checks for green retained-region contours, red adjacent excluded-region contours, unchanged grayscale crop-panel samples, source-derived ZScale and geometry. The preview for `science#2007_01_11T20_23_31_000#493-CAHA#CAHA_2_2M#OPEN#2002TC302#500s#1626x1616#11jan_0011.fits` was visually checked; its source panel shows the circle crop boundary around the retained field.
+
+Astropy and `fitsverify` accepted the 20 parseable science outputs, 16 masks and 16 reason planes; the five pass-through symlinks were validated by target. Astropy emitted legacy-header warnings and could not compute inverse WCS residuals for several SIP cases, while sampled forward coordinates matched. The full locked Rust suite passes 84 tests, strict Clippy and formatting pass, and Python checker compilation succeeds. Overlay lines are display annotations and are not written into FITS arrays. This validation checks implementation/interoperability on the development corpus; it does not establish labeled scientific accuracy.
+
 
 ### Experimental multiscale consensus evidence (2026-10-27)
 
