@@ -45,7 +45,7 @@ impl OutputLayout {
         let run = runs.join(run_id);
         fs::create_dir(&run)
             .with_context(|| format!("creating unique run output directory {}", run.display()))?;
-        for name in ["images", "masks", "previews"] {
+        for name in ["images", "masks", "previews", "manifests"] {
             fs::create_dir(run.join(name))?;
         }
         Ok(Self { root, run })
@@ -86,6 +86,13 @@ impl OutputLayout {
         filename.push(".png");
         Ok(PathBuf::from(filename))
     }
+
+    pub fn manifest_path(&self, relative: &Path) -> anyhow::Result<PathBuf> {
+        let path = self.product_path(ProductCategory::Manifest, relative)?;
+        let mut filename = OsString::from(path.as_os_str());
+        filename.push(".complete.json");
+        Ok(PathBuf::from(filename))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -93,6 +100,7 @@ pub enum ProductCategory {
     Image,
     Mask,
     Preview,
+    Manifest,
 }
 
 impl ProductCategory {
@@ -101,6 +109,7 @@ impl ProductCategory {
             Self::Image => "images",
             Self::Mask => "masks",
             Self::Preview => "previews",
+            Self::Manifest => "manifests",
         }
     }
 }
@@ -197,6 +206,11 @@ mod tests {
         );
         assert!(layout.run().join("masks").is_dir());
         assert!(layout.run().join("previews").is_dir());
+        assert!(layout.run().join("manifests").is_dir());
+        assert_eq!(
+            layout.manifest_path(Path::new("night/frame.fits")).unwrap(),
+            output.join("runs/20261027T120000000Z/manifests/night/frame.fits.complete.json")
+        );
         assert_eq!(
             fs::read_to_string(output.join("user-note.txt")).unwrap(),
             "preserved"

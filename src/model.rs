@@ -46,6 +46,7 @@ pub struct FileOutcome {
     pub output_image: Option<PathBuf>,
     pub output_mask: Option<PathBuf>,
     pub output_png: Option<PathBuf>,
+    pub output_manifest: Option<PathBuf>,
     pub elapsed_ms: u128,
 }
 
@@ -84,6 +85,7 @@ impl FileOutcome {
             output_image: None,
             output_mask: None,
             output_png: None,
+            output_manifest: None,
             elapsed_ms: 0,
         }
     }

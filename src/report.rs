@@ -48,7 +48,7 @@ pub fn write(
 ) -> anyhow::Result<()> {
     let count = |f: fn(&OutcomeKind) -> bool| outcomes.iter().filter(|o| f(&o.status)).count();
     let summary = Summary {
-        schema_version: 2,
+        schema_version: 3,
         run_id,
         created_utc: Utc::now().to_rfc3339(),
         program: env!("CARGO_PKG_NAME"),
@@ -76,7 +76,7 @@ pub fn write(
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason,width,height,original_undefined_pixels,masked_pixels,proposed_mask_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,elapsed_ms\n",
+        "input,status,reason,width,height,original_undefined_pixels,masked_pixels,proposed_mask_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,output_manifest,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -121,6 +121,10 @@ pub fn write(
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
             o.output_png
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            o.output_manifest
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),

@@ -1,5 +1,13 @@
 # Validation record
 
+## Source-snapshot and completion-manifest follow-up (2026-10-27)
+
+The parsed source FITS object now remains available through detection, writing and in-process verification. A writer regression replaces the input path after decoding and proves generated pixel samples and headers still come from the same snapshot that was analyzed. Successful kept/clipped inputs receive an atomically published `manifests/<relative-path>.complete.json`; a marker is absent for corrupt input and dry runs. Tests check generated image/mask/preview sets and kept-image symlinks. The report schema is 3 and per-image CSV/JSON includes the manifest path.
+
+`cargo test --locked --all-targets` passed 61 tests (35 unit, 22 end-to-end and 4 version tests). `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets -- -D warnings` passed. Release `0.0.63` ran three crop-mode/no-PNG trials at one and four workers, interleaved over the same 25-image development corpus. Serial medians were 12.97 s and 311,644 KiB peak RSS; four-worker medians were 3.81 s and 976,432 KiB. Parallel RSS varied from 932,140 to 1,109,752 KiB. All six runs had 16 clipped, 4 kept and 5 malformed-header errors, and Astropy confirmed identical pixels across all 36 science/mask arrays. Astropy plus fitsverify accepted 20 science images and 16 masks for one current-code trial; 20 completion markers were present.
+
+The measurements show no clear runtime benefit from retaining the parsed snapshot (earlier release medians were 13.16 s serial and 3.80 s with four workers), and four-worker median RSS was higher than the previous 923,276 KiB observation. The worker trials used one host and dataset with a warm, interleaved run sequence; they are not an algorithm benchmark or memory guarantee. Completion markers detect interrupted product sets but do not make separate file renames transactional. The dataset is development material without independent artifact labels, so science gates remain open.
+
 ## Second scientific-plan engineering slice (2026-10-27)
 
 The current implementation passed `cargo test --locked --all-targets`: 60 tests total (34 unit, 22 end-to-end and 4 build-version tests). `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets -- -D warnings` passed. Added tests cover integer precision abstention, overflow-safe float centering and correlation, no-available-BLANK keep fallback, unsupported lookup-distortion crop refusal, independent disconnected-component gates, and exhaustive small-grid circle/rectangle geometry references.

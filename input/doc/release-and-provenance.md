@@ -16,7 +16,7 @@ Every newly serialized science image, crop, or mask receives:
 - `DATE`: UTC product creation time in FITS ISO date/time form.
 - `HISTORY`: UTC timestamp with fractional seconds and the program/version.
 
-The run-start log and JSON summary also store program/version, and the summary has its own UTC creation time. A kept image is a symlink to its canonical source and is never edited to add these cards; its run provenance is in the log and summary. Applications consuming output trees must retain access to the source files backing kept symlinks.
+The run-start log and version-3 JSON summary also store program/version, algorithm/policy IDs, Git revision/dirty state, executable SHA-256 and source/effective configuration hashes. Each completed input has an atomically published per-file completion manifest after all expected products are verified; missing manifests indicate incomplete or failed sets. The marker is a completion signal, not a multi-file transaction or source checksum. A kept image is a symlink to its canonical source and is never edited to add these cards; its run provenance is in the log, summary and manifest. Applications consuming output trees must retain access to the source files backing kept symlinks.
 
 ## Validation
 

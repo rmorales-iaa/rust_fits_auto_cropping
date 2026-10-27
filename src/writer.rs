@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 
 /// Create a uint8 mask image with WCS and non-structural source cards.
 pub fn write_mask(
-    source: &Path,
+    source_header: &Header,
     path: &Path,
     width: usize,
     height: usize,
@@ -19,13 +19,11 @@ pub fn write_mask(
     if mask.len() != width.saturating_mul(height) {
         bail!("mask dimensions do not match its data");
     }
-    let source_file = FitsFile::from_file(source)?;
-    let source_hdu = source_file.primary();
     let mut output = FitsFile::with_primary_image(ImageData::new(
         vec![width, height],
         PixelData::U8(mask.iter().map(|v| u8::from(*v)).collect()),
     ));
-    for keyword in source_hdu.header.iter() {
+    for keyword in source_header.iter() {
         if !is_structural_or_data_summary(&keyword.name) && keyword.name != "BUNIT" {
             output.primary_mut().header.push(keyword.clone());
         }
@@ -41,14 +39,13 @@ pub fn write_mask(
 
 /// Write the science image by replacing rejected samples with FITS undefined values.
 pub fn write_masked_image(
-    source: &Path,
+    source: &FitsFile,
     destination: &Path,
     mask: &[bool],
     bitpix: i64,
     blank_value: Option<i64>,
 ) -> anyhow::Result<()> {
-    let mut output = FitsFile::from_file(source)
-        .with_context(|| format!("reading source FITS {}", source.display()))?;
+    let mut output = source.clone();
     if output.len() != 1 {
         bail!("source changed: expected exactly one HDU");
     }
@@ -129,7 +126,6 @@ pub fn write_masked_image(
 
 /// Publish science and mask outputs together, restoring previous outputs on failure.
 pub fn write_products(
-    source: &Path,
     image_path: &Path,
     mask_path: &Path,
     image: &Image,
@@ -138,24 +134,30 @@ pub fn write_products(
     let blank_value = if image.bitpix > 0 && data_mask.iter().any(|masked| *masked) {
         Some(match image.blank_value {
             Some(blank) => blank,
-            None => choose_mask_blank(source, image.bitpix, data_mask)?,
+            None => choose_mask_blank(&image.source_fits, image.bitpix, data_mask)?,
         })
     } else {
         image.blank_value
     };
     let image_backup = backup_existing(image_path)?;
     let mask_backup = backup_existing(mask_path)?;
-    let result = write_masked_image(source, image_path, data_mask, image.bitpix, blank_value)
-        .and_then(|_| {
-            write_mask(
-                source,
-                mask_path,
-                image.width,
-                image.height,
-                data_mask,
-                "companion mask; 1 marks newly rejected pixels",
-            )
-        });
+    let result = write_masked_image(
+        &image.source_fits,
+        image_path,
+        data_mask,
+        image.bitpix,
+        blank_value,
+    )
+    .and_then(|_| {
+        write_mask(
+            &image.source_fits.primary().header,
+            mask_path,
+            image.width,
+            image.height,
+            data_mask,
+            "companion mask; 1 marks newly rejected pixels",
+        )
+    });
     if let Err(error) = result {
         let rollback =
             restore_backup(image_path, image_backup).and(restore_backup(mask_path, mask_backup));
@@ -169,7 +171,6 @@ pub fn write_products(
 
 /// Write a crop and a full-frame mask describing every source pixel excluded from it.
 pub fn write_cropped_products(
-    source: &Path,
     image_path: &Path,
     mask_path: &Path,
     excluded_mask: &[bool],
@@ -178,9 +179,9 @@ pub fn write_cropped_products(
 ) -> anyhow::Result<()> {
     let image_backup = backup_existing(image_path)?;
     let mask_backup = backup_existing(mask_path)?;
-    let result = write_cropped_image(source, image_path, image, region).and_then(|_| {
+    let result = write_cropped_image(image_path, image, region).and_then(|_| {
         write_mask(
-            source,
+            &image.source_fits.primary().header,
             mask_path,
             image.width,
             image.height,
@@ -203,13 +204,11 @@ pub fn write_cropped_products(
 
 /// Crop raw stored values, preserve non-structural cards and shift all primary/alternate CRPIX.
 pub fn write_cropped_image(
-    source: &Path,
     destination: &Path,
     image_info: &Image,
     region: CropRegion,
 ) -> anyhow::Result<()> {
-    let mut output = FitsFile::from_file(source)
-        .with_context(|| format!("reading source FITS {}", source.display()))?;
+    let mut output = image_info.source_fits.clone();
     if output.len() != 1 {
         bail!("source changed: expected exactly one HDU");
     }
@@ -334,7 +333,14 @@ pub fn write_cropped_image(
         },
     );
     publish_fits(&output, destination)?;
-    verify_cropped_file(source, destination, &before, width, image_info, region)
+    verify_cropped_file(
+        &image_info.source_fits,
+        destination,
+        &before,
+        width,
+        image_info,
+        region,
+    )
 }
 
 fn stamp_processing_metadata(header: &mut Header) {
@@ -469,10 +475,8 @@ fn crop_region_pixel_data(
     Ok(cropped)
 }
 
-fn choose_mask_blank(source: &Path, bitpix: i64, mask: &[bool]) -> anyhow::Result<i64> {
-    let file = FitsFile::from_file(source)
-        .with_context(|| format!("reading source FITS {}", source.display()))?;
-    let image = match &file.primary().data {
+fn choose_mask_blank(source: &FitsFile, bitpix: i64, mask: &[bool]) -> anyhow::Result<i64> {
+    let image = match &source.primary().data {
         HduData::Image(image) => image,
         _ => bail!("source primary HDU is not an image"),
     };
@@ -584,7 +588,7 @@ fn integer_value_in_range(bitpix: i64, value: i64) -> bool {
 }
 
 fn verify_cropped_file(
-    source: &Path,
+    original: &FitsFile,
     destination: &Path,
     before: &PixelData,
     source_width: usize,
@@ -592,7 +596,6 @@ fn verify_cropped_file(
     region: CropRegion,
 ) -> anyhow::Result<()> {
     let rect = region.bounds();
-    let original = FitsFile::from_file(source)?;
     let expected_blank = if matches!(region, CropRegion::Circle { .. }) && image_info.bitpix > 0 {
         Some(match image_info.blank_value {
             Some(blank) => blank,
@@ -810,13 +813,12 @@ fn verify_mask_file(
 }
 
 fn verify_masked_file(
-    source: &Path,
+    original: &FitsFile,
     path: &Path,
     mask: &[bool],
     expected_bitpix: i64,
     blank_value: Option<i64>,
 ) -> anyhow::Result<()> {
-    let original = FitsFile::from_file(source)?;
     let check = FitsFile::from_file(path)?;
     if check.len() != 1 {
         bail!("written science output does not contain exactly one HDU");
@@ -880,7 +882,7 @@ fn float_slice(pixels: &PixelData) -> anyhow::Result<Vec<f64>> {
 mod tests {
     use super::write_products;
     use crate::fits_image::read_image;
-    use fitskit::{FitsFile, HeaderValue, ImageData, PixelData};
+    use fitskit::{FitsFile, HduData, HeaderValue, ImageData, PixelData};
     use std::fs;
 
     #[test]
@@ -916,7 +918,7 @@ mod tests {
                 mask[y * width + x] = true;
             }
         }
-        write_products(&source, &output, &mask_path, &image, &mask).unwrap();
+        write_products(&output, &mask_path, &image, &mask).unwrap();
         assert_eq!(
             FitsFile::from_file(&output)
                 .unwrap()
@@ -926,5 +928,65 @@ mod tests {
             Some(255)
         );
         assert!(fs::metadata(&mask_path).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn output_uses_the_same_parsed_source_snapshot_as_detection() {
+        let t = tempfile::tempdir().unwrap();
+        let source = t.path().join("source.fits");
+        let output = t.path().join("processed.fits");
+        let mask_path = t.path().join("mask.fits");
+        let (width, height) = (96, 96);
+        let mut original = vec![100_i16; width * height];
+        for y in 0..16 {
+            for x in 0..32 {
+                original[y * width + x] = 0;
+            }
+        }
+        let mut original_file = FitsFile::with_primary_image(ImageData::new(
+            vec![width, height],
+            PixelData::I16(original.clone()),
+        ));
+        original_file.primary_mut().header.set(
+            "OBJECT",
+            HeaderValue::String("snapshot".into()),
+            None,
+        );
+        original_file.to_file(&source).unwrap();
+        let image = read_image(&source, 16).unwrap().unwrap();
+
+        let mut replacement = FitsFile::with_primary_image(ImageData::new(
+            vec![width, height],
+            PixelData::I16(vec![250; width * height]),
+        ));
+        replacement.primary_mut().header.set(
+            "OBJECT",
+            HeaderValue::String("replacement".into()),
+            None,
+        );
+        replacement.to_file(&source).unwrap();
+
+        let mut mask = vec![false; width * height];
+        for y in 0..16 {
+            for x in 0..32 {
+                mask[y * width + x] = true;
+            }
+        }
+        write_products(&output, &mask_path, &image, &mask).unwrap();
+
+        let written = FitsFile::from_file(output).unwrap();
+        assert_eq!(
+            written.primary().header.get_string("OBJECT"),
+            Some("snapshot")
+        );
+        let HduData::Image(written_image) = &written.primary().data else {
+            panic!("expected primary image")
+        };
+        let PixelData::I16(written_pixels) = &written_image.pixels else {
+            panic!("expected int16 samples")
+        };
+        assert_eq!(written_pixels[16 * width + 32], original[16 * width + 32]);
+        assert_ne!(written_pixels[16 * width + 32], 250);
+        assert!(fs::metadata(mask_path).unwrap().len() > 0);
     }
 }

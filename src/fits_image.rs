@@ -42,6 +42,8 @@ pub struct Image {
     pub blank_value: Option<i64>,
     pub metadata_warnings: Vec<String>,
     pub crop_wcs_unsupported: Option<String>,
+    /// Parsed source snapshot used by both classification and product writing.
+    pub source_fits: FitsFile,
 }
 
 /// Parse a FITS file using fitskit and validate the single-HDU 2D image contract.
@@ -128,6 +130,7 @@ pub fn read_image(
     if values.len() != n {
         bail!("FITS array size does not match NAXIS dimensions");
     }
+    let crop_wcs_unsupported = crop_wcs_unsupported(&hdu.header);
     Ok(Ok(Image {
         width,
         height,
@@ -135,7 +138,8 @@ pub fn read_image(
         bitpix,
         blank_value,
         metadata_warnings,
-        crop_wcs_unsupported: crop_wcs_unsupported(&hdu.header),
+        crop_wcs_unsupported,
+        source_fits: file,
     }))
 }
 

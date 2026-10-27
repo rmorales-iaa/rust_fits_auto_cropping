@@ -200,6 +200,18 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
             .file_type()
             .is_symlink()
     );
+    let clean_manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            summary_path(&output)
+                .parent()
+                .unwrap()
+                .join("manifests/clean.fits.complete.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(clean_manifest["complete"], true);
+    assert_eq!(clean_manifest["products"][0]["symlink"], true);
     let m = FitsFile::from_file(product_path(&output, "masks", "float.fits")).unwrap();
     assert_eq!(m.primary().header.get_float("CRPIX1"), Some(48.5));
     assert_eq!(m.primary().header.get_string("BUNIT"), None);
@@ -710,6 +722,30 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
             .unwrap()
             .ends_with("circular-field.fits.png")
     );
+    assert_eq!(
+        summary["files"][0]["output_manifest"],
+        summary_path(&output)
+            .parent()
+            .unwrap()
+            .join("manifests/circular-field.fits.complete.json")
+            .to_string_lossy()
+            .as_ref()
+    );
+    let manifest_path = summary_path(&output)
+        .parent()
+        .unwrap()
+        .join("manifests/circular-field.fits.complete.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["complete"], true);
+    assert_eq!(manifest["products"].as_array().unwrap().len(), 3);
+    assert!(
+        manifest["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|product| product["kind"] == "preview")
+    );
     let output_mask = read_mask(&product_path(&output, "masks", "circular-field.fits"));
     assert_eq!(output_mask.len(), width * height);
     assert_eq!(output_mask[0], 1);
@@ -752,6 +788,15 @@ fn crop_mode_keeps_source_when_valid_pixel_loss_dominates() {
     let report = summary_path(&output);
     let result: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(result["kept"], 1);
+    let manifest_path = summary_path(&output)
+        .parent()
+        .unwrap()
+        .join("manifests/four-corners.fits.complete.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["complete"], true);
+    assert_eq!(manifest["products"][0]["kind"], "science_image");
+    assert_eq!(manifest["products"][0]["symlink"], true);
     assert!(
         result["files"][0]["unmasked_pixels_sacrificed"]
             .as_u64()
@@ -936,7 +981,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 2);
+    assert_eq!(summary["schema_version"], 3);
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
     assert_eq!(summary["policy_version"], "heuristics-v1");
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);
@@ -944,6 +989,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     assert_eq!(summary["clipped"], 0);
     assert_eq!(summary["proposed"], 1);
     assert_eq!(summary["files"][0]["masked_pixels"], 0);
+    assert!(summary["files"][0]["output_manifest"].is_null());
     assert!(
         summary["files"][0]["proposed_mask_pixels"]
             .as_u64()
@@ -968,6 +1014,13 @@ fn corrupt_candidate_returns_batch_error_status_and_is_reported() {
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(v["errors"], 1);
+    assert!(
+        !summary_path(&output)
+            .parent()
+            .unwrap()
+            .join("manifests/broken.fits.complete.json")
+            .exists()
+    );
 }
 
 #[test]
