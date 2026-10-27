@@ -5,7 +5,7 @@ use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
 use fitskit::{FitsFile, HduData, Header, HeaderValue, ImageData, Keyword, PixelData};
 use std::{fs, io::Cursor, path::Path};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
 /// Create a uint8 mask image with WCS and non-structural source cards.
 pub fn write_mask(
@@ -139,34 +139,29 @@ pub fn write_products(
     } else {
         image.blank_value
     };
-    let image_backup = backup_existing(image_path)?;
-    let mask_backup = backup_existing(mask_path)?;
-    let result = write_masked_image(
-        &image.source_fits,
+    write_product_pair(
         image_path,
-        data_mask,
-        image.bitpix,
-        blank_value,
+        mask_path,
+        |staged_image| {
+            write_masked_image(
+                &image.source_fits,
+                staged_image,
+                data_mask,
+                image.bitpix,
+                blank_value,
+            )
+        },
+        |staged_mask| {
+            write_mask(
+                &image.source_fits.primary().header,
+                staged_mask,
+                image.width,
+                image.height,
+                data_mask,
+                "companion mask; 1 marks newly rejected pixels",
+            )
+        },
     )
-    .and_then(|_| {
-        write_mask(
-            &image.source_fits.primary().header,
-            mask_path,
-            image.width,
-            image.height,
-            data_mask,
-            "companion mask; 1 marks newly rejected pixels",
-        )
-    });
-    if let Err(error) = result {
-        let rollback =
-            restore_backup(image_path, image_backup).and(restore_backup(mask_path, mask_backup));
-        if let Err(rollback) = rollback {
-            bail!("output failed ({error}); restoring prior products also failed ({rollback})");
-        }
-        return Err(error);
-    }
-    Ok(())
 }
 
 /// Write a crop and a full-frame mask describing every source pixel excluded from it.
@@ -177,27 +172,86 @@ pub fn write_cropped_products(
     image: &Image,
     region: CropRegion,
 ) -> anyhow::Result<()> {
+    write_product_pair(
+        image_path,
+        mask_path,
+        |staged_image| write_cropped_image(staged_image, image, region),
+        |staged_mask| {
+            write_mask(
+                &image.source_fits.primary().header,
+                staged_mask,
+                image.width,
+                image.height,
+                excluded_mask,
+                "crop exclusion mask; 1 marks pixels excluded from retained geometry",
+            )
+        },
+    )
+}
+
+fn write_product_pair(
+    image_path: &Path,
+    mask_path: &Path,
+    write_image: impl FnOnce(&Path) -> anyhow::Result<()>,
+    write_mask: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let image_stage = create_stage_directory(image_path)?;
+    let mask_stage = create_stage_directory(mask_path)?;
+    let staged_image = image_stage.path().join("science.fits");
+    let staged_mask = mask_stage.path().join("mask.fits");
+
+    // Both complete products pass their writers' FITS/sample verification
+    // before either final path is changed.
+    write_image(&staged_image)?;
+    write_mask(&staged_mask)?;
+    publish_product_pair(&staged_image, image_path, &staged_mask, mask_path)
+}
+
+fn create_stage_directory(destination: &Path) -> anyhow::Result<TempDir> {
+    let parent = destination
+        .parent()
+        .context("FITS destination has no parent")?;
+    tempfile::tempdir_in(parent)
+        .with_context(|| format!("creating product staging directory in {}", parent.display()))
+}
+
+fn publish_product_pair(
+    staged_image: &Path,
+    image_path: &Path,
+    staged_mask: &Path,
+    mask_path: &Path,
+) -> anyhow::Result<()> {
+    publish_product_pair_with(
+        staged_image,
+        image_path,
+        staged_mask,
+        mask_path,
+        |from, to| fs::rename(from, to),
+    )
+}
+
+fn publish_product_pair_with<F>(
+    staged_image: &Path,
+    image_path: &Path,
+    staged_mask: &Path,
+    mask_path: &Path,
+    mut publish: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
     let image_backup = backup_existing(image_path)?;
     let mask_backup = backup_existing(mask_path)?;
-    let result = write_cropped_image(image_path, image, region).and_then(|_| {
-        write_mask(
-            &image.source_fits.primary().header,
-            mask_path,
-            image.width,
-            image.height,
-            excluded_mask,
-            "crop exclusion mask; 1 marks pixels excluded from retained geometry",
-        )
-    });
+    let result = publish(staged_image, image_path).and_then(|()| publish(staged_mask, mask_path));
     if let Err(error) = result {
-        let rollback =
-            restore_backup(image_path, image_backup).and(restore_backup(mask_path, mask_backup));
-        if let Err(rollback) = rollback {
-            bail!(
-                "crop output failed ({error}); restoring prior products also failed ({rollback})"
-            );
+        let image_rollback = restore_backup(image_path, image_backup);
+        let mask_rollback = restore_backup(mask_path, mask_backup);
+        match (image_rollback, mask_rollback) {
+            (Ok(()), Ok(())) => return Err(error.into()),
+            (image, mask) => bail!(
+                "publishing product pair failed ({error}); rollback image={image:?}, mask={mask:?}"
+            ),
         }
-        return Err(error);
     }
     Ok(())
 }
@@ -880,11 +934,63 @@ fn float_slice(pixels: &PixelData) -> anyhow::Result<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::write_products;
+    use super::{publish_product_pair_with, write_products};
     use crate::fits_image::read_image;
     use fitskit::{FitsFile, HduData, HeaderValue, ImageData, PixelData};
     use sha2::{Digest, Sha256};
     use std::fs;
+
+    fn fail_second_publish(
+        staged_image: &std::path::Path,
+        image: &std::path::Path,
+        staged_mask: &std::path::Path,
+        mask: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let mut calls = 0;
+        publish_product_pair_with(staged_image, image, staged_mask, mask, |from, to| {
+            calls += 1;
+            if calls == 2 {
+                return Err(std::io::Error::other("injected second-product failure"));
+            }
+            fs::rename(from, to)
+        })
+    }
+
+    #[test]
+    fn second_product_publication_failure_restores_previous_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let staged_image = staging.join("science.fits");
+        let staged_mask = staging.join("mask.fits");
+        fs::write(&staged_image, b"new science").unwrap();
+        fs::write(&staged_mask, b"new mask").unwrap();
+        let image = temp.path().join("science.fits");
+        let mask = temp.path().join("mask.fits");
+        fs::write(&image, b"old science").unwrap();
+        fs::write(&mask, b"old mask").unwrap();
+
+        assert!(fail_second_publish(&staged_image, &image, &staged_mask, &mask).is_err());
+        assert_eq!(fs::read(image).unwrap(), b"old science");
+        assert_eq!(fs::read(mask).unwrap(), b"old mask");
+    }
+
+    #[test]
+    fn second_product_publication_failure_removes_partial_new_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let staged_image = staging.join("science.fits");
+        let staged_mask = staging.join("mask.fits");
+        fs::write(&staged_image, b"new science").unwrap();
+        fs::write(&staged_mask, b"new mask").unwrap();
+        let image = temp.path().join("science.fits");
+        let mask = temp.path().join("mask.fits");
+
+        assert!(fail_second_publish(&staged_image, &image, &staged_mask, &mask).is_err());
+        assert!(!image.exists());
+        assert!(!mask.exists());
+    }
 
     #[test]
     fn existing_blank_is_reused_without_searching_for_another_integer_code() {
