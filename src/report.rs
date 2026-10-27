@@ -13,13 +13,20 @@ pub struct Summary<'a> {
     pub version: &'static str,
     pub total: usize,
     pub clipped: usize,
+    pub proposed: usize,
     pub kept: usize,
     pub ignored: usize,
     pub errors: usize,
+    pub dry_run: bool,
     pub files: &'a [FileOutcome],
 }
 
-pub fn write(run_dir: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::Result<()> {
+pub fn write(
+    run_dir: &Path,
+    run_id: &str,
+    outcomes: &[FileOutcome],
+    dry_run: bool,
+) -> anyhow::Result<()> {
     let count = |f: fn(&OutcomeKind) -> bool| outcomes.iter().filter(|o| f(&o.status)).count();
     let summary = Summary {
         run_id,
@@ -28,9 +35,11 @@ pub fn write(run_dir: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::
         version: env!("RUST_FITS_AUTO_CROPPING_VERSION"),
         total: outcomes.len(),
         clipped: count(|s| matches!(s, OutcomeKind::Clipped)),
+        proposed: count(|s| matches!(s, OutcomeKind::Proposed)),
         kept: count(|s| matches!(s, OutcomeKind::Kept)),
         ignored: count(|s| matches!(s, OutcomeKind::Ignored)),
         errors: count(|s| matches!(s, OutcomeKind::Error)),
+        dry_run,
         files: outcomes,
     };
     fs::write(
@@ -38,7 +47,7 @@ pub fn write(run_dir: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason,width,height,masked_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,elapsed_ms\n",
+        "input,status,reason,width,height,original_undefined_pixels,masked_pixels,proposed_mask_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -47,7 +56,9 @@ pub fn write(run_dir: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::
             o.reason.clone(),
             o.width.map(|v| v.to_string()).unwrap_or_default(),
             o.height.map(|v| v.to_string()).unwrap_or_default(),
+            o.original_undefined_pixels.to_string(),
             o.masked_pixels.to_string(),
+            o.proposed_mask_pixels.to_string(),
             format!("{:.8}", o.mask_fraction),
             format!("{:.8}", o.proposed_mask_fraction),
             o.candidate_tiles.to_string(),

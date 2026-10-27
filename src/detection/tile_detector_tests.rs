@@ -28,6 +28,22 @@ fn detects_connected_low_corner_and_preserves_center() {
     assert!(found.mask[0]);
     assert!(!found.mask[48 * w + 48]);
 }
+
+#[test]
+fn preexisting_undefined_samples_are_not_added_to_the_proposed_mask() {
+    let (w, h) = (96, 96);
+    let mut data = vec![100.0; w * h];
+    for y in 0..16 {
+        for x in 0..24 {
+            data[y * w + x] = 0.0;
+        }
+    }
+    data[0] = f64::NAN;
+    let found = detect_border(&data, w, h, &config());
+    assert!(found.accepted, "{}", found.reason);
+    assert!(!found.mask[0]);
+    assert!(found.mask[1]);
+}
 #[test]
 fn detects_single_sided_pattern_without_forcing_symmetry() {
     let (w, h) = (96, 96);

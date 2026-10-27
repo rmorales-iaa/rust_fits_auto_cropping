@@ -4,7 +4,7 @@ use crate::{
     config::{Config, HeuristicsConfig, ProcessingMode},
     crop::{CropRegion, largest_clean_region},
     detection::detect_border,
-    fits_image::read_image,
+    fits_image::{is_gzip_compressed, read_image},
     logger::Logger,
     model::{FileOutcome, OutcomeKind},
     output_layout::{OutputLayout, ProductCategory},
@@ -171,13 +171,17 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
             .collect()
     });
     outcomes.sort_by(|a, b| a.input.cmp(&b.input));
-    report::write(&run_dir, &run_id, &outcomes)?;
+    report::write(&run_dir, &run_id, &outcomes, args.dry_run)?;
     if logger_failed.load(Ordering::Relaxed) {
         bail!("activity logger failed while recording file events; see completed summary report")
     };
     let clipped = outcomes
         .iter()
         .filter(|o| matches!(o.status, OutcomeKind::Clipped))
+        .count();
+    let proposed = outcomes
+        .iter()
+        .filter(|o| matches!(o.status, OutcomeKind::Proposed))
         .count();
     let kept = outcomes
         .iter()
@@ -195,11 +199,13 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         log.event(
             &run_id,
             "run_finished",
-            serde_json::json!({"total":outcomes.len(),"clipped":clipped,
-        "kept":kept,"ignored":ignored,"errors":errors,"elapsed_ms":started.elapsed().as_millis()}),
+            serde_json::json!({"total":outcomes.len(),"clipped":clipped,"proposed":proposed,
+        "kept":kept,"ignored":ignored,"errors":errors,"dry_run":args.dry_run,"elapsed_ms":started.elapsed().as_millis()}),
         )?;
     }
-    println!("Run {run_id}: {clipped} clipped, {kept} kept, {ignored} ignored, {errors} errors");
+    println!(
+        "Run {run_id}: {clipped} clipped, {proposed} proposed, {kept} kept, {ignored} ignored, {errors} errors"
+    );
     if errors > 0 {
         return Err(BatchFailure {
             count: errors,
@@ -247,6 +253,7 @@ fn process_one(
     let rel = path.strip_prefix(input).unwrap_or(path);
     if rel.to_string_lossy().to_ascii_lowercase().ends_with(".gz")
         || rel.to_string_lossy().to_ascii_lowercase().ends_with(".fz")
+        || is_gzip_compressed(path).unwrap_or(false)
     {
         return finish(
             FileOutcome::new(
@@ -282,6 +289,8 @@ fn process_one(
             );
             outcome.width = Some(image.width);
             outcome.height = Some(image.height);
+            outcome.original_undefined_pixels =
+                image.values.iter().filter(|v| !v.is_finite()).count();
             outcome.proposed_mask_fraction = detection.candidate_fraction;
             outcome.candidate_tiles = detection.candidate_tiles;
             outcome.score = detection.score;
@@ -295,8 +304,7 @@ fn process_one(
             }
             if detection.accepted {
                 let n = detection.mask.iter().filter(|v| **v).count();
-                outcome.masked_pixels = n;
-                outcome.mask_fraction = n as f64 / (image.width * image.height) as f64;
+                outcome.proposed_mask_pixels = n;
                 let crop = if matches!(config.processing.mode, ProcessingMode::Crop) {
                     largest_clean_region(&detection.mask, image.width, image.height)
                 } else {
@@ -307,8 +315,12 @@ fn process_one(
                     outcome.status = OutcomeKind::Kept;
                     outcome.reason = "no positive-area rectangle excludes every detected artifact pixel; image retained".into();
                 }
+                if options.dry_run && detection.accepted && outcome.status == OutcomeKind::Clipped {
+                    outcome.status = OutcomeKind::Proposed;
+                }
                 if let Some(rect) = crop {
                     let total = image.width * image.height;
+                    let defined = total - outcome.original_undefined_pixels;
                     let bounds = rect.bounds();
                     let excluded: Vec<bool> = (0..total)
                         .map(|i| !rect.retains(i % image.width, i / image.width))
@@ -334,17 +346,24 @@ fn process_one(
                         .mask
                         .iter()
                         .zip(&excluded)
-                        .filter(|(candidate, excluded)| **candidate && **excluded)
+                        .zip(&image.values)
+                        .filter(|((candidate, excluded), value)| {
+                            **candidate && **excluded && value.is_finite()
+                        })
                         .count();
                     outcome.unmasked_pixels_sacrificed = detection
                         .mask
                         .iter()
                         .zip(&excluded)
-                        .filter(|(candidate, excluded)| !**candidate && **excluded)
+                        .zip(&image.values)
+                        .filter(|((candidate, excluded), value)| {
+                            !**candidate && **excluded && value.is_finite()
+                        })
                         .count();
-                    let artifact_fraction = outcome.artifact_pixels_removed as f64 / total as f64;
+                    let artifact_fraction =
+                        outcome.artifact_pixels_removed as f64 / defined.max(1) as f64;
                     let valid_loss_fraction =
-                        outcome.unmasked_pixels_sacrificed as f64 / total as f64;
+                        outcome.unmasked_pixels_sacrificed as f64 / defined.max(1) as f64;
                     outcome.artifact_benefit = artifact_fraction * detection.evidence_ratio;
                     outcome.valid_pixel_loss = heuristics.heuristics.valid_pixel_loss_cost
                         * valid_loss_fraction
@@ -432,6 +451,16 @@ fn process_one(
                     }
                     outcome.output_image = Some(image_path);
                     outcome.output_mask = has_mask.then_some(mask_path);
+                    if has_mask {
+                        outcome.masked_pixels = if crop_accepted {
+                            outcome.artifact_pixels_removed + outcome.unmasked_pixels_sacrificed
+                        } else {
+                            n
+                        };
+                        outcome.mask_fraction = outcome.masked_pixels as f64
+                            / (image.width * image.height - outcome.original_undefined_pixels)
+                                .max(1) as f64;
+                    }
                     if crop_accepted && let Some(preview) = png_path {
                         let region = crop.expect("accepted crop has a region");
                         if let Err(error) = write_crop_preview(

@@ -57,3 +57,15 @@ The useful engineering foundation is real: pure-Rust FITS handling, deterministi
 The [active scientific improvement plan](scientific-improvement-plan.md) maps all findings to deliverables, acceptance gates and stopping criteria. Historical validation remains valid for the cases it actually checked; it does not establish the wider guarantees now required.
 
 Planning closure: five refinement passes incorporated source, scientific, statistical and implementation findings; two subsequent coverage/consistency passes found no new material omission. All nine skill files passed the skill-creator validator and relative documentation links resolved. The current code and runtime thresholds remain unchanged. Implementation and real-data release validation are still required.
+
+## Implementation follow-up (2026-10-27)
+
+The first code slice addresses specific reproduced P1 failures without changing the detector thresholds or promoting new science claims:
+
+- **A07:** raw integer analysis values are median-centered; no synthetic BLANK is allocated during reading. Mask and circular-crop writers select a replacement from retained stored values only when needed. Full-range uint8 retained input now has an end-to-end regression and stays a source symlink. The no-available-code fallback for an action that requires new undefined samples remains open.
+- **A08:** integer and floating analysis buffers use median-centered stored values; the scale/zero cards are validated but not included in detector residuals. A regression confirms identical masks with large BZERO/BSCALE changes and unrelated OBJECT text. Extreme-value precision behavior still needs dedicated oracle tests.
+- **A09:** gzip content signatures are checked before FITS parsing, so a gzip stream named `.fits` is ignored. Suffix checks still cover `.gz` and `.fz` conventions.
+- **A10:** dimensionless masks omit BUNIT; derived science products drop stale DATAMIN/DATAMAX; HISTORY entries are split to bounded card text and crop shape wording matches the selected circle or rectangle. Astropy and fitsverify independently accepted the output products from the recorded development run.
+- **A14:** `original_undefined_pixels`, `proposed_mask_pixels` and applied `masked_pixels` are now distinct; dry runs set `dry_run`, count accepted decisions as `proposed`, and keep applied counts at zero. Crop utility counts exclude pre-existing undefined samples and include sacrificed defined samples. Full intersections, reason-code stability, schema versioning and candidate/action alternatives remain open.
+
+The P1 fixes and reporting changes are local implementation work; do not infer that A01–A06 or A11–A17 have been resolved. In particular, the tile detector remains coarse and uncalibrated. Current suite: 51 tests (27 unit, 20 end-to-end, 4 version tests). Formatting and Clippy pass. The actual implementation and remaining gates are tracked in [the active plan](scientific-improvement-plan.md) and [validation](validation.md).

@@ -3,6 +3,7 @@ use anyhow::{Context, bail};
 use fitskit::{FitsFile, HduData, Header, PixelData};
 use std::{
     fs::File,
+    io::Read,
     io::{Seek, SeekFrom},
     path::Path,
 };
@@ -77,15 +78,12 @@ pub fn read_image(
         ));
     }
     let (values, blank_value) = match &image.pixels {
-        PixelData::U8(raw) => integer_values(raw, existing_blank, scale, zero, 8)?,
-        PixelData::I16(raw) => integer_values(raw, existing_blank, scale, zero, 16)?,
-        PixelData::I32(raw) => integer_values(raw, existing_blank, scale, zero, 32)?,
-        PixelData::I64(raw) => integer_values(raw, existing_blank, scale, zero, 64)?,
-        PixelData::F32(raw) => (
-            raw.iter().map(|&v| zero + scale * f64::from(v)).collect(),
-            None,
-        ),
-        PixelData::F64(raw) => (raw.iter().map(|&v| zero + scale * v).collect(), None),
+        PixelData::U8(raw) => (integer_values(raw, existing_blank)?, existing_blank),
+        PixelData::I16(raw) => (integer_values(raw, existing_blank)?, existing_blank),
+        PixelData::I32(raw) => (integer_values(raw, existing_blank)?, existing_blank),
+        PixelData::I64(raw) => (integer_values(raw, existing_blank)?, existing_blank),
+        PixelData::F32(raw) => (center_float_values(raw.iter().map(|&v| f64::from(v))), None),
+        PixelData::F64(raw) => (center_float_values(raw.iter().copied()), None),
     };
     if values.len() != n {
         bail!("FITS array size does not match NAXIS dimensions");
@@ -98,6 +96,15 @@ pub fn read_image(
         blank_value,
         metadata_warnings,
     }))
+}
+
+/// Detect gzip by file content so a compressed stream with a misleading FITS
+/// suffix is ignored without asking the FITS parser to read it.
+pub fn is_gzip_compressed(path: &Path) -> anyhow::Result<bool> {
+    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut signature = [0_u8; 2];
+    let count = file.read(&mut signature)?;
+    Ok(count == signature.len() && signature == [0x1f, 0x8b])
 }
 
 fn preflight(path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
@@ -160,18 +167,11 @@ fn integer_value_in_range(bitpix: i64, value: i64) -> bool {
     }
 }
 
-fn integer_values<T>(
-    raw: &[T],
-    existing_blank: Option<i64>,
-    scale: f64,
-    zero: f64,
-    bitpix: i64,
-) -> anyhow::Result<(Vec<f64>, Option<i64>)>
+fn integer_values<T>(raw: &[T], existing_blank: Option<i64>) -> anyhow::Result<Vec<f64>>
 where
     T: Copy + Into<i64>,
 {
     let raw: Vec<i64> = raw.iter().copied().map(Into::into).collect();
-    let sentinel = existing_blank.unwrap_or(unused_integer_value(bitpix, &raw)?);
     let mut valid: Vec<i64> = raw
         .iter()
         .copied()
@@ -182,17 +182,37 @@ where
     }
     valid.sort_unstable();
     let anchor = valid[valid.len() / 2];
-    let values = raw
+    Ok(raw
         .iter()
         .map(|&v| {
             if Some(v) == existing_blank {
                 f64::NAN
             } else {
-                zero + ((v as i128 - anchor as i128) as f64) * scale
+                (v as i128 - anchor as i128) as f64
             }
         })
-        .collect();
-    Ok((values, Some(sentinel)))
+        .collect())
+}
+
+fn center_float_values(values: impl Iterator<Item = f64>) -> Vec<f64> {
+    let mut values: Vec<f64> = values.collect();
+    let mut finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return values;
+    }
+    finite.sort_by(f64::total_cmp);
+    let middle = finite.len() / 2;
+    let center = if finite.len().is_multiple_of(2) {
+        finite[middle - 1] * 0.5 + finite[middle] * 0.5
+    } else {
+        finite[middle]
+    };
+    for value in &mut values {
+        if value.is_finite() {
+            *value -= center;
+        }
+    }
+    values
 }
 
 pub fn unused_integer_value(bitpix: i64, raw: &[i64]) -> anyhow::Result<i64> {

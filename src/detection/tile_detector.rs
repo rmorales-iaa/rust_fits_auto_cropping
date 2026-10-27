@@ -48,6 +48,10 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     {
         return empty();
     }
+    let defined_pixels = data.iter().filter(|value| value.is_finite()).count();
+    if defined_pixels == 0 {
+        return empty();
+    }
     let cols = width.div_ceil(cfg.tile_size);
     let rows = height.div_ceil(cfg.tile_size);
     let mut tiles = Vec::with_capacity(rows * cols);
@@ -180,18 +184,22 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
         .collect();
     let (evidence_ratio, _) = location_scale(&selected_evidence);
     let evidence_ratio = evidence_ratio.min(cfg.maximum_evidence_ratio).max(0.0);
-    let selected_pixels: usize = accepted_tiles
-        .iter()
-        .enumerate()
-        .filter(|(_, selected)| **selected)
-        .map(|(ti, _)| {
-            let tx = ti % cols;
-            let ty = ti / cols;
-            (((tx + 1) * cfg.tile_size).min(width) - tx * cfg.tile_size)
-                * (((ty + 1) * cfg.tile_size).min(height) - ty * cfg.tile_size)
-        })
-        .sum();
-    let fraction = selected_pixels as f64 / data.len() as f64;
+    let mut selected_pixels = 0usize;
+    for (ti, selected) in accepted_tiles.iter().enumerate() {
+        if !selected {
+            continue;
+        }
+        let tx = ti % cols;
+        let ty = ti / cols;
+        for y in ty * cfg.tile_size..((ty + 1) * cfg.tile_size).min(height) {
+            for x in tx * cfg.tile_size..((tx + 1) * cfg.tile_size).min(width) {
+                if data[y * width + x].is_finite() {
+                    selected_pixels += 1;
+                }
+            }
+        }
+    }
+    let fraction = selected_pixels as f64 / defined_pixels as f64;
     // Report the same clip-versus-keep evidence for every non-empty candidate,
     // including candidates rejected by area or support gates. This makes an
     // abstention auditable without implying that the score is calibrated.
@@ -264,7 +272,9 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
             let ty = ti / cols;
             for y in ty * cfg.tile_size..((ty + 1) * cfg.tile_size).min(height) {
                 for x in tx * cfg.tile_size..((tx + 1) * cfg.tile_size).min(width) {
-                    mask[y * width + x] = true;
+                    if data[y * width + x].is_finite() {
+                        mask[y * width + x] = true;
+                    }
                 }
             }
         }

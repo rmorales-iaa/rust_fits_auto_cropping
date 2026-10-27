@@ -1,5 +1,15 @@
 # Validation record
 
+## Scientific-plan implementation slice (2026-10-27)
+
+Implementation build `0.0.34` on the unchanged 25-image development set in `/fast_disk/tmp/clippling_test/input/` wrote a new run to `/fast_disk/tmp/clippling_test/output/runs/20261027T131800.144164298Z/`. It reported 16 clipped, 4 kept and 5 errors. The same five frames have malformed quoted-string headers (`unterminated string value`) in the historical runs; they were not reclassified as successful. The run used the default 2048 MiB budget and four effective workers. `/usr/bin/time -v` measured 3.35 s wall time and 952,624 KiB peak RSS. This is one observational run, not the repeated paired G5 benchmark and not evidence of better science accuracy.
+
+`tools/cross_validate_fits.py` independently checked all 20 output science images and 16 masks with Astropy and `fitsverify`; all passed. This confirms FITS structure, checksums, samples, mask geometry, WCS behavior for the present frames, and provenance under the checker’s current scope. It does not validate artifact labels, boundary truth, photometric bias, all WCS conventions, or the five inputs that could not be parsed.
+
+After the implementation changes, `cargo test --locked --all-targets` passed 51 tests (27 unit, 20 end-to-end, 4 build-version checks); `cargo fmt --all --check` and `cargo clippy --locked --all-targets -- -D warnings` passed. New regressions cover gzip bytes named `.fits`, scale/descriptive-header invariance, full-range uint8 images retained without eager sentinel allocation, reuse of an existing BLANK without searching for another code, stale extrema and mask units, undefined-pixel exclusion and dry-run proposal versus applied counts. The release executable used for the real-data smoke run was built before the final regression tests; source behavior under those tests was verified by the debug test binary.
+
+The latest release build is `0.0.44`. Its follow-up dry run on the same 25 development images reports 16 proposed, 4 kept and 5 errors, with `dry_run: true`, `clipped: 0`, and summed applied `masked_pixels: 0`. It creates no science products. This confirms release-build report behavior; the five malformed FITS headers still yield a nonzero batch exit status.
+
 ## Deep review follow-up (2026-10-27)
 
 The [scientific audit](scientific-audit-2026-10-27.md) reran `cargo test --locked --all-targets`: all 47 tests passed with test build `0.0.30`. The existing release executable remained `0.0.29`. New independent fixtures nevertheless reproduced tile-boundary under/over-removal, a large-BZERO detection change, full-code uint8 BLANK failures, gzip-content misclassification, stale crop extrema and incorrect mask units. These cases are unresolved implementation work in the [active plan](scientific-improvement-plan.md). Prior interoperability results below apply to their actual fixtures and do not certify arbitrary headers, scientific validity or a complete memory bound. No new performance claim is made by this review.

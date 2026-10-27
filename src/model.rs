@@ -6,6 +6,7 @@ use std::path::PathBuf;
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeKind {
     Clipped,
+    Proposed,
     Kept,
     Ignored,
     Error,
@@ -18,7 +19,9 @@ pub struct FileOutcome {
     pub reason: String,
     pub width: Option<usize>,
     pub height: Option<usize>,
+    pub original_undefined_pixels: usize,
     pub masked_pixels: usize,
+    pub proposed_mask_pixels: usize,
     pub mask_fraction: f64,
     pub proposed_mask_fraction: f64,
     pub candidate_tiles: usize,
@@ -52,7 +55,9 @@ impl FileOutcome {
             reason: reason.into(),
             width: None,
             height: None,
+            original_undefined_pixels: 0,
             masked_pixels: 0,
+            proposed_mask_pixels: 0,
             mask_fraction: 0.0,
             proposed_mask_fraction: 0.0,
             candidate_tiles: 0,

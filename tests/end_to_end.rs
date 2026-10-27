@@ -136,6 +136,25 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     fs::create_dir(&input).unwrap();
     config(&input);
     create_fits(&input.join("float.fits"), -64, 96, 96, &artifact());
+    let mut source = FitsFile::from_file(input.join("float.fits")).unwrap();
+    if let HduData::Image(image) = &mut source.primary_mut().data
+        && let PixelData::F64(values) = &mut image.pixels
+    {
+        values[0] = f64::NAN;
+    }
+    source
+        .primary_mut()
+        .header
+        .set("BUNIT", HeaderValue::String("adu".into()), None);
+    source
+        .primary_mut()
+        .header
+        .set("DATAMIN", HeaderValue::Float(0.0), None);
+    source
+        .primary_mut()
+        .header
+        .set("DATAMAX", HeaderValue::Float(100.0), None);
+    source.to_file(input.join("float.fits")).unwrap();
     create_fits(
         &input.join("clean.fits"),
         -64,
@@ -151,6 +170,9 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     };
     assert!(matches!(&img.pixels,PixelData::F64(v) if v[0].is_nan() && v[95*96+95]==100.0));
     assert_eq!(f.primary().header.get_string("OBJECT"), Some("test-field"));
+    assert_eq!(f.primary().header.get_string("BUNIT"), Some("adu"));
+    assert_eq!(f.primary().header.get_float("DATAMIN"), None);
+    assert_eq!(f.primary().header.get_float("DATAMAX"), None);
     assert!(
         f.primary()
             .header
@@ -170,7 +192,7 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     assert!(f.primary().verify_datasum().is_ok());
     let mask = read_mask(&product_path(&output, "masks", "float.fits"));
     assert_eq!(mask.len(), 96 * 96);
-    assert_eq!(mask[0], 1);
+    assert_eq!(mask[0], 0);
     assert_eq!(mask[95 * 96 + 95], 0);
     assert!(
         fs::symlink_metadata(product_path(&output, "images", "clean.fits"))
@@ -180,9 +202,21 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     );
     let m = FitsFile::from_file(product_path(&output, "masks", "float.fits")).unwrap();
     assert_eq!(m.primary().header.get_float("CRPIX1"), Some(48.5));
+    assert_eq!(m.primary().header.get_string("BUNIT"), None);
     assert_eq!(m.primary().header.get_string("CTYPE1"), Some("RA---TAN"));
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    let float_result = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["input"] == "float.fits")
+        .unwrap();
+    assert_eq!(float_result["original_undefined_pixels"], 1);
+    assert_eq!(
+        float_result["masked_pixels"],
+        float_result["proposed_mask_pixels"]
+    );
     assert_eq!(v["program"], "rust_fits_auto_cropping");
     assert_eq!(v["version"], env!("RUST_FITS_AUTO_CROPPING_VERSION"));
     assert_eq!(v["clipped"], 1);
@@ -271,6 +305,59 @@ fn byte_images_get_in_range_blank_sentinel() {
         _ => panic!(),
     };
     assert!(matches!(&img.pixels,PixelData::U8(v) if i64::from(v[0])==blank && v[95*96+95]==100));
+}
+
+#[test]
+fn full_range_byte_image_is_kept_without_eager_blank_allocation() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let samples: Vec<f64> = (0..96 * 96).map(|i| (i % 256) as f64).collect();
+    create_fits(&input.join("full-range.fits"), 8, 96, 96, &samples);
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let output_image = product_path(&output, "images", "full-range.fits");
+    assert!(
+        fs::symlink_metadata(output_image)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(summary["errors"], 0);
+    assert_eq!(summary["kept"], 1);
+}
+
+#[test]
+fn detection_is_invariant_to_scaling_and_descriptive_headers() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let base = input.join("base.fits");
+    let scaled = input.join("scaled.fits");
+    create_fits(&base, 16, 96, 96, &artifact());
+    fs::copy(&base, &scaled).unwrap();
+    let mut file = FitsFile::from_file(&scaled).unwrap();
+    file.primary_mut()
+        .header
+        .set("BZERO", HeaderValue::Float(1.0e15), None);
+    file.primary_mut()
+        .header
+        .set("BSCALE", HeaderValue::Float(0.003), None);
+    file.primary_mut().header.set(
+        "OBJECT",
+        HeaderValue::String("unrelated-object-name".into()),
+        None,
+    );
+    file.to_file(&scaled).unwrap();
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let base_mask = read_mask(&product_path(&output, "masks", "base.fits"));
+    let scaled_mask = read_mask(&product_path(&output, "masks", "scaled.fits"));
+    assert_eq!(base_mask, scaled_mask);
 }
 
 #[test]
@@ -762,6 +849,19 @@ fn dry_run_writes_reports_and_log_without_products() {
     assert!(!product_path(&output, "masks", "candidate.fits").exists());
     assert!(run_dir(&output).read_dir().unwrap().next().is_some());
     assert!(summary_path(&output).is_file());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(summary["dry_run"], true);
+    assert_eq!(summary["clipped"], 0);
+    assert_eq!(summary["proposed"], 1);
+    assert_eq!(summary["files"][0]["masked_pixels"], 0);
+    assert!(
+        summary["files"][0]["proposed_mask_pixels"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(summary["files"][0]["status"], "proposed");
 }
 
 #[test]
@@ -844,6 +944,12 @@ fn compressed_and_multi_hdu_fits_are_ignored() {
     );
     gz.write_all(&fits_bytes).unwrap();
     gz.finish().unwrap();
+    let mut disguised = GzEncoder::new(
+        fs::File::create(input.join("compressed-but-named-fits.fits")).unwrap(),
+        Compression::fast(),
+    );
+    disguised.write_all(&fits_bytes).unwrap();
+    disguised.finish().unwrap();
     fs::remove_file(plain).unwrap();
     let image = ImageData::new(vec![96, 96], PixelData::I16(vec![7; 96 * 96]));
     let compressed = image
@@ -857,8 +963,8 @@ fn compressed_and_multi_hdu_fits_are_ignored() {
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
-    assert_eq!(v["total"], 3);
-    assert_eq!(v["ignored"], 3);
+    assert_eq!(v["total"], 4);
+    assert_eq!(v["ignored"], 4);
     assert_eq!(v["errors"], 0);
     assert!(!product_path(&output, "images", "multi.fits").exists());
 }

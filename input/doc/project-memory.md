@@ -1,12 +1,12 @@
 # Project memory
 
-Updated: 2026-10-27, after the scientific planning review.
+Updated: 2026-10-27, after implementing the first P1 correctness/reporting slice.
 
 ## Identity and active work
 
 - Repository/CLI: `rust_fits_auto_cropping`; pure-Rust FITS I/O with `fitskit`; English communication and documentation.
 - Active work specification: [scientific improvement plan](scientific-improvement-plan.md). Evidence and prioritized failures: [scientific audit](scientific-audit-2026-10-27.md). The [original implementation plan](implementation-plan.md) and crop/preview/layout plans are historical baseline records, not proof of every proposed guarantee.
-- The latest request was a deep review and iterative plan improvement. Runtime algorithms and default thresholds were not changed. Future implementation must follow the phases and evidence gates; do not treat planning completion as a scientific release.
+- The active request is to implement the [scientific improvement plan](scientific-improvement-plan.md). P1 has partial fixes for centered pixel analysis, lazy BLANK selection, gzip signature exclusion, derived-image metadata, and proposal/applied reporting. The tile detector and thresholds were not changed; P2–P5 and science release gates remain open. Do not treat passing regressions or FITS interoperability as science validation.
 - Documentation and versioned skills belong in `input/doc/`, configuration in `input/`, generated data under the chosen output root. Read `AGENTS.md` and the main project skill before work.
 
 ## Persistent user and science contracts
@@ -21,9 +21,10 @@ Updated: 2026-10-27, after the scientific planning review.
 
 ## Review baseline and verified evidence
 
-- Audited source: `626f53c52e4fdd59e7e90ed86cd050c09cd8016c`. Cargo package `0.1.0`; existing release binary `0.0.29`; `cargo test --locked --all-targets` compiled test build `0.0.30` and advanced local counter state. Existing release binary remains `0.0.29`. Query the actual binary; build counter, package version and Git identity are distinct.
-- All 47 existing tests passed again (25 unit, 18 integration, 4 version tests). This does not cover all adversarial failures.
-- New release-binary probes confirmed: tile-boundary under/over-removal of 128 pixels; different detection after adding large BZERO to identical stored samples; full-code uint8 failure with/without existing BLANK; gzip named `.fits` misclassified as error; stale cropped DATAMIN and mask BUNIT copied from science. See audit A01–A17 for precise locations, consequences and phase mapping. No fixes were implemented in this planning task.
+- Audited baseline: `626f53c52e4fdd59e7e90ed86cd050c09cd8016c`, package `0.1.0`, release `0.0.29`; planning tests built `0.0.30`. The implementation smoke build was `0.0.34`; later test/lint builds advanced the local counter. Query the executable because package version, build counter and Git identity are distinct.
+- Current test suite: 51 passing (27 unit, 20 end-to-end, 4 version tests); format and Clippy checks pass. Current tests now reproduce fixes for large BZERO invariance, retained full-range uint8, lazy reuse of an existing BLANK, gzip-magic exclusion, undefined-pixel reporting, metadata and dry-run semantics.
+- One release run on 25 repeatedly inspected development frames: 16 clipped, 4 kept, 5 malformed-header errors; 3.35 s and 952,624 KiB RSS, four workers. Astropy and fitsverify accepted 20 science images and 16 masks. This is one interoperability/performance observation, not a benchmark distribution or a science-accuracy result. No independent labels exist.
+- P1 remains partial: no-sentinel fallback, unsupported WCS handling, source-identity/atomic publication and provenance schema gaps remain. A01–A06 and A11–A17 are not resolved by the first code slice. The detector still expands whole tiles and is not science-grade.
 - Probe evidence and fixture script: `output/reviews/science-plan-20261027-4hmuy3p9/` (ignored local output); portable recipes are in the tracked audit.
 - Earlier supplied-data run: 25 files from `/fast_disk/tmp/clippling_test/input/`; 16 clipped, 4 kept, 5 malformed quoted INSAPNAM errors; 20 science outputs, 16 masks and 16 previews. Independent FITS/PNG checks passed on those cases. One warm 4-worker run took 4.56 s with 925,972 KiB RSS. This is historical evidence, not a new benchmark or a universal interoperability claim.
 - The repeatedly inspected supplied set is development data. It has no independent artifact labels and must not be called an untouched hold-out.

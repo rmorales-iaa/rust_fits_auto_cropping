@@ -15,6 +15,7 @@ Work and respond in English. Apply this contract to scientific FITS projects.
 - Keep each substantial class or Rust struct with its implementation in one focused, documented file. Small companion enums/types may remain together. Prefer files below approximately 300 lines; split by responsibility, not arbitrary line count.
 - Maintain comprehensive CLI help, README, architecture, algorithm, configuration and validation documentation, and a .gitignore excluding generated products, raw local data, credentials and caches.
 - For pixel-artifact detection, derive classification evidence from image samples and mask geometry, not descriptive header cards. Use FITS structural, scaling and null metadata only as required to decode samples. Kept eligible images are symlinks to canonical sources; never write provenance through them. Add `CREATOR`, UTC `DATE` and timestamped `HISTORY` only to generated FITS products, and record run version/time in summary and logs.
+- Keep reports explicit about decisions versus products: proposed exclusions and applied exclusions are separate counts; dry-run proposals must never be counted as completed clipping. Crop geometry sacrifices and original undefined pixels need separate accounting before any metric is labeled valid-area loss. A larger proposal mask alone is not an improvement.
 - This project uses a tracked `input/program-version.txt` template and local ignored `output/.state/program-version.txt` counter. Cargo package recompilations advance the three-part base-100 version. Check current branches/remotes before authorized merge/push; never invent a remote URL.
 
 ## Scientific improvement reviews
@@ -23,7 +24,7 @@ In rust_fits_auto_cropping, read the project memory, latest scientific audit and
 
 ## Work cycle
 1. Explore existing code and Git state before editing. Preserve unrelated work.
-2. Before complex work, save a phased implementation plan in `input/doc/` with assumptions, acceptance criteria and tests. Track evidence against each phase. A planning-only request stops after delivering the plan.
+2. Before complex work, save a phased implementation plan in `input/doc/` with assumptions, acceptance criteria and tests. When the user asks for implementation, continue from that plan, track evidence against each phase and update its status; do not stop after planning.
 3. Specify units, coordinates, time scales, numerical precision, uncertainty, failure modes and a reproducible validation dataset. Cite primary references; never call an algorithm scientifically validated without evidence.
 4. Implement the smallest complete phase. Preserve originals, use atomic output writes and fail conservatively on ambiguous scientific decisions.
 5. Apply efficient I/O, allocation reuse and bounded parallelism where safe and beneficial. Benchmark serial and parallel paths; preserve deterministic science results and cap memory. Do not parallelize unsafe library handles.

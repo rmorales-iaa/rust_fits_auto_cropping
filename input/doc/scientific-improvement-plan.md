@@ -1,8 +1,8 @@
 # Scientific accuracy, area retention and performance plan
 
-Status: reviewed implementation plan, not implemented. Updated 2026-10-27 against source `626f53c`, release executable `0.0.29`. The audit reran 47 tests with test build `0.0.30`. See [the code and adversarial-probe audit](scientific-audit-2026-10-27.md).
+Status: active implementation. Initial correctness and reporting fixes were applied after the 2026-10-27 audit; science-model and release gates remain open. The original audit baseline was source `626f53c`, release executable `0.0.29`, and 47 tests. See [the audit and implementation follow-up](scientific-audit-2026-10-27.md) and [validation record](validation.md).
 
-This is the active plan for future scientific improvements. The [original implementation plan](implementation-plan.md) and completed crop/preview/layout plans remain historical records. Completion of this planning review does not mean the software meets the release gates below. No universal science-grade claim is possible without a declared observing domain, independent labels and downstream measurement evidence.
+This is the active implementation plan for scientific improvements. The [original implementation plan](implementation-plan.md) and completed crop/preview/layout plans remain historical records. Completion of the planning review does not mean the software meets the release gates below. No universal science-grade claim is possible without a declared observing domain, independent labels and downstream measurement evidence.
 
 ## 1. Objective, scope and non-negotiable contracts
 
@@ -56,6 +56,13 @@ No fabricated labels, effect sizes or invented dataset access. P0–P6 engineeri
 | P5 — action/crop optimizer | Common loss policy, constrained candidate set, explicit geometric optimality domain | Area truth metrics, oracle checks, risk/coverage curves and action comparisons | A05–A06, A14 |
 | P6 — measured efficiency | Shared owned input, fewer allocations/reads, bounded scheduling and focused modules | G5; unchanged numerical/scientific decisions or separately justified algorithm change | A12–A13, A15, A17 |
 | P7 — external validation and release | Frozen configuration, independent FITS/WCS/science evaluation, release manifest and updated guides/skills/memory | All applicable G1–G5 pass in declared domain; otherwise research-only status | all |
+
+### Implementation status (2026-10-27)
+
+- **P1 — partial:** centered raw integer/float analysis values; lazy integer sentinel selection for masked/circular products; exclusion of undefined pixels from detector masks and utility denominators; original undefined/proposed/applied counts; gzip signature exclusion; stale DATAMIN/DATAMAX removal from derived science images; no science BUNIT on dimensionless masks; geometry-specific bounded HISTORY cards; and dry-run state. Regression tests cover the reproduced numerical, full-range byte, gzip, metadata, undefined-sample and dry-run cases. P1 remains open for no-sentinel action fallback, unsupported-WCS handling, atomic verified staging/source identity, build identity, full WCS/report reason-code matrices and detailed set intersections.
+- **P0/P6 — initial observation only:** one release run on the supplied 25-image development set completed in 3.35 s and used 952,624 KiB peak RSS with four configured workers. This is not a paired or repeated benchmark and does not pass G5. The five malformed quoted-string headers still produce explicit errors.
+- **P2–P5 — not promoted:** no independently labeled corpus is available. The fixed-tile detector, component aggregation and tile-boundary masks remain unchanged; no new statistical classifier or pixel refinement is claimed.
+- **P7 — open:** independent Astropy/fitsverify checks passed for all 20 science images and 16 masks from the development run. This checks FITS interoperability and preserved output invariants only, not scientific correctness or WCS coverage across the supported matrix. No independent science labels or untouched hold-out set are available.
 
 P0 precedes tuning. P1 and the data protocol precede promotion of new algorithms. P2→P3→P4→P5 supplies scientific stages. P6 profiling begins at P0; exact allocation/I/O improvements can be developed after P1 while scientific work proceeds. Benchmark and validate the final combined pipeline again at P7. Each phase ends with a scoped commit and evidence table; do not silently mark research targets complete after a unit test passes.
 
