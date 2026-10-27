@@ -1,5 +1,6 @@
 //! Conservative tile-based border detector. Scores support review; they are not probabilities.
 mod correlation;
+mod multiscale;
 mod reference;
 mod robust;
 mod tile_detector;

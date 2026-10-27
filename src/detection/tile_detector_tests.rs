@@ -2,6 +2,7 @@ use super::*;
 fn config() -> HeuristicRules {
     HeuristicRules {
         reference_model: crate::config::ReferenceModel::CentralTiles,
+        evidence_model: crate::config::EvidenceModel::SingleScale,
         tile_size: 8,
         minimum_border_tiles: 2,
         minimum_abs_z_score: 6.0,

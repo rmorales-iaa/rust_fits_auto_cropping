@@ -1,7 +1,9 @@
 //! Candidate mask from robust tile contrast, tile noise and border connectivity.
 use super::reference::fit_robust_affine;
-use super::{correlation::lag_one_correlation, robust::location_scale};
-use crate::config::{HeuristicRules, ReferenceModel};
+use super::{
+    correlation::lag_one_correlation, multiscale::detect_multiscale, robust::location_scale,
+};
+use crate::config::{EvidenceModel, HeuristicRules, ReferenceModel};
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -35,6 +37,18 @@ struct Tile {
 /// The method deliberately abstains on weak contrast, inadequate interior support,
 /// small regions and excessive masks. It is a conservative baseline requiring empirical validation.
 pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules) -> Detection {
+    match cfg.evidence_model {
+        EvidenceModel::SingleScale => detect_single_scale(data, width, height, cfg),
+        EvidenceModel::MultiscaleConsensus => detect_multiscale(data, width, height, cfg),
+    }
+}
+
+pub(super) fn detect_single_scale(
+    data: &[f64],
+    width: usize,
+    height: usize,
+    cfg: &HeuristicRules,
+) -> Detection {
     let empty = || Detection {
         mask: vec![false; data.len()],
         candidate_mask_pixels: 0,

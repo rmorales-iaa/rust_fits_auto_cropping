@@ -492,6 +492,57 @@ fn experimental_affine_reference_is_configurable_and_reported() {
 }
 
 #[test]
+fn experimental_multiscale_consensus_is_configurable_and_reported() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let heuristics_path = input.join("heuristics.toml");
+    let heuristics = fs::read_to_string(&heuristics_path).unwrap();
+    fs::write(
+        &heuristics_path,
+        heuristics.replace(
+            "[heuristics]",
+            "[heuristics]\nevidence_model = \"multiscale_consensus\"",
+        ),
+    )
+    .unwrap();
+    let (width, height) = (96, 96);
+    let mut pixels = vec![100.0; width * height];
+    for y in 0..32 {
+        for x in 0..32 {
+            pixels[y * width + x] = 0.0;
+        }
+    }
+    create_fits(&input.join("corner.fits"), -32, width, height, &pixels);
+
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let run = run_dir(&output);
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(run.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["clipped"], 1);
+    assert_eq!(
+        summary["algorithm_version"],
+        "tile-detector-v1-multiscale-consensus-experimental"
+    );
+    let activity = fs::read_to_string(
+        fs::read_dir(&run)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("activity_")
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(activity.contains("tile-detector-v1-multiscale-consensus-experimental"));
+}
+
+#[test]
 fn existing_blank_pixels_remain_undefined_and_are_not_newly_masked() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");

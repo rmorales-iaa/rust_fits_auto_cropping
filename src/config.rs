@@ -43,11 +43,27 @@ pub enum ReferenceModel {
     RobustAffine,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceModel {
+    #[default]
+    SingleScale,
+    MultiscaleConsensus,
+}
+
 impl ReferenceModel {
-    pub fn algorithm_version(self) -> &'static str {
-        match self {
-            Self::CentralTiles => "tile-detector-v1",
-            Self::RobustAffine => "tile-detector-v1-robust-affine-experimental",
+    pub fn algorithm_version(self, evidence: EvidenceModel) -> &'static str {
+        match (self, evidence) {
+            (Self::CentralTiles, EvidenceModel::SingleScale) => "tile-detector-v1",
+            (Self::RobustAffine, EvidenceModel::SingleScale) => {
+                "tile-detector-v1-robust-affine-experimental"
+            }
+            (Self::CentralTiles, EvidenceModel::MultiscaleConsensus) => {
+                "tile-detector-v1-multiscale-consensus-experimental"
+            }
+            (Self::RobustAffine, EvidenceModel::MultiscaleConsensus) => {
+                "tile-detector-v1-robust-affine-multiscale-experimental"
+            }
         }
     }
 }
@@ -57,6 +73,8 @@ impl ReferenceModel {
 pub struct HeuristicRules {
     #[serde(default)]
     pub reference_model: ReferenceModel,
+    #[serde(default)]
+    pub evidence_model: EvidenceModel,
     pub tile_size: usize,
     pub minimum_border_tiles: usize,
     pub minimum_abs_z_score: f64,
@@ -170,6 +188,7 @@ mode = "mask"
 const DEFAULT_HEURISTICS: &str = r#"
 [heuristics]
 reference_model = "central_tiles"
+evidence_model = "single_scale"
 tile_size = 16
 minimum_border_tiles = 2
 minimum_abs_z_score = 8.0
