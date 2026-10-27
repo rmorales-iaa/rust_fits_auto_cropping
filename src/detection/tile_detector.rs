@@ -1,6 +1,7 @@
 //! Candidate mask from robust tile contrast, tile noise and border connectivity.
+use super::reference::fit_robust_affine;
 use super::{correlation::lag_one_correlation, robust::location_scale};
-use crate::config::HeuristicRules;
+use crate::config::{HeuristicRules, ReferenceModel};
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -90,55 +91,106 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
             });
         }
     }
-    let interior: Vec<f64> = (0..rows)
+    let interior_indices: Vec<usize> = (0..rows)
         .flat_map(|y| {
             (0..cols).filter_map(move |x| {
                 (x >= cols / 4 && x < cols - cols / 4 && y >= rows / 4 && y < rows - rows / 4)
                     .then_some(y * cols + x)
             })
         })
-        .map(|i| tiles[i].median)
-        .filter(|v| v.is_finite())
+        .filter(|&i| tiles[i].median.is_finite())
         .collect();
+    let interior: Vec<f64> = interior_indices.iter().map(|&i| tiles[i].median).collect();
     if interior.len() < 4 {
         return empty();
     }
-    let (center, mut scale) = location_scale(&interior);
+    let (center, center_scale) = location_scale(&interior);
     if !center.is_finite() {
         return empty();
     }
-    let interior_noise: Vec<f64> = tiles
+    let interior_noise: Vec<f64> = interior_indices
         .iter()
-        .enumerate()
-        .filter(|(i, _)| {
-            interior.iter().any(|v| v.is_finite()) && {
-                let x = i % cols;
-                let y = i / cols;
-                x >= cols / 4 && x < cols - cols / 4 && y >= rows / 4 && y < rows - rows / 4
-            }
-        })
-        .map(|(_, t)| t.sigma)
+        .map(|&i| tiles[i].sigma)
         .filter(|v| v.is_finite())
         .collect();
     let (_, noise_scale) = location_scale(&interior_noise);
-    let typical_noise = interior_noise
-        .iter()
-        .copied()
-        .filter(|v| v.is_finite())
-        .fold(0.0_f64, f64::max);
-    scale = scale
-        .max(noise_scale)
-        .max(f64::EPSILON * center.abs().max(1.0));
+    let (reference_values, scale, typical_noise) = match cfg.reference_model {
+        ReferenceModel::CentralTiles => {
+            let typical_noise = interior_noise.iter().copied().fold(0.0_f64, f64::max);
+            let scale = center_scale
+                .max(noise_scale)
+                .max(f64::EPSILON * center.abs().max(1.0));
+            (vec![center; tiles.len()], scale, typical_noise)
+        }
+        ReferenceModel::RobustAffine => {
+            let mut points = Vec::with_capacity(interior_indices.len());
+            let mut medians = Vec::with_capacity(interior_indices.len());
+            let mut dispersions = Vec::with_capacity(interior_indices.len());
+            for &index in &interior_indices {
+                let x = index % cols;
+                let y = index / cols;
+                let x0 = x * cfg.tile_size;
+                let x1 = ((x + 1) * cfg.tile_size).min(width);
+                let y0 = y * cfg.tile_size;
+                let y1 = ((y + 1) * cfg.tile_size).min(height);
+                let x_center = (x0 as f64 + (x1 - 1) as f64) * 0.5;
+                let y_center = (y0 as f64 + (y1 - 1) as f64) * 0.5;
+                points.push((
+                    2.0 * x_center / width.saturating_sub(1).max(1) as f64 - 1.0,
+                    2.0 * y_center / height.saturating_sub(1).max(1) as f64 - 1.0,
+                ));
+                medians.push(tiles[index].median);
+                dispersions.push(tiles[index].sigma);
+            }
+            let Some(model) = fit_robust_affine(&points, &medians, &dispersions) else {
+                let mut result = empty();
+                result.reason_code = "reference_fit_abstained";
+                result.reason =
+                    "robust affine reference had insufficient or rank-deficient interior support"
+                        .into();
+                return result;
+            };
+            let mut predictions = Vec::with_capacity(tiles.len());
+            for index in 0..tiles.len() {
+                let x = index % cols;
+                let y = index / cols;
+                let x0 = x * cfg.tile_size;
+                let x1 = ((x + 1) * cfg.tile_size).min(width);
+                let y0 = y * cfg.tile_size;
+                let y1 = ((y + 1) * cfg.tile_size).min(height);
+                let x_center = (x0 as f64 + (x1 - 1) as f64) * 0.5;
+                let y_center = (y0 as f64 + (y1 - 1) as f64) * 0.5;
+                let normalized_x = 2.0 * x_center / width.saturating_sub(1).max(1) as f64 - 1.0;
+                let normalized_y = 2.0 * y_center / height.saturating_sub(1).max(1) as f64 - 1.0;
+                let Some(prediction) = model.predict(normalized_x, normalized_y) else {
+                    let mut result = empty();
+                    result.reason_code = "reference_fit_abstained";
+                    result.reason =
+                        "robust affine reference predicted a non-finite tile level".into();
+                    return result;
+                };
+                predictions.push(prediction);
+            }
+            (predictions, model.residual_scale, model.typical_noise)
+        }
+    };
+    if !scale.is_finite() || scale <= 0.0 || !typical_noise.is_finite() {
+        return empty();
+    }
     let mut best_score: f64 = 0.0;
-    for tile in &mut tiles {
-        let delta = (tile.median - center).abs() / scale;
+    for (tile, reference) in tiles.iter_mut().zip(reference_values) {
+        let delta = (tile.median - reference).abs() / scale;
         let quiet = typical_noise > 0.0
             && tile.sigma.is_finite()
             && tile.sigma <= typical_noise * cfg.maximum_tile_noise_ratio;
         let correlated = tile
             .correlation
             .is_some_and(|r| r >= cfg.minimum_spatial_correlation);
-        let uniform_contrast = tile.sigma <= f64::EPSILON && noise_scale <= f64::EPSILON;
+        let uniform_reference = match cfg.reference_model {
+            ReferenceModel::CentralTiles => noise_scale <= f64::EPSILON,
+            ReferenceModel::RobustAffine => scale <= f64::EPSILON,
+        };
+        let uniform_contrast = tile.sigma <= f64::EPSILON && uniform_reference;
         tile.evidence_ratio = if delta.is_finite() {
             delta / cfg.minimum_abs_z_score
         } else {

@@ -1,5 +1,6 @@
 # Provisional science decisions. Validate and calibrate for each instrument.
 [heuristics]
+reference_model = "central_tiles"
 tile_size = 16
 minimum_border_tiles = 2
 minimum_abs_z_score = 8.0

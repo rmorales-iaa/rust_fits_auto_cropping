@@ -19,7 +19,7 @@ pub struct Summary<'a> {
     pub ignored: usize,
     pub errors: usize,
     pub dry_run: bool,
-    pub algorithm_version: &'static str,
+    pub algorithm_version: &'a str,
     pub policy_version: &'static str,
     pub git_revision: &'static str,
     pub git_dirty: bool,
@@ -32,6 +32,7 @@ pub struct Summary<'a> {
 }
 
 pub struct ReportIdentity<'a> {
+    pub algorithm_version: &'a str,
     pub executable_sha256: &'a str,
     pub source_config_sha256: &'a str,
     pub effective_config_sha256: &'a str,
@@ -60,7 +61,7 @@ pub fn write(
         ignored: count(|s| matches!(s, OutcomeKind::Ignored)),
         errors: count(|s| matches!(s, OutcomeKind::Error)),
         dry_run,
-        algorithm_version: "tile-detector-v1",
+        algorithm_version: identity.algorithm_version,
         policy_version: "heuristics-v1",
         git_revision: env!("RUST_FITS_GIT_REVISION"),
         git_dirty: env!("RUST_FITS_GIT_DIRTY") == "true",

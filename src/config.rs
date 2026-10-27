@@ -35,9 +35,28 @@ pub struct HeuristicsConfig {
     pub heuristics: HeuristicRules,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceModel {
+    #[default]
+    CentralTiles,
+    RobustAffine,
+}
+
+impl ReferenceModel {
+    pub fn algorithm_version(self) -> &'static str {
+        match self {
+            Self::CentralTiles => "tile-detector-v1",
+            Self::RobustAffine => "tile-detector-v1-robust-affine-experimental",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeuristicRules {
+    #[serde(default)]
+    pub reference_model: ReferenceModel,
     pub tile_size: usize,
     pub minimum_border_tiles: usize,
     pub minimum_abs_z_score: f64,
@@ -150,6 +169,7 @@ mode = "mask"
 
 const DEFAULT_HEURISTICS: &str = r#"
 [heuristics]
+reference_model = "central_tiles"
 tile_size = 16
 minimum_border_tiles = 2
 minimum_abs_z_score = 8.0

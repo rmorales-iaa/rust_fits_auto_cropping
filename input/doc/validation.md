@@ -185,3 +185,9 @@ Rechecking the release `0.0.93` development outputs passed Astropy and fitsverif
 ## Required scientific acceptance work
 
 Before production use, assemble licensed and documented annotated frames across instruments and test on held-out data. Measure pixel precision/recall, boundary distance, abstention rate, source/aperture flux bias, background changes, faint edge-object and moving-target recovery, trail preservation, and WCS agreement. Include crowding, galaxies, nebulosity, gradients, vignetting, saturation, unusual scaling/null conventions and all supported storage types. Freeze thresholds on development data before the hold-out evaluation; keep all candidate masks reviewable.
+
+### Experimental robust-affine tile reference (2026-10-27)
+
+Added an opt-in `robust_affine` reference model that fits a bounded Huber plane to finite central-interior tile medians. The default remains `central_tiles`; model identity is recorded in the run-start event and summary. Synthetic unit/integration cases verify exact affine-gradient null retention, separable border-seam detection, one-outlier resistance, and abstention on insufficient or rank-deficient support. The full Rust suite passes 70 tests (42 unit, 24 end-to-end, 4 version); the four WCS-checker tests pass, Python compilation succeeds, formatting is clean, and strict Clippy passes.
+
+This experiment has not been run against labeled observatory frames or evaluated for source masking, uncertainty coverage, boundary error, photometric bias, and threshold calibration. Its existence does not close P2 and does not change the default algorithm.

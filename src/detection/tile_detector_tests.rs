@@ -1,6 +1,7 @@
 use super::*;
 fn config() -> HeuristicRules {
     HeuristicRules {
+        reference_model: crate::config::ReferenceModel::CentralTiles,
         tile_size: 8,
         minimum_border_tiles: 2,
         minimum_abs_z_score: 6.0,
@@ -141,6 +142,42 @@ fn smooth_sky_gradient_without_border_seam_is_retained() {
         }
     }
     assert!(!detect_border(&data, w, h, &config()).accepted);
+}
+
+#[test]
+fn robust_affine_reference_keeps_exact_gradient_null_and_reduces_residual_score() {
+    let (width, height) = (96, 96);
+    let data: Vec<f64> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| 100.0 + 0.4 * x as f64 + 0.2 * y as f64))
+        .collect();
+    let central = detect_border(&data, width, height, &config());
+    let mut affine_config = config();
+    affine_config.reference_model = crate::config::ReferenceModel::RobustAffine;
+    let affine = detect_border(&data, width, height, &affine_config);
+
+    assert!(!affine.accepted, "{}", affine.reason);
+    assert_eq!(affine.reason_code, "no_border_candidate");
+    assert!(affine.score < central.score);
+}
+
+#[test]
+fn robust_affine_reference_detects_a_separable_border_seam_over_a_gradient() {
+    let (width, height) = (96, 96);
+    let mut data: Vec<f64> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| 100.0 + 0.1 * x as f64 + 0.05 * y as f64))
+        .collect();
+    for y in 0..16 {
+        for x in 0..24 {
+            data[y * width + x] -= 30.0;
+        }
+    }
+    let mut affine_config = config();
+    affine_config.reference_model = crate::config::ReferenceModel::RobustAffine;
+    let detection = detect_border(&data, width, height, &affine_config);
+
+    assert!(detection.accepted, "{}", detection.reason);
+    assert!(detection.mask[0]);
+    assert!(!detection.mask[48 * width + 48]);
 }
 #[test]
 fn leaves_interior_anomaly_untouched() {

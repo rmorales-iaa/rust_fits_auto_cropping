@@ -446,6 +446,52 @@ fn detection_is_invariant_to_scaling_and_descriptive_headers() {
 }
 
 #[test]
+fn experimental_affine_reference_is_configurable_and_reported() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let heuristics_path = input.join("heuristics.toml");
+    let heuristics = fs::read_to_string(&heuristics_path).unwrap();
+    fs::write(
+        &heuristics_path,
+        heuristics.replace(
+            "[heuristics]",
+            "[heuristics]\nreference_model = \"robust_affine\"",
+        ),
+    )
+    .unwrap();
+    let gradient: Vec<f64> = (0..96)
+        .flat_map(|y| (0..96).map(move |x| 100.0 + 0.1 * x as f64 + 0.05 * y as f64))
+        .collect();
+    create_fits(&input.join("gradient.fits"), -32, 96, 96, &gradient);
+
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let run = run_dir(&output);
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(run.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(
+        summary["algorithm_version"],
+        "tile-detector-v1-robust-affine-experimental"
+    );
+    let activity = fs::read_to_string(
+        fs::read_dir(&run)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("activity_")
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(activity.contains("tile-detector-v1-robust-affine-experimental"));
+}
+
+#[test]
 fn existing_blank_pixels_remain_undefined_and_are_not_newly_masked() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
