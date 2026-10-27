@@ -343,6 +343,15 @@ fn process_one(
             if detection.accepted {
                 let n = detection.mask.iter().filter(|v| **v).count();
                 outcome.proposed_mask_pixels = n;
+                // Candidate and accepted masks only include originally defined pixels.
+                outcome.candidate_undefined_pixels = 0;
+                outcome.candidate_proposed_overlap_pixels = n;
+                outcome.proposed_undefined_pixels = detection
+                    .mask
+                    .iter()
+                    .zip(&image.values)
+                    .filter(|(candidate, value)| **candidate && !value.is_finite())
+                    .count();
                 let crop = if matches!(config.processing.mode, ProcessingMode::Crop)
                     && image.crop_wcs_unsupported.is_none()
                 {
@@ -419,6 +428,12 @@ fn process_one(
                         .iter()
                         .zip(&image.values)
                         .filter(|(excluded, value)| **excluded && !value.is_finite())
+                        .count();
+                    outcome.crop_artifact_pixels_retained = detection
+                        .mask
+                        .iter()
+                        .zip(&excluded)
+                        .filter(|(artifact, excluded)| **artifact && !**excluded)
                         .count();
                     let artifact_fraction =
                         outcome.artifact_pixels_removed as f64 / defined.max(1) as f64;
@@ -596,7 +611,15 @@ fn process_one(
                         } else {
                             n
                         };
+                        outcome.applied_artifact_undefined_pixels = detection
+                            .mask
+                            .iter()
+                            .zip(&image.values)
+                            .filter(|(artifact, value)| **artifact && !value.is_finite())
+                            .count();
                         if crop_accepted {
+                            outcome.crop_applied_undefined_pixels =
+                                outcome.crop_excluded_undefined_pixels;
                             outcome.reason_code = "crop_applied";
                         } else if matches!(config.processing.mode, ProcessingMode::Mask) {
                             outcome.reason_code = "mask_applied";

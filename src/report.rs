@@ -48,7 +48,7 @@ pub fn write(
 ) -> anyhow::Result<()> {
     let count = |f: fn(&OutcomeKind) -> bool| outcomes.iter().filter(|o| f(&o.status)).count();
     let summary = Summary {
-        schema_version: 5,
+        schema_version: 6,
         run_id,
         created_utc: Utc::now().to_rfc3339(),
         program: env!("CARGO_PKG_NAME"),
@@ -76,7 +76,7 @@ pub fn write(
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason_code,reason,width,height,source_sha256,original_undefined_pixels,candidate_mask_pixels,proposed_mask_pixels,applied_artifact_pixels,masked_pixels,crop_excluded_undefined_pixels,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,output_manifest,elapsed_ms\n",
+        "input,status,reason_code,reason,width,height,source_sha256,original_undefined_pixels,candidate_mask_pixels,candidate_undefined_pixels,candidate_proposed_overlap_pixels,proposed_mask_pixels,proposed_undefined_pixels,applied_artifact_pixels,applied_artifact_undefined_pixels,masked_pixels,crop_excluded_undefined_pixels,crop_applied_undefined_pixels,crop_artifact_pixels_retained,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_png,output_manifest,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -89,10 +89,16 @@ pub fn write(
             o.source_sha256.clone().unwrap_or_default(),
             o.original_undefined_pixels.to_string(),
             o.candidate_mask_pixels.to_string(),
+            o.candidate_undefined_pixels.to_string(),
+            o.candidate_proposed_overlap_pixels.to_string(),
             o.proposed_mask_pixels.to_string(),
+            o.proposed_undefined_pixels.to_string(),
             o.applied_artifact_pixels.to_string(),
+            o.applied_artifact_undefined_pixels.to_string(),
             o.masked_pixels.to_string(),
             o.crop_excluded_undefined_pixels.to_string(),
+            o.crop_applied_undefined_pixels.to_string(),
+            o.crop_artifact_pixels_retained.to_string(),
             format!("{:.8}", o.mask_fraction),
             format!("{:.8}", o.proposed_mask_fraction),
             o.candidate_tiles.to_string(),

@@ -237,6 +237,12 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
         .unwrap();
     assert_eq!(float_result["original_undefined_pixels"], 1);
     assert_eq!(float_result["reason_code"], "mask_applied");
+    assert_eq!(float_result["candidate_undefined_pixels"], 0);
+    assert_eq!(
+        float_result["candidate_proposed_overlap_pixels"],
+        float_result["proposed_mask_pixels"]
+    );
+    assert_eq!(float_result["proposed_undefined_pixels"], 0);
     assert!(
         float_result["candidate_mask_pixels"].as_u64().unwrap()
             >= float_result["proposed_mask_pixels"].as_u64().unwrap()
@@ -245,6 +251,7 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
         float_result["applied_artifact_pixels"],
         float_result["masked_pixels"]
     );
+    assert_eq!(float_result["applied_artifact_undefined_pixels"], 0);
     assert_eq!(float_result["crop_excluded_undefined_pixels"], 0);
     assert_eq!(
         float_result["masked_pixels"],
@@ -767,6 +774,8 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
         summary["files"][0]["artifact_pixels_removed"]
     );
     assert_eq!(summary["files"][0]["crop_excluded_undefined_pixels"], 0);
+    assert_eq!(summary["files"][0]["crop_applied_undefined_pixels"], 0);
+    assert_eq!(summary["files"][0]["crop_artifact_pixels_retained"], 0);
     assert_eq!(manifest["products"].as_array().unwrap().len(), 3);
     for product in manifest["products"].as_array().unwrap() {
         let product_path = run_dir(&output).join(product["path"].as_str().unwrap());
@@ -819,6 +828,10 @@ fn crop_accounting_reports_preexisting_undefined_geometry_overlap() {
     let image = &summary["files"][0];
     assert_eq!(image["original_undefined_pixels"], 1);
     assert_eq!(image["crop_excluded_undefined_pixels"], 1);
+    assert_eq!(image["crop_applied_undefined_pixels"], 0);
+    assert_eq!(image["candidate_undefined_pixels"], 0);
+    assert_eq!(image["proposed_undefined_pixels"], 0);
+    assert_eq!(image["applied_artifact_undefined_pixels"], 0);
     assert!(image["candidate_mask_pixels"].as_u64().unwrap() > 0);
     assert!(image["proposed_mask_pixels"].as_u64().unwrap() > 0);
     assert!(matches!(
@@ -1056,7 +1069,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 5);
+    assert_eq!(summary["schema_version"], 6);
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
     assert_eq!(summary["policy_version"], "heuristics-v1");
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);
