@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -16,9 +17,16 @@ from astropy.wcs import WCS
 
 
 WCS_KEY = re.compile(
-    r"^(?:WCSAXES|WCSNAME|RADESYS|RADECSYS|EQUINOX|LONPOLE|LATPOLE|"
-    r"CTYPE\d[A-Z]?|CRPIX\d[A-Z]?|CRVAL\d[A-Z]?|CDELT\d[A-Z]?|CUNIT\d[A-Z]?|"
-    r"CROTA\d[A-Z]?|(?:CD|PC)\d_\d[A-Z]?|(?:A|B|AP|BP)(?:_ORDER|_\d+_\d+))$"
+    r"^(?:WCSAXES[A-Z]?|WCSNAME[A-Z]?|RADESYS[A-Z]?|RADECSYS[A-Z]?|EQUINOX[A-Z]?|"
+    r"LONPOLE[A-Z]?|LATPOLE[A-Z]?|CTYPE\d{1,2}[A-Z]?|CRPIX\d{1,2}[A-Z]?|"
+    r"CRVAL\d{1,2}[A-Z]?|CDELT\d{1,2}[A-Z]?|CUNIT\d{1,2}[A-Z]?|"
+    r"CROTA\d{1,2}[A-Z]?|(?:CD|PC)\d{1,2}_\d{1,2}[A-Z]?|"
+    r"(?:PV|PS)\d{1,2}_\d{1,2}[A-Z]?|(?:A|B|AP|BP)(?:_ORDER|_\d+_\d+))$"
+)
+WCS_ALT_SUFFIX = re.compile(
+    r"^(?:WCSAXES|WCSNAME|RADESYS|RADECSYS|EQUINOX|LONPOLE|LATPOLE)[A-Z]$|"
+    r"^(?:CTYPE|CRPIX|CRVAL|CDELT|CUNIT|CROTA)\d{1,2}[A-Z]$|"
+    r"^(?:CD|PC|PV|PS)\d{1,2}_\d{1,2}[A-Z]$"
 )
 
 
@@ -53,38 +61,111 @@ def verify_provenance(path: Path, header: fits.Header) -> None:
 
 
 def verify_wcs(
-    source: fits.Header, output: fits.Header, path: Path, x0: int, y0: int
+    source: fits.Header,
+    output: fits.Header,
+    path: Path,
+    x0: int,
+    y0: int,
+    check_coordinates: bool,
 ) -> None:
     keys = {key for key in source if WCS_KEY.fullmatch(key)}
     for key in keys:
         expected = source[key]
-        if key.startswith("CRPIX1"):
+        if re.fullmatch(r"CRPIX1[A-Z]?", key):
             expected -= x0
-        elif key.startswith("CRPIX2"):
+        elif re.fullmatch(r"CRPIX2[A-Z]?", key):
             expected -= y0
         if key not in output:
             raise AssertionError(f"{path}: WCS card {key} changed or disappeared")
-        if key.startswith(("CRPIX1", "CRPIX2")):
+        if re.fullmatch(r"CRPIX[12][A-Z]?", key):
             if not np.isclose(output[key], expected, rtol=0, atol=1e-12):
                 raise AssertionError(f"{path}: WCS card {key} changed or disappeared")
         elif output[key] != expected:
             raise AssertionError(f"{path}: WCS card {key} changed or disappeared")
-    if x0 or y0:
-        old_wcs = WCS(source, relax=True)
-        new_wcs = WCS(output, relax=True)
-        height, width = output["NAXIS2"], output["NAXIS1"]
-        points = np.array(
-            [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1],
-             [(width - 1) / 2, (height - 1) / 2]],
-            dtype=float,
-        )
-        old_world = old_wcs.all_pix2world(points + [x0, y0], 0)
+    if not check_coordinates or not keys:
+        return
+
+    alternate_codes = sorted(
+        {
+            match.group()[-1]
+            for key in keys
+            if (match := WCS_ALT_SUFFIX.fullmatch(key)) is not None
+        }
+    )
+    for code in [" ", *alternate_codes]:
+        old_wcs = WCS(source, key=code, relax=True)
+        new_wcs = WCS(output, key=code, relax=True)
+        height, width = int(output["NAXIS2"]), int(output["NAXIS1"])
+        x_values = np.linspace(0, width - 1, min(width, 9))
+        y_values = np.linspace(0, height - 1, min(height, 9))
+        points = np.array([(x, y) for y in y_values for x in x_values], dtype=float)
+        source_points = points + np.array([x0, y0], dtype=float)
+        old_world = old_wcs.all_pix2world(source_points, 0)
         new_world = new_wcs.all_pix2world(points, 0)
-        delta = new_world - old_world
-        if delta.shape[1] >= 1:
-            delta[:, 0] = (delta[:, 0] + 180.0) % 360.0 - 180.0
-        if not np.allclose(delta, 0.0, rtol=0, atol=1e-8, equal_nan=True):
-            raise AssertionError(f"{path}: WCS world coordinates changed across crop")
+        valid = np.isfinite(old_world).all(axis=1)
+        if not valid.any():
+            raise AssertionError(f"{path}: WCS {code!r} has no finite sampled input coordinates")
+        if not np.isfinite(new_world[valid]).all():
+            raise AssertionError(f"{path}: WCS {code!r} made valid input coordinates non-finite")
+
+        longitude_axis = int(old_wcs.wcs.lng)
+        latitude_axis = int(old_wcs.wcs.lat)
+        delta = new_world[valid] - old_world[valid]
+        if longitude_axis >= 0:
+            delta[:, longitude_axis] = (delta[:, longitude_axis] + 180.0) % 360.0 - 180.0
+        if longitude_axis >= 0 and latitude_axis >= 0:
+            old_lon = np.deg2rad(old_world[valid, longitude_axis])
+            new_lon = np.deg2rad(new_world[valid, longitude_axis])
+            old_lat = np.deg2rad(old_world[valid, latitude_axis])
+            new_lat = np.deg2rad(new_world[valid, latitude_axis])
+            dlon = (new_lon - old_lon + np.pi) % (2 * np.pi) - np.pi
+            haversine = np.sin((new_lat - old_lat) / 2) ** 2 + np.cos(old_lat) * np.cos(
+                new_lat
+            ) * np.sin(dlon / 2) ** 2
+            angular_error_deg = np.rad2deg(2 * np.arcsin(np.sqrt(np.clip(haversine, 0, 1))))
+            if not np.all(angular_error_deg <= 1e-8):
+                raise AssertionError(f"{path}: WCS {code!r} angular coordinates changed across crop")
+            other_axes = [
+                axis
+                for axis in range(delta.shape[1])
+                if axis not in (longitude_axis, latitude_axis)
+            ]
+            if other_axes and not np.all(np.abs(delta[:, other_axes]) <= 1e-8):
+                raise AssertionError(f"{path}: WCS {code!r} non-angular coordinates changed across crop")
+        elif not np.all(np.abs(delta) <= 1e-8):
+            raise AssertionError(f"{path}: WCS {code!r} coordinates changed across crop")
+
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="All-NaN slice encountered", category=RuntimeWarning)
+                old_roundtrip = old_wcs.all_world2pix(
+                    old_world[valid], 0, tolerance=1e-6, maxiter=100, quiet=True
+                )
+                new_roundtrip = new_wcs.all_world2pix(
+                    new_world[valid], 0, tolerance=1e-6, maxiter=100, quiet=True
+                )
+        except Exception as error:
+            raise AssertionError(f"{path}: WCS {code!r} inverse transform failed: {error}") from error
+        old_inverse_valid = np.isfinite(old_roundtrip).all(axis=1)
+        new_inverse_valid = np.isfinite(new_roundtrip).all(axis=1)
+        if not np.array_equal(old_inverse_valid, new_inverse_valid):
+            raise AssertionError(f"{path}: WCS {code!r} inverse validity changed across crop")
+        if not old_inverse_valid.any():
+            warnings.warn(
+                f"{path}: WCS {code!r} inverse residual unavailable; forward coordinates matched",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif not np.all(
+            np.max(np.abs(old_roundtrip[old_inverse_valid] - source_points[valid][old_inverse_valid]), axis=1)
+            <= 1e-6
+        ):
+            raise AssertionError(f"{path}: WCS {code!r} input inverse residual exceeds 1e-6 pixel")
+        elif not np.all(
+            np.max(np.abs(new_roundtrip[new_inverse_valid] - points[valid][new_inverse_valid]), axis=1)
+            <= 1e-6
+        ):
+            raise AssertionError(f"{path}: WCS {code!r} output inverse residual exceeds 1e-6 pixel")
 
 
 def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tuple[int, int]:
@@ -105,13 +186,13 @@ def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tu
                 verify_provenance(output_path, output[0].header)
             x0 = int(output[0].header.get("CLIPX0", 0))
             y0 = int(output[0].header.get("CLIPY0", 0))
-            verify_wcs(source[0].header, output[0].header, output_path, x0, y0)
             original = np.asarray(source[0].data)
             actual = np.asarray(output[0].data)
             crop_shape = output[0].header.get("CLIPSHAP")
             if source[0].header["BITPIX"] != output[0].header["BITPIX"]:
                 raise AssertionError(f"{output_path}: shape or BITPIX changed")
             is_crop = bool(crop_shape or x0 or y0 or original.shape != actual.shape)
+            verify_wcs(source[0].header, output[0].header, output_path, x0, y0, is_crop)
             if is_crop:
                 expected = original[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]]
                 if expected.shape != actual.shape:
@@ -174,7 +255,7 @@ def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tu
                             raise AssertionError(f"{output_path}: integer BLANK values do not match mask")
                         if not np.array_equal(actual[~selected], original[~selected]):
                             raise AssertionError(f"{output_path}: retained integer values changed")
-                    verify_wcs(source[0].header, mask_hdus[0].header, mask_path, 0, 0)
+                    verify_wcs(source[0].header, mask_hdus[0].header, mask_path, 0, 0, False)
                 checked_masks += 1
             else:
                 verify_checksums(output_path, output, required=False)
