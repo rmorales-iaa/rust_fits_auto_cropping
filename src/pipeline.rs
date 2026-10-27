@@ -279,22 +279,31 @@ fn process_one(
         || rel.to_string_lossy().to_ascii_lowercase().ends_with(".fz")
         || is_gzip_compressed(path).unwrap_or(false)
     {
-        return finish(
-            FileOutcome::new(
-                rel.to_path_buf(),
-                OutcomeKind::Ignored,
-                "compressed FITS is not supported by this build",
-            ),
-            timer,
-        );
-    }
-    let result = match read_image(path, config.processing.maximum_image_mib) {
-        Ok(Err(reason)) => FileOutcome::new(
+        let mut outcome = FileOutcome::new(
             rel.to_path_buf(),
             OutcomeKind::Ignored,
-            format!("ineligible image: {}", eligibility_reason(reason)),
-        ),
-        Err(error) => FileOutcome::new(rel.to_path_buf(), OutcomeKind::Error, format!("{error:#}")),
+            "compressed FITS is not supported by this build",
+        );
+        outcome.reason_code = "compressed_ignored";
+        return finish(outcome, timer);
+    }
+    let result = match read_image(path, config.processing.maximum_image_mib) {
+        Ok(Err(reason)) => {
+            let reason_code = eligibility_reason_code(&reason);
+            let mut outcome = FileOutcome::new(
+                rel.to_path_buf(),
+                OutcomeKind::Ignored,
+                format!("ineligible image: {}", eligibility_reason(reason)),
+            );
+            outcome.reason_code = reason_code;
+            outcome
+        }
+        Err(error) => {
+            let mut outcome =
+                FileOutcome::new(rel.to_path_buf(), OutcomeKind::Error, format!("{error:#}"));
+            outcome.reason_code = "input_read_error";
+            outcome
+        }
         Ok(Ok(image)) => {
             let detection = detect_border(
                 &image.values,
@@ -311,12 +320,14 @@ fn process_one(
                 },
                 detection.reason.clone(),
             );
+            outcome.reason_code = detection.reason_code;
             outcome.width = Some(image.width);
             outcome.height = Some(image.height);
             outcome.source_sha256 = Some(image.source_sha256.clone());
             outcome.original_undefined_pixels =
                 image.values.iter().filter(|v| !v.is_finite()).count();
             outcome.proposed_mask_fraction = detection.candidate_fraction;
+            outcome.candidate_mask_pixels = detection.candidate_mask_pixels;
             outcome.candidate_tiles = detection.candidate_tiles;
             outcome.candidate_components = detection.candidate_components;
             outcome.accepted_components = detection.accepted_components;
@@ -342,6 +353,11 @@ fn process_one(
                 let mut crop_accepted = false;
                 if matches!(config.processing.mode, ProcessingMode::Crop) && crop.is_none() {
                     outcome.status = OutcomeKind::Kept;
+                    outcome.reason_code = if image.crop_wcs_unsupported.is_some() {
+                        "crop_unsupported_wcs"
+                    } else {
+                        "crop_geometry_unavailable"
+                    };
                     let reason = image.crop_wcs_unsupported.as_ref().map_or_else(
                         || {
                             "no positive-area rectangle excludes every detected artifact pixel"
@@ -355,6 +371,7 @@ fn process_one(
                 }
                 if options.dry_run && detection.accepted && outcome.status == OutcomeKind::Clipped {
                     outcome.status = OutcomeKind::Proposed;
+                    outcome.reason_code = "dry_run_proposal";
                 }
                 if let Some(rect) = crop {
                     let total = image.width * image.height;
@@ -398,6 +415,11 @@ fn process_one(
                             !**candidate && **excluded && value.is_finite()
                         })
                         .count();
+                    outcome.crop_excluded_undefined_pixels = excluded
+                        .iter()
+                        .zip(&image.values)
+                        .filter(|(excluded, value)| **excluded && !value.is_finite())
+                        .count();
                     let artifact_fraction =
                         outcome.artifact_pixels_removed as f64 / defined.max(1) as f64;
                     let valid_loss_fraction =
@@ -411,6 +433,7 @@ fn process_one(
                         outcome.net_utility >= heuristics.heuristics.minimum_net_utility;
                     if !crop_accepted {
                         outcome.status = OutcomeKind::Kept;
+                        outcome.reason_code = "crop_utility_rejected";
                     }
                     outcome.reason.push_str(&format!(
                         "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels and sacrifices {} unmasked pixels; crop utility {:.4} (benefit {:.4} - loss {:.4}) {}",
@@ -534,6 +557,7 @@ fn process_one(
                                 return finish(outcome, timer);
                             }
                             outcome.status = OutcomeKind::Kept;
+                            outcome.reason_code = "integer_blank_unavailable_kept";
                             outcome.reason = format!(
                                 "{e}; source retained unchanged because this integer action cannot represent added undefined pixels"
                             );
@@ -567,6 +591,16 @@ fn process_one(
                         outcome.mask_fraction = outcome.masked_pixels as f64
                             / (image.width * image.height - outcome.original_undefined_pixels)
                                 .max(1) as f64;
+                        outcome.applied_artifact_pixels = if crop_accepted {
+                            outcome.artifact_pixels_removed
+                        } else {
+                            n
+                        };
+                        if crop_accepted {
+                            outcome.reason_code = "crop_applied";
+                        } else if matches!(config.processing.mode, ProcessingMode::Mask) {
+                            outcome.reason_code = "mask_applied";
+                        }
                     }
                     if crop_accepted && let Some(preview) = png_path {
                         let region = crop.expect("accepted crop has a region");
@@ -668,6 +702,9 @@ fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
 }
 fn finish(mut outcome: FileOutcome, timer: Instant) -> FileOutcome {
+    if matches!(outcome.status, OutcomeKind::Error) && !outcome.reason_code.ends_with("_error") {
+        outcome.reason_code = "processing_error";
+    }
     outcome.elapsed_ms = timer.elapsed().as_millis();
     outcome
 }
@@ -777,5 +814,14 @@ fn eligibility_reason(reason: crate::fits_image::Eligibility) -> String {
         crate::fits_image::Eligibility::IntegerPrecisionLoss => {
             "integer sample span exceeds exact f64 analysis precision".into()
         }
+    }
+}
+
+fn eligibility_reason_code(reason: &crate::fits_image::Eligibility) -> &'static str {
+    match reason {
+        crate::fits_image::Eligibility::MultiHdu(_) => "multi_hdu_ignored",
+        crate::fits_image::Eligibility::Not2d => "not_2d_ignored",
+        crate::fits_image::Eligibility::EmptyImage => "empty_image_ignored",
+        crate::fits_image::Eligibility::IntegerPrecisionLoss => "integer_precision_ignored",
     }
 }

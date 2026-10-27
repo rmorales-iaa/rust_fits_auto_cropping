@@ -227,6 +227,16 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
         .find(|entry| entry["input"] == "float.fits")
         .unwrap();
     assert_eq!(float_result["original_undefined_pixels"], 1);
+    assert_eq!(float_result["reason_code"], "mask_applied");
+    assert!(
+        float_result["candidate_mask_pixels"].as_u64().unwrap()
+            >= float_result["proposed_mask_pixels"].as_u64().unwrap()
+    );
+    assert_eq!(
+        float_result["applied_artifact_pixels"],
+        float_result["masked_pixels"]
+    );
+    assert_eq!(float_result["crop_excluded_undefined_pixels"], 0);
     assert_eq!(
         float_result["masked_pixels"],
         float_result["proposed_mask_pixels"]
@@ -742,6 +752,12 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     assert_eq!(manifest["complete"], true);
     assert_eq!(manifest["manifest_version"], 2);
     assert_eq!(manifest["input_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(summary["files"][0]["reason_code"], "crop_applied");
+    assert_eq!(
+        summary["files"][0]["applied_artifact_pixels"],
+        summary["files"][0]["artifact_pixels_removed"]
+    );
+    assert_eq!(summary["files"][0]["crop_excluded_undefined_pixels"], 0);
     assert_eq!(manifest["products"].as_array().unwrap().len(), 3);
     assert!(
         manifest["products"]
@@ -754,6 +770,48 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     assert_eq!(output_mask.len(), width * height);
     assert_eq!(output_mask[0], 1);
     assert_eq!(output_mask[64 * width + 64], 0);
+}
+
+#[test]
+fn crop_accounting_reports_preexisting_undefined_geometry_overlap() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let mut pixels = vec![100.0; 96 * 96];
+    for y in 0..16 {
+        for x in 0..24 {
+            pixels[y * 96 + x] = 0.0;
+        }
+    }
+    pixels[0] = f64::NAN;
+    create_fits(&input.join("undefined-corner.fits"), -64, 96, 96, &pixels);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
+        .args(["--input-dir"])
+        .arg(&input)
+        .args(["--output-dir"])
+        .arg(&output)
+        .args(["--config"])
+        .arg(input.join("config.toml"))
+        .args(["--heuristics"])
+        .arg(input.join("heuristics.toml"))
+        .args(["--mode", "crop"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    let image = &summary["files"][0];
+    assert_eq!(image["original_undefined_pixels"], 1);
+    assert_eq!(image["crop_excluded_undefined_pixels"], 1);
+    assert!(image["candidate_mask_pixels"].as_u64().unwrap() > 0);
+    assert!(image["proposed_mask_pixels"].as_u64().unwrap() > 0);
+    assert!(matches!(
+        image["reason_code"].as_str().unwrap(),
+        "crop_applied" | "crop_utility_rejected"
+    ));
 }
 
 #[test]
@@ -985,7 +1043,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 4);
+    assert_eq!(summary["schema_version"], 5);
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
     assert_eq!(summary["policy_version"], "heuristics-v1");
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);
@@ -993,6 +1051,8 @@ fn dry_run_writes_reports_and_log_without_products() {
     assert_eq!(summary["clipped"], 0);
     assert_eq!(summary["proposed"], 1);
     assert_eq!(summary["files"][0]["masked_pixels"], 0);
+    assert_eq!(summary["files"][0]["reason_code"], "dry_run_proposal");
+    assert_eq!(summary["files"][0]["applied_artifact_pixels"], 0);
     assert!(summary["files"][0]["output_manifest"].is_null());
     assert!(
         summary["files"][0]["proposed_mask_pixels"]

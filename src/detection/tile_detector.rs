@@ -6,11 +6,13 @@ use std::collections::VecDeque;
 #[derive(Debug)]
 pub struct Detection {
     pub mask: Vec<bool>,
+    pub candidate_mask_pixels: usize,
     pub candidate_tiles: usize,
     pub candidate_components: usize,
     pub accepted_components: usize,
     pub candidate_fraction: f64,
     pub accepted: bool,
+    pub reason_code: &'static str,
     pub reason: String,
     pub score: f64,
     pub evidence_ratio: f64,
@@ -34,11 +36,13 @@ struct Tile {
 pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules) -> Detection {
     let empty = || Detection {
         mask: vec![false; data.len()],
+        candidate_mask_pixels: 0,
         candidate_tiles: 0,
         candidate_components: 0,
         accepted_components: 0,
         candidate_fraction: 0.0,
         accepted: false,
+        reason_code: "insufficient_data",
         reason: "insufficient valid data".into(),
         score: 0.0,
         evidence_ratio: 0.0,
@@ -273,11 +277,17 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     if accepted_component_count == 0 {
         return Detection {
             mask: vec![false; data.len()],
+            candidate_mask_pixels: candidate_pixels,
             candidate_tiles: count,
             candidate_components: components.len(),
             accepted_components: 0,
             candidate_fraction,
             accepted: false,
+            reason_code: if components.is_empty() {
+                "no_border_candidate"
+            } else {
+                "candidate_rejected"
+            },
             reason: if candidate_fraction > cfg.maximum_mask_fraction {
                 "candidate exceeds maximum mask fraction".into()
             } else if candidate_fraction < cfg.minimum_mask_fraction {
@@ -302,11 +312,13 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     if fraction < cfg.minimum_mask_fraction {
         return Detection {
             mask: vec![false; data.len()],
+            candidate_mask_pixels: candidate_pixels,
             candidate_tiles: count,
             candidate_components: components.len(),
             accepted_components: accepted_component_count,
             candidate_fraction,
             accepted: false,
+            reason_code: "candidate_rejected",
             reason: "candidate below minimum mask fraction".into(),
             score: best_score,
             evidence_ratio,
@@ -318,11 +330,13 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     if fraction > cfg.maximum_mask_fraction {
         return Detection {
             mask: vec![false; data.len()],
+            candidate_mask_pixels: candidate_pixels,
             candidate_tiles: count,
             candidate_components: components.len(),
             accepted_components: accepted_component_count,
             candidate_fraction,
             accepted: false,
+            reason_code: "candidate_rejected",
             reason: "candidate exceeds maximum mask fraction".into(),
             score: best_score,
             evidence_ratio,
@@ -334,11 +348,13 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     if evidence_ratio < cfg.minimum_evidence_ratio || net_utility < cfg.minimum_net_utility {
         return Detection {
             mask: vec![false; data.len()],
+            candidate_mask_pixels: candidate_pixels,
             candidate_tiles: count,
             candidate_components: components.len(),
             accepted_components: accepted_component_count,
             candidate_fraction,
             accepted: false,
+            reason_code: "candidate_rejected",
             reason: format!(
                 "candidate retained: artifact benefit {artifact_benefit:.4} minus valid-pixel loss {valid_pixel_loss:.4} gives utility {net_utility:.4}, below configured clip rule"
             ),
@@ -365,11 +381,13 @@ pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicR
     }
     Detection {
         mask,
+        candidate_mask_pixels: candidate_pixels,
         candidate_tiles: count,
         candidate_components: components.len(),
         accepted_components: accepted_component_count,
         candidate_fraction,
         accepted: true,
+        reason_code: "candidate_accepted",
         reason: format!(
             "clip accepted: evidence ratio {evidence_ratio:.3}; artifact benefit {artifact_benefit:.4}; valid-pixel loss {valid_pixel_loss:.4}; net utility {net_utility:.4}"
         ),
