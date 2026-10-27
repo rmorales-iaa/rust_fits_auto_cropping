@@ -1,7 +1,30 @@
 use fitskit::{FitsFile, Hdu, HduData, HeaderValue, ImageData, PixelData};
 use flate2::{Compression, write::GzEncoder};
-use std::{fs, io::Write, path::Path, process::Command};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use tempfile::tempdir;
+
+fn run_dir(output: &Path) -> PathBuf {
+    let mut runs: Vec<PathBuf> = fs::read_dir(output.join("runs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    runs.sort();
+    runs.pop().expect("at least one run directory")
+}
+
+fn product_path(output: &Path, category: &str, relative: &str) -> PathBuf {
+    run_dir(output).join(category).join(relative)
+}
+
+fn summary_path(output: &Path) -> PathBuf {
+    run_dir(output).join("summary.json")
+}
 
 fn create_fits(path: &Path, bitpix: i64, width: usize, height: usize, data: &[f64]) {
     let pixels = match bitpix {
@@ -41,7 +64,7 @@ fn config(dir: &Path) {
 }
 
 fn invoke(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
-    Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+    Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
         .args(["--input-dir"])
         .arg(input)
         .args(["--output-dir"])
@@ -55,7 +78,7 @@ fn invoke(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
 }
 
 fn invoke_recursive(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
-    Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+    Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
         .args(["--input-dir"])
         .arg(input)
         .args(["--output-dir"])
@@ -70,7 +93,7 @@ fn invoke_recursive(input: &Path, output: &Path, cfg: &Path) -> std::process::Ex
 }
 
 fn invoke_png(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
-    Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+    Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
         .args(["--input-dir"])
         .arg(input)
         .args(["--output-dir"])
@@ -121,7 +144,7 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
         &vec![100.0; 96 * 96],
     );
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let f = FitsFile::from_file(output.join("images/float.fits")).unwrap();
+    let f = FitsFile::from_file(product_path(&output, "images", "float.fits")).unwrap();
     let img = match &f.primary().data {
         HduData::Image(i) => i,
         _ => panic!(),
@@ -133,7 +156,7 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
             .header
             .get_string("CREATOR")
             .unwrap()
-            .contains(env!("FITS_AUTO_CLIPPING_VERSION"))
+            .contains(env!("RUST_FITS_AUTO_CROPPING_VERSION"))
     );
     let product_date = f.primary().header.get_string("DATE").unwrap();
     assert!(product_date.len() >= 19 && product_date.contains('T'));
@@ -145,35 +168,35 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
                 .is_some_and(|value| value.contains("generated_utc="))
     }));
     assert!(f.primary().verify_datasum().is_ok());
-    let mask = read_mask(&output.join("masks/float.fits"));
+    let mask = read_mask(&product_path(&output, "masks", "float.fits"));
     assert_eq!(mask.len(), 96 * 96);
     assert_eq!(mask[0], 1);
     assert_eq!(mask[95 * 96 + 95], 0);
     assert!(
-        fs::symlink_metadata(output.join("images/clean.fits"))
+        fs::symlink_metadata(product_path(&output, "images", "clean.fits"))
             .unwrap()
             .file_type()
             .is_symlink()
     );
-    let m = FitsFile::from_file(output.join("masks/float.fits")).unwrap();
+    let m = FitsFile::from_file(product_path(&output, "masks", "float.fits")).unwrap();
     assert_eq!(m.primary().header.get_float("CRPIX1"), Some(48.5));
     assert_eq!(m.primary().header.get_string("CTYPE1"), Some("RA---TAN"));
-    let report = fs::read_dir(output.join("reports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("summary.json");
+    let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
-    assert_eq!(v["program"], "fits-auto-clipping");
-    assert_eq!(v["version"], env!("FITS_AUTO_CLIPPING_VERSION"));
+    assert_eq!(v["program"], "rust_fits_auto_cropping");
+    assert_eq!(v["version"], env!("RUST_FITS_AUTO_CROPPING_VERSION"));
     assert_eq!(v["clipped"], 1);
     assert_eq!(v["kept"], 1);
     assert_eq!(v["total"], 2);
-    assert!(output.join("images/clean.fits").is_file());
-    assert!(!output.join("masks/clean.fits").exists());
-    assert!(output.join("logger").read_dir().unwrap().next().is_some());
+    assert!(product_path(&output, "images", "clean.fits").is_file());
+    assert!(!product_path(&output, "masks", "clean.fits").exists());
+    assert!(run_dir(&output).read_dir().unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("activity_")
+    }));
 }
 
 #[test]
@@ -194,7 +217,7 @@ fn int64_blank_and_retained_samples_are_preserved() {
     let f = FitsFile::with_primary_image(ImageData::new(vec![96, 96], PixelData::I64(raw)));
     f.to_file(input.join("large-offset.fits")).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let out = FitsFile::from_file(output.join("images/large-offset.fits")).unwrap();
+    let out = FitsFile::from_file(product_path(&output, "images", "large-offset.fits")).unwrap();
     let blank = out.primary().header.get_int("BLANK").unwrap();
     let img = match &out.primary().data {
         HduData::Image(i) => i,
@@ -220,7 +243,7 @@ fn scaled_integer_header_and_pixels_are_preserved() {
         .set("BZERO", HeaderValue::Float(100.0), None);
     f.to_file(input.join("scaled.fits")).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let out = FitsFile::from_file(output.join("images/scaled.fits")).unwrap();
+    let out = FitsFile::from_file(product_path(&output, "images", "scaled.fits")).unwrap();
     assert_eq!(out.primary().header.get_float("BSCALE"), Some(2.0));
     assert_eq!(out.primary().header.get_float("BZERO"), Some(100.0));
     let blank = out.primary().header.get_int("BLANK").unwrap();
@@ -240,7 +263,7 @@ fn byte_images_get_in_range_blank_sentinel() {
     config(&input);
     create_fits(&input.join("byte.fits"), 8, 96, 96, &artifact());
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let f = FitsFile::from_file(output.join("images/byte.fits")).unwrap();
+    let f = FitsFile::from_file(product_path(&output, "images", "byte.fits")).unwrap();
     let blank = f.primary().header.get_int("BLANK").unwrap();
     assert!((0..=255).contains(&blank));
     let img = match &f.primary().data {
@@ -270,9 +293,9 @@ fn existing_blank_pixels_remain_undefined_and_are_not_newly_masked() {
         .set("BLANK", HeaderValue::Integer(i16::MIN as i64), None);
     file.to_file(input.join("with-blank.fits")).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let mask = read_mask(&output.join("masks/with-blank.fits"));
+    let mask = read_mask(&product_path(&output, "masks", "with-blank.fits"));
     assert_eq!(mask[48 * 96 + 48], 0);
-    let out = FitsFile::from_file(output.join("images/with-blank.fits")).unwrap();
+    let out = FitsFile::from_file(product_path(&output, "images", "with-blank.fits")).unwrap();
     assert_eq!(out.primary().header.get_int("BLANK"), Some(i16::MIN as i64));
     let img = match &out.primary().data {
         HduData::Image(v) => v,
@@ -295,7 +318,7 @@ fn out_of_range_blank_is_ignored_for_detection_and_replaced_in_masked_output() {
         .set("BLANK", HeaderValue::Integer(32768), None);
     file.to_file(input.join("invalid-blank.fits")).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let out = FitsFile::from_file(output.join("images/invalid-blank.fits")).unwrap();
+    let out = FitsFile::from_file(product_path(&output, "images", "invalid-blank.fits")).unwrap();
     let blank = out.primary().header.get_int("BLANK").unwrap();
     assert!((-32768..=32767).contains(&blank));
     let img = match &out.primary().data {
@@ -303,13 +326,7 @@ fn out_of_range_blank_is_ignored_for_detection_and_replaced_in_masked_output() {
         _ => panic!("expected image"),
     };
     assert!(matches!(&img.pixels, PixelData::I16(v) if i64::from(v[0]) == blank));
-    let report = fs::read_dir(output.join("reports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("summary.json");
+    let report = summary_path(&output);
     let result: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(result["errors"], 0);
     assert!(
@@ -345,7 +362,8 @@ fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference
     assert!(invoke(&input, &output, &config_path).success());
 
     let original = FitsFile::from_file(&input_path).unwrap();
-    let cropped = FitsFile::from_file(output.join("images/four-corners.fits")).unwrap();
+    let cropped =
+        FitsFile::from_file(product_path(&output, "images", "four-corners.fits")).unwrap();
     let before = match &original.primary().data {
         HduData::Image(image) => match &image.pixels {
             PixelData::I16(values) => values,
@@ -402,7 +420,8 @@ fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference
         );
     }
     assert!(cropped.primary().verify_datasum().is_ok());
-    let mask_file = FitsFile::from_file(output.join("masks/four-corners.fits")).unwrap();
+    let mask_file =
+        FitsFile::from_file(product_path(&output, "masks", "four-corners.fits")).unwrap();
     assert_eq!(
         mask_file.primary().header.require_int("NAXIS1").unwrap(),
         width as i64
@@ -440,7 +459,8 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
     assert!(invoke_png(&input, &output, &config_path).success());
 
     let original = FitsFile::from_file(&source).unwrap();
-    let cropped = FitsFile::from_file(output.join("images/circular-field.fits")).unwrap();
+    let cropped =
+        FitsFile::from_file(product_path(&output, "images", "circular-field.fits")).unwrap();
     assert_eq!(
         cropped.primary().header.get_string("CLIPSHAP"),
         Some("CIRCLE")
@@ -482,7 +502,7 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
         }
     }
     assert!(cropped.primary().verify_datasum().is_ok());
-    let preview_path = output.join("png/circular-field.fits.png");
+    let preview_path = product_path(&output, "previews", "circular-field.fits.png");
     let preview = image::open(&preview_path).unwrap().to_luma8();
     assert_eq!(
         preview.dimensions(),
@@ -511,13 +531,7 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
             .0[0],
         0
     );
-    let report = fs::read_dir(output.join("reports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("summary.json");
+    let report = summary_path(&output);
     let summary: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert!(
         summary["files"][0]["output_png"]
@@ -525,7 +539,7 @@ fn crop_mode_selects_circle_when_it_retains_more_pixels_than_rectangle() {
             .unwrap()
             .ends_with("circular-field.fits.png")
     );
-    let output_mask = read_mask(&output.join("masks/circular-field.fits"));
+    let output_mask = read_mask(&product_path(&output, "masks", "circular-field.fits"));
     assert_eq!(output_mask.len(), width * height);
     assert_eq!(output_mask[0], 1);
     assert_eq!(output_mask[64 * width + 64], 0);
@@ -553,24 +567,18 @@ fn crop_mode_keeps_source_when_valid_pixel_loss_dominates() {
     create_fits(&source, 16, 96, 96, &artifact());
     assert!(invoke(&input, &output, &config_path).success());
 
-    let kept = FitsFile::from_file(output.join("images/four-corners.fits")).unwrap();
+    let kept = FitsFile::from_file(product_path(&output, "images", "four-corners.fits")).unwrap();
     assert_eq!(kept.primary().header.require_int("NAXIS1").unwrap(), 96);
     assert_eq!(kept.primary().header.require_int("NAXIS2").unwrap(), 96);
     assert_eq!(kept.primary().header.get_int("CLIPX0"), None);
     assert!(
-        fs::symlink_metadata(output.join("images/four-corners.fits"))
+        fs::symlink_metadata(product_path(&output, "images", "four-corners.fits"))
             .unwrap()
             .file_type()
             .is_symlink()
     );
-    assert!(!output.join("masks/four-corners.fits").exists());
-    let report = fs::read_dir(output.join("reports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("summary.json");
+    assert!(!product_path(&output, "masks", "four-corners.fits").exists());
+    let report = summary_path(&output);
     let result: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(result["kept"], 1);
     assert!(
@@ -597,7 +605,7 @@ fn png_flag_requires_effective_crop_mode() {
     let output = t.path().join("out");
     fs::create_dir(&input).unwrap();
     config(&input);
-    let result = Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+    let result = Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
         .args(["--input-dir"])
         .arg(&input)
         .args(["--output-dir"])
@@ -609,7 +617,7 @@ fn png_flag_requires_effective_crop_mode() {
         .unwrap();
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("--png requires crop mode"));
-    assert!(!output.join("png").exists());
+    assert!(!output.exists());
 }
 
 #[test]
@@ -628,8 +636,8 @@ fn int32_and_odd_rectangular_images_keep_dimensions() {
     }
     create_fits(&input.join("odd-int32.fits"), 32, width, height, &data);
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let out = FitsFile::from_file(output.join("images/odd-int32.fits")).unwrap();
-    let mask = read_mask(&output.join("masks/odd-int32.fits"));
+    let out = FitsFile::from_file(product_path(&output, "images", "odd-int32.fits")).unwrap();
+    let mask = read_mask(&product_path(&output, "masks", "odd-int32.fits"));
     assert_eq!(mask.len(), width * height);
     let img = match &out.primary().data {
         HduData::Image(v) => v,
@@ -657,14 +665,8 @@ fn multiple_hdus_are_ignored() {
     )));
     f.to_file(path).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    assert!(!output.join("images/multi.fits").exists());
-    let report = fs::read_dir(output.join("reports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("summary.json");
+    assert!(!product_path(&output, "images", "multi.fits").exists());
+    let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(v["ignored"], 1);
 }
@@ -686,7 +688,7 @@ fn serial_and_parallel_workers_produce_identical_masks() {
     }
     create_fits(&input.join("b.fits"), -64, 96, 96, &second);
     let run = |output: &Path, threads: &str| {
-        Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+        Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
             .args(["--input-dir"])
             .arg(&input)
             .args(["--output-dir"])
@@ -702,13 +704,7 @@ fn serial_and_parallel_workers_produce_identical_masks() {
     assert!(run(&serial, "1").success());
     assert!(run(&parallel, "4").success());
     let summary = |root: &Path| {
-        let path = fs::read_dir(root.join("reports"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path()
-            .join("summary.json");
+        let path = summary_path(root);
         serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap()
     };
     let serial_files = summary(&serial)["files"].as_array().unwrap().clone();
@@ -729,14 +725,14 @@ fn serial_and_parallel_workers_produce_identical_masks() {
         }
     }
     for name in ["a.fits", "b.fits"] {
-        let serial_mask = serial.join("masks").join(name);
-        let parallel_mask = parallel.join("masks").join(name);
+        let serial_mask = run_dir(&serial).join("masks").join(name);
+        let parallel_mask = run_dir(&parallel).join("masks").join(name);
         assert_eq!(serial_mask.exists(), parallel_mask.exists());
         if serial_mask.exists() {
             assert_eq!(read_mask(&serial_mask), read_mask(&parallel_mask));
         } else {
-            assert!(serial.join("images").join(name).exists());
-            assert!(parallel.join("images").join(name).exists());
+            assert!(run_dir(&serial).join("images").join(name).exists());
+            assert!(run_dir(&parallel).join("images").join(name).exists());
         }
     }
 }
@@ -749,7 +745,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     fs::create_dir(&input).unwrap();
     config(&input);
     create_fits(&input.join("candidate.fits"), -32, 96, 96, &artifact());
-    let status = Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"))
+    let status = Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
         .args(["--input-dir"])
         .arg(&input)
         .args(["--output-dir"])
@@ -762,10 +758,10 @@ fn dry_run_writes_reports_and_log_without_products() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(!output.join("images/candidate.fits").exists());
-    assert!(!output.join("masks/candidate.fits").exists());
-    assert!(output.join("logger").read_dir().unwrap().next().is_some());
-    assert!(output.join("reports").read_dir().unwrap().next().is_some());
+    assert!(!product_path(&output, "images", "candidate.fits").exists());
+    assert!(!product_path(&output, "masks", "candidate.fits").exists());
+    assert!(run_dir(&output).read_dir().unwrap().next().is_some());
+    assert!(summary_path(&output).is_file());
 }
 
 #[test]
@@ -780,19 +776,13 @@ fn corrupt_candidate_returns_batch_error_status_and_is_reported() {
         invoke(&input, &output, &input.join("config.toml")).code(),
         Some(1)
     );
-    let report = fs::read_dir(output.join("reports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("summary.json");
+    let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(v["errors"], 1);
 }
 
 #[test]
-fn explicit_overwrite_replaces_a_complete_output_pair() {
+fn each_run_is_isolated_and_previous_results_are_preserved() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
     let output = t.path().join("out");
@@ -800,7 +790,7 @@ fn explicit_overwrite_replaces_a_complete_output_pair() {
     config(&input);
     create_fits(&input.join("candidate.fits"), -64, 96, 96, &artifact());
     let run = |overwrite: bool| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_fits-auto-clipping"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"));
         cmd.args(["--input-dir"])
             .arg(&input)
             .args(["--output-dir"])
@@ -815,9 +805,15 @@ fn explicit_overwrite_replaces_a_complete_output_pair() {
         cmd.status().unwrap()
     };
     assert!(run(false).success());
+    let first_run = run_dir(&output);
     assert!(run(true).success());
+    let second_run = run_dir(&output);
+    assert_ne!(first_run, second_run);
+    assert!(first_run.join("summary.json").is_file());
+    assert!(first_run.join("images/candidate.fits").is_file());
+    assert!(fs::read_dir(output.join("runs")).unwrap().count() == 2);
     assert!(
-        FitsFile::from_file(output.join("images/candidate.fits"))
+        FitsFile::from_file(product_path(&output, "images", "candidate.fits"))
             .unwrap()
             .len()
             == 1
@@ -859,18 +855,12 @@ fn compressed_and_multi_hdu_fits_are_ignored() {
         .to_file(input.join("tile-compressed.fits.fz"))
         .unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let report = fs::read_dir(output.join("reports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("summary.json");
+    let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(v["total"], 3);
     assert_eq!(v["ignored"], 3);
     assert_eq!(v["errors"], 0);
-    assert!(!output.join("images/multi.fits").exists());
+    assert!(!product_path(&output, "images", "multi.fits").exists());
 }
 
 #[test]
@@ -883,5 +873,5 @@ fn recursive_flag_discovers_nested_fits() {
     config(&input);
     create_fits(&nested.join("candidate.fits"), -32, 96, 96, &artifact());
     assert!(invoke_recursive(&input, &output, &input.join("config.toml")).success());
-    assert!(output.join("images/night1/candidate.fits").exists());
+    assert!(product_path(&output, "images", "night1/candidate.fits").exists());
 }

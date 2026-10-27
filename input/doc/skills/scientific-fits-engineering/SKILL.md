@@ -10,12 +10,12 @@ Work and respond in English. Apply this contract to scientific FITS projects.
 ## Project contract
 - Documentation belongs in `input/doc/`; maintain a root `README.md` for remote repository readers.
 - Runtime configuration belongs in `input/`. Tool-required manifests and lockfiles (for example Cargo.toml and Cargo.lock) remain in their standard locations; document exceptions.
-- Derived data belongs in `output/` by default. An explicitly selected output directory becomes the output root, including its `logger/` subdirectory.
+- Derived data belongs in `output/` by default. An explicitly selected output directory becomes the output root. Isolate each run under `runs/<run-id>/` with products, reports and its ISO-named activity log together. Validate output roots and relative components; reject symlinked managed paths and input/output overlap. Preserve older runs; never purge outputs implicitly.
 - Implement a central structured activity logger. Use UTC ISO-8601 timestamps in every entry and ISO-derived safe filenames, e.g. `2026-10-27T10-30-00.123Z_<run-id>.jsonl`. Record invocation, configuration hash, source/version, input identity, stages, decisions, warnings, failures, outputs, durations, resources and completion. Include administrative work when practical. Never record secrets. Flush on orderly termination and report logging failures.
 - Keep each substantial class or Rust struct with its implementation in one focused, documented file. Small companion enums/types may remain together. Prefer files below approximately 300 lines; split by responsibility, not arbitrary line count.
 - Maintain comprehensive CLI help, README, architecture, algorithm, configuration and validation documentation, and a .gitignore excluding generated products, raw local data, credentials and caches.
 - For pixel-artifact detection, derive classification evidence from image samples and mask geometry, not descriptive header cards. Use FITS structural, scaling and null metadata only as required to decode samples. Kept eligible images are symlinks to canonical sources; never write provenance through them. Add `CREATOR`, UTC `DATE` and timestamped `HISTORY` only to generated FITS products, and record run version/time in summary and logs.
-- This project uses a tracked `input/program-version.txt` template and local ignored `output/program-version.txt` counter. Cargo package recompilations advance the three-part base-100 version. Check current branches/remotes before authorized merge/push; never invent a remote URL.
+- This project uses a tracked `input/program-version.txt` template and local ignored `output/.state/program-version.txt` counter. Cargo package recompilations advance the three-part base-100 version. Check current branches/remotes before authorized merge/push; never invent a remote URL.
 
 ## Work cycle
 1. Explore existing code and Git state before editing. Preserve unrelated work.

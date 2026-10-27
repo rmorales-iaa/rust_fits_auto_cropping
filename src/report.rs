@@ -19,15 +19,13 @@ pub struct Summary<'a> {
     pub files: &'a [FileOutcome],
 }
 
-pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::Result<()> {
-    let dir = output.join("reports").join(run_id);
-    fs::create_dir_all(&dir)?;
+pub fn write(run_dir: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::Result<()> {
     let count = |f: fn(&OutcomeKind) -> bool| outcomes.iter().filter(|o| f(&o.status)).count();
     let summary = Summary {
         run_id,
         created_utc: Utc::now().to_rfc3339(),
         program: env!("CARGO_PKG_NAME"),
-        version: env!("FITS_AUTO_CLIPPING_VERSION"),
+        version: env!("RUST_FITS_AUTO_CROPPING_VERSION"),
         total: outcomes.len(),
         clipped: count(|s| matches!(s, OutcomeKind::Clipped)),
         kept: count(|s| matches!(s, OutcomeKind::Kept)),
@@ -36,7 +34,7 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
         files: outcomes,
     };
     fs::write(
-        dir.join("summary.json"),
+        run_dir.join("summary.json"),
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
@@ -95,6 +93,6 @@ pub fn write(output: &Path, run_id: &str, outcomes: &[FileOutcome]) -> anyhow::R
         );
         csv.push('\n');
     }
-    fs::write(dir.join("per-image.csv"), csv).context("writing per-image summary")?;
+    fs::write(run_dir.join("per-image.csv"), csv).context("writing per-image summary")?;
     Ok(())
 }

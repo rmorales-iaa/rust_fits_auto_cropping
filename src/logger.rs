@@ -3,7 +3,7 @@ use anyhow::Context;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{File, OpenOptions},
     io::Write,
     path::Path,
 };
@@ -21,17 +21,15 @@ struct Event<'a, T: Serialize> {
 
 impl Logger {
     pub fn create(output: &Path, run_id: &str) -> anyhow::Result<Self> {
-        let dir = output.join("logger");
-        fs::create_dir_all(&dir)?;
         let filename = format!(
-            "{}_{}.jsonl",
+            "activity_{}_{}.jsonl",
             Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ"),
             run_id
         );
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
-            .open(dir.join(filename))
+            .open(output.join(filename))
             .context("creating activity log")?;
         Ok(Self { file })
     }

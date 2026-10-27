@@ -1,9 +1,9 @@
 [package]
-name = "fits-auto-clipping"
+name = "rust_fits_auto_cropping"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Conservative border artifact detection and masking for single-HDU FITS images"
+description = "Conservative border artifact detection and cropping for single-HDU FITS images"
 license = "MIT"
 
 [dependencies]

@@ -28,9 +28,23 @@ fn main() {
     watch_tree(&root.join("src"));
 
     let output = root.join("output");
+    assert_no_symlink(&output);
     fs::create_dir_all(&output).expect("create output directory for version state");
-    let state = output.join("program-version.txt");
-    let lock_path = output.join("program-version.lock");
+    let state_dir = output.join(".state");
+    assert_no_symlink(&state_dir);
+    fs::create_dir_all(&state_dir).expect("create output state directory");
+    let state = state_dir.join("program-version.txt");
+    let previous_state = output.join("program-version.txt");
+    assert_no_symlink(&state);
+    if !state.exists() && fs::symlink_metadata(&previous_state).is_ok() {
+        assert_no_symlink(&previous_state);
+        assert!(
+            previous_state.is_file(),
+            "previous program version state is not a file"
+        );
+        fs::rename(&previous_state, &state).expect("migrate previous local version state");
+    }
+    let lock_path = state_dir.join("program-version.lock");
     let _lock = acquire_lock(&lock_path);
     let template = root.join("input/program-version.txt");
     println!("cargo:rerun-if-changed={}", template.display());
@@ -40,11 +54,28 @@ fn main() {
     let current = version::Version::parse(&current_text)
         .unwrap_or_else(|error| panic!("invalid program version: {error}"));
     let next = current.increment().to_string();
-    let pending = output.join(format!("program-version-{}.tmp", std::process::id()));
-    fs::write(&pending, format!("{next}\n")).expect("write next program version");
+    let pending = state_dir.join(format!("program-version-{}.tmp", std::process::id()));
+    let mut pending_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending)
+        .expect("create next program version state");
+    writeln!(pending_file, "{next}").expect("write next program version state");
+    pending_file
+        .sync_all()
+        .expect("flush next program version state");
     fs::rename(&pending, &state).expect("publish next program version");
-    println!("cargo:rustc-env=FITS_AUTO_CLIPPING_VERSION={next}");
-    println!("cargo:warning=fits-auto-clipping version {next}");
+    println!("cargo:rustc-env=RUST_FITS_AUTO_CROPPING_VERSION={next}");
+    println!("cargo:warning=rust_fits_auto_cropping version {next}");
+}
+
+fn assert_no_symlink(path: &Path) {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        panic!(
+            "managed output directory must not be a symbolic link: {}",
+            path.display()
+        );
+    }
 }
 
 fn acquire_lock(path: &Path) -> Lock {

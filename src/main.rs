@@ -6,6 +6,7 @@ mod detection;
 mod fits_image;
 mod logger;
 mod model;
+mod output_layout;
 mod pipeline;
 mod preview;
 mod report;

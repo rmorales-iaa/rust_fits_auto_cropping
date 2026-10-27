@@ -4,7 +4,7 @@ Status: implemented and verified locally on 2026-10-27.
 
 ## Goal
 
-Add `--png` as an opt-in output for accepted crop-mode images. For each image actually cropped, write `output/png/<input-relative-path>.png` with the full input on the left and the actual crop on the right. Keep FITS processing and the science crop decision unchanged.
+Add `--png` as an opt-in output for accepted crop-mode images. For each image actually cropped, write `output/runs/<run-id>/previews/<input-relative-path>.png` with the full input on the left and the actual crop on the right. Keep FITS processing and the science crop decision unchanged.
 
 ## Rendering contract
 
@@ -16,7 +16,7 @@ Add `--png` as an opt-in output for accepted crop-mode images. For each image ac
 ## Implementation phases
 
 1. Add the PNG-only Rust `image` dependency, a small ZScale implementation, and a renderer module that composites labeled grayscale panels with checked dimensions.
-2. Add the `--png` CLI flag, require crop mode, publish previews under `output/png/`, and include the paths in JSON/CSV reporting and activity logs.
+2. Add the `--png` CLI flag, require crop mode, publish previews under `output/runs/<run-id>/previews/`, and include the paths in JSON/CSV reporting and activity logs.
 3. Add deterministic ZScale numerical tests, preview geometry/orientation/blank tests, CLI behavior and overwrite tests. Independently cross-check rendered samples and ZScale limits against Astropy; exercise the supplied FITS set and check time/RSS impact.
 4. Update help, README, user/algorithm/architecture docs, skill guidance and validation evidence. Run format, complete tests, Clippy, release help smoke test and the FITS/PNG interoperability checker, then commit the verified change locally.
 
@@ -25,7 +25,7 @@ Add `--png` as an opt-in output for accepted crop-mode images. For each image ac
 - With `--mode crop --png`, every accepted crop has exactly one corresponding side-by-side PNG; rejected crops and kept files do not.
 - Both panels use identical `vmin/vmax`; dimensions match source width plus crop width and a labeled top band, and vertical axis direction matches FITS pixel coordinates.
 - Astropy independently confirms representative grayscale values and ZScale limits; PNG decoder confirms valid dimensions/data.
-- No input or FITS product bytes change due to preview generation. Without `--png`, no `output/png/` products are written.
+- No input or FITS product bytes change due to preview generation. Without `--png`, the run's `previews/` directory remains empty.
 
 ## Completion record
 

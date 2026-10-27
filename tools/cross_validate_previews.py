@@ -34,7 +34,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("summary", type=Path, help="run summary.json")
     parser.add_argument("input_dir", type=Path, help="original input root")
-    parser.add_argument("output_dir", type=Path, help="product output root")
+    parser.add_argument("output_dir", type=Path, help="one output/runs/<run-id> directory")
     parser.add_argument("--samples", type=int, default=200, help="sample checks per PNG")
     args = parser.parse_args()
     summary = json.loads(args.summary.read_text())

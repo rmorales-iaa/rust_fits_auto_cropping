@@ -2,21 +2,10 @@
 use crate::{crop::CropRegion, preview::zscale::ZScale};
 use anyhow::{Context, bail};
 use image::{GrayImage, ImageFormat, Luma};
-use std::{
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 use tempfile::NamedTempFile;
 
 const LABEL_HEIGHT: usize = 18;
-
-/// Build a PNG path by preserving the full source-relative name and appending `.png`.
-pub fn preview_path(output_root: &Path, input_relative: &Path) -> PathBuf {
-    let mut filename = OsString::from(input_relative.as_os_str());
-    filename.push(".png");
-    output_root.join("png").join(filename)
-}
 
 /// Write a labeled source/crop PNG using one source-derived ZScale interval.
 pub fn write_crop_preview(
@@ -150,7 +139,6 @@ mod tests {
     use super::*;
     use crate::crop::CropRect;
     use tempfile::tempdir;
-
     #[test]
     fn creates_labeled_before_and_after_png_with_lower_origin() {
         let temp = tempdir().unwrap();
@@ -176,11 +164,5 @@ mod tests {
             rendered.get_pixel(24, 23).0[0]
         );
         assert_eq!(rendered.get_pixel(24, 29).0[0], 0); // outside the selected crop.
-    }
-
-    #[test]
-    fn preview_path_preserves_relative_tree_and_appends_png_suffix() {
-        let path = preview_path(Path::new("out"), Path::new("night/frame.fits"));
-        assert_eq!(path, PathBuf::from("out/png/night/frame.fits.png"));
     }
 }

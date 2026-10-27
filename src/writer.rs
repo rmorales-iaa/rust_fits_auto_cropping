@@ -33,7 +33,7 @@ pub fn write_mask(
     stamp_processing_metadata(&mut output.primary_mut().header);
     output.primary_mut().header.push(Keyword::commentary(
         "HISTORY",
-        &format!("fits-auto-clipping: {history}"),
+        &format!("rust_fits_auto_cropping: {history}"),
     ));
     publish_fits(&output, path)?;
     verify_mask_file(path, width, height, mask)
@@ -120,7 +120,7 @@ pub fn write_masked_image(
     stamp_processing_metadata(&mut hdu.header);
     hdu.header.push(Keyword::commentary(
         "HISTORY",
-        "fits-auto-clipping: border pixels marked undefined",
+        "rust_fits_auto_cropping: border pixels marked undefined",
     ));
     publish_fits(&output, destination)?;
     verify_masked_file(source, destination, mask, bitpix, blank_value)
@@ -313,7 +313,7 @@ pub fn write_cropped_image(
     stamp_processing_metadata(&mut hdu.header);
     hdu.header.push(Keyword::commentary(
         "HISTORY",
-        "fits-auto-clipping: largest axis-aligned rectangle free of detected artifacts",
+        "rust_fits_auto_cropping: largest axis-aligned rectangle free of detected artifacts",
     ));
     publish_fits(&output, destination)?;
     verify_cropped_file(source, destination, &before, width, image_info, region)
@@ -324,7 +324,7 @@ fn stamp_processing_metadata(header: &mut Header) {
     let creator = format!(
         "{} v{}",
         env!("CARGO_PKG_NAME"),
-        env!("FITS_AUTO_CLIPPING_VERSION")
+        env!("RUST_FITS_AUTO_CROPPING_VERSION")
     );
     header.set(
         "CREATOR",

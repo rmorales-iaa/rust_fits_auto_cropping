@@ -5,17 +5,17 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "fits-auto-clipping",
-    version = env!("FITS_AUTO_CLIPPING_VERSION"),
+    name = "rust_fits_auto_cropping",
+    version = env!("RUST_FITS_AUTO_CROPPING_VERSION"),
     about = "Detect and mask or crop border artifacts in single-HDU two-dimensional FITS images.",
     long_about = "Detect statistically supported border patterns using image pixel values. Non-structural FITS header metadata is not evidence for the detector. Mask mode preserves image dimensions; crop mode compares maximum-area clean rectangles and artifact-free circles and applies a configurable loss-versus-removal utility rule.",
-    after_help = "Examples:\n  fits-auto-clipping --input-dir input/data --output-dir output\n  fits-auto-clipping --input-dir input/data --output-dir output --recursive --mode crop --threads 4\n  fits-auto-clipping --input-dir input/data --output-dir output --recursive --mode crop --png\n  fits-auto-clipping --input-dir input/data --output-dir output --dry-run\n\n--png requires crop mode and writes one labeled before/after ZScale PNG for every accepted crop under output/png/. Unchanged eligible images are symlinks under output/images/ and keep their source headers unchanged. Generated FITS products receive CREATOR, DATE and HISTORY provenance cards. Multi-HDU and compressed FITS inputs are ignored. Exit codes: 0 complete; 1 one or more file errors; 2 startup/configuration error."
+    after_help = "Examples:\n  rust_fits_auto_cropping --input-dir input/data --output-dir output\n  rust_fits_auto_cropping --input-dir input/data --output-dir output --recursive --mode crop --threads 4\n  rust_fits_auto_cropping --input-dir input/data --output-dir output --recursive --mode crop --png\n  rust_fits_auto_cropping --input-dir input/data --output-dir output --dry-run\n\nEvery run is stored under output/runs/<run-id>/ with images/, masks/, optional previews/, summary.json, per-image.csv and an ISO-dated activity log. The output root is validated and prior run directories are preserved. --png requires crop mode and writes a labeled before/after ZScale PNG for each accepted crop under previews/. Unchanged eligible images are symlinks under images/ and keep their source headers unchanged. Generated FITS products receive CREATOR, DATE and HISTORY provenance cards. Multi-HDU and compressed FITS inputs are ignored. Exit codes: 0 complete; 1 one or more file errors; 2 startup/configuration error."
 )]
 pub struct Args {
     /// Input directory containing FITS images.
     #[arg(long)]
     pub input_dir: PathBuf,
-    /// Output directory for images, masks, reports and logger/.
+    /// Output root; each run is isolated under runs/<UTC-run-id>/.
     #[arg(long)]
     pub output_dir: PathBuf,
     /// TOML configuration. Defaults to input/config.toml when present.
@@ -42,7 +42,7 @@ pub struct Args {
     /// Total memory budget shared by image workers (MiB).
     #[arg(long)]
     pub memory_budget_mib: Option<usize>,
-    /// Allow existing output products to be replaced.
+    /// Allow conflicting products within the current isolated run to be replaced.
     #[arg(long)]
     pub overwrite: bool,
 }

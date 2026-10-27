@@ -301,25 +301,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
-name = "fits-auto-clipping"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "fitskit",
- "flate2",
- "image",
- "rayon",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
- "walkdir",
-]
-
-[[package]]
 name = "fitskit"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -605,6 +586,25 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rust_fits_auto_cropping"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "fitskit",
+ "flate2",
+ "image",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+ "walkdir",
 ]
 
 [[package]]

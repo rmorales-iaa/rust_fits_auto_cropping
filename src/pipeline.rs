@@ -7,7 +7,8 @@ use crate::{
     fits_image::read_image,
     logger::Logger,
     model::{FileOutcome, OutcomeKind},
-    preview::{preview_path, write_crop_preview},
+    output_layout::{OutputLayout, ProductCategory},
+    preview::write_crop_preview,
     report,
     writer::{write_cropped_products, write_products},
 };
@@ -57,7 +58,7 @@ impl std::fmt::Display for BatchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} file(s) failed; see reports/{}/summary.json",
+            "{} file(s) failed; see runs/{}/summary.json",
             self.count, self.run_id
         )
     }
@@ -92,12 +93,6 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     if !input.is_dir() {
         bail!("input path is not a directory");
     }
-    fs::create_dir_all(&args.output_dir)
-        .with_context(|| format!("creating output directory {}", args.output_dir.display()))?;
-    let output = fs::canonicalize(&args.output_dir)?;
-    if input.starts_with(&output) || output.starts_with(&input) {
-        bail!("input and output directories must not overlap");
-    }
     let (mut config, config_text) = Config::load(args.config.as_deref())?;
     let (heuristics, heuristics_text) = HeuristicsConfig::load(args.heuristics.as_deref())?;
     if let Some(threads) = args.threads {
@@ -131,10 +126,12 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         (config.processing.memory_budget_mib / config.processing.maximum_image_mib).max(1);
     let workers = requested.min(memory_limited);
     let run_id = Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
-    let mut logger = Logger::create(&output, &run_id)?;
-    logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output":output,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
+    let layout = Arc::new(OutputLayout::prepare(&args.output_dir, &input, &run_id)?);
+    let run_dir = layout.run().to_path_buf();
+    let mut logger = Logger::create(&run_dir, &run_id)?;
+    logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output_root":layout.root(),"run_directory":&run_dir,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
         "source_heuristics_sha256":source_heuristics_hash,"effective_heuristics_sha256":heuristics_hash,
-        "version":env!("FITS_AUTO_CLIPPING_VERSION"),"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
+        "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run}))?;
     let mut paths = discover(&input, config.processing.recursive)?;
     paths.sort();
     logger.event(&run_id,"discovery_complete",serde_json::json!({"candidate_fits_files":paths.len(),"workers":workers,"memory_budget_mib":config.processing.memory_budget_mib,"maximum_image_mib":config.processing.maximum_image_mib}))?;
@@ -152,7 +149,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
                 let outcome = process_one(
                     path,
                     &input,
-                    &output,
+                    &layout,
                     &config,
                     &heuristics,
                     ProductOptions {
@@ -174,7 +171,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
             .collect()
     });
     outcomes.sort_by(|a, b| a.input.cmp(&b.input));
-    report::write(&output, &run_id, &outcomes)?;
+    report::write(&run_dir, &run_id, &outcomes)?;
     if logger_failed.load(Ordering::Relaxed) {
         bail!("activity logger failed while recording file events; see completed summary report")
     };
@@ -241,7 +238,7 @@ fn discover(input: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
 fn process_one(
     path: &Path,
     input: &Path,
-    output: &Path,
+    layout: &OutputLayout,
     config: &Config,
     heuristics: &HeuristicsConfig,
     options: ProductOptions,
@@ -367,28 +364,38 @@ fn process_one(
                     ));
                 }
                 if !options.dry_run {
-                    let image_path = output.join("images").join(rel);
-                    let mask_path = output.join("masks").join(rel);
-                    let png_path =
-                        (options.png_preview && crop_accepted).then(|| preview_path(output, rel));
-                    if let Some(p) = image_path.parent()
-                        && let Err(e) = fs::create_dir_all(p)
-                    {
-                        outcome.status = OutcomeKind::Error;
-                        outcome.reason = e.to_string();
-                        return finish(outcome, timer);
-                    }
-                    if let Some(p) = mask_path.parent()
-                        && let Err(e) = fs::create_dir_all(p)
-                    {
-                        outcome.status = OutcomeKind::Error;
-                        outcome.reason = e.to_string();
-                        return finish(outcome, timer);
-                    }
+                    let image_path = match layout.product_path(ProductCategory::Image, rel) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            outcome.status = OutcomeKind::Error;
+                            outcome.reason = error.to_string();
+                            return finish(outcome, timer);
+                        }
+                    };
+                    let mask_path = match layout.product_path(ProductCategory::Mask, rel) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            outcome.status = OutcomeKind::Error;
+                            outcome.reason = error.to_string();
+                            return finish(outcome, timer);
+                        }
+                    };
+                    let png_path = if options.png_preview && crop_accepted {
+                        match layout.preview_path(rel) {
+                            Ok(path) => Some(path),
+                            Err(error) => {
+                                outcome.status = OutcomeKind::Error;
+                                outcome.reason = error.to_string();
+                                return finish(outcome, timer);
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     if !options.overwrite
-                        && (image_path.exists()
-                            || mask_path.exists()
-                            || png_path.as_ref().is_some_and(|path| path.exists()))
+                        && (path_exists(&image_path)
+                            || path_exists(&mask_path)
+                            || png_path.as_ref().is_some_and(|path| path_exists(path)))
                     {
                         outcome.status = OutcomeKind::Error;
                         outcome.reason = "output exists; pass --overwrite".into();
@@ -444,17 +451,17 @@ fn process_one(
                     }
                 }
             } else if !options.dry_run {
-                let image_path = output.join("images").join(rel);
-                if !options.overwrite && image_path.exists() {
+                let image_path = match layout.product_path(ProductCategory::Image, rel) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        outcome.status = OutcomeKind::Error;
+                        outcome.reason = error.to_string();
+                        return finish(outcome, timer);
+                    }
+                };
+                if !options.overwrite && path_exists(&image_path) {
                     outcome.status = OutcomeKind::Error;
                     outcome.reason = "output exists; pass --overwrite".into();
-                    return finish(outcome, timer);
-                }
-                if let Some(p) = image_path.parent()
-                    && let Err(e) = fs::create_dir_all(p)
-                {
-                    outcome.status = OutcomeKind::Error;
-                    outcome.reason = e.to_string();
                     return finish(outcome, timer);
                 }
                 if let Err(e) = create_kept_symlink(path, &image_path) {
@@ -494,6 +501,10 @@ fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 fn finish(mut outcome: FileOutcome, timer: Instant) -> FileOutcome {
     outcome.elapsed_ms = timer.elapsed().as_millis();
     outcome
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 fn eligibility_reason(reason: crate::fits_image::Eligibility) -> String {

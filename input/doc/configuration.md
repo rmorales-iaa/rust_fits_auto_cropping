@@ -12,7 +12,7 @@ Operational settings live in `input/config.toml`. Scientific decision thresholds
 | `processing.maximum_image_mib` | 512 MiB | Per-image allocation cap. Current preflight estimate is 32 bytes per pixel. |
 | `processing.mode` | `mask` | `mask` preserves dimensions and marks candidate pixels undefined; `crop` compares the maximum-area clean rectangle and largest artifact-free circle, then selects the geometry retaining more pixel centers. A circle is stored in its rectangular bounding box, with pixels outside the circle undefined. CLI `--mode mask|crop` overrides this setting. |
 
-CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. `--png` is an opt-in crop-mode display output, not a configuration key. Existing outputs require `--overwrite`.
+CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. `--png` is an opt-in crop-mode display output, not a configuration key. Each invocation creates a new isolated run directory; `--overwrite` only permits collisions inside that run and does not remove older runs.
 
 ## Decision rules: `input/heuristics.toml`
 

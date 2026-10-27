@@ -2,4 +2,4 @@
 mod render;
 mod zscale;
 
-pub use render::{preview_path, write_crop_preview};
+pub use render::write_crop_preview;

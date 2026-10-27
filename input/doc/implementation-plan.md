@@ -1,4 +1,4 @@
-# Implementation plan: Rust FITS Auto Clipping
+# Implementation plan: rust_fits_auto_cropping
 
 Status: engineering implementation and requested evaluation completed locally on 2026-10-27, including follow-up circle/rectangle crop selection. The completed items below refer to engineering behavior, synthetic fixtures, and the supplied unlabeled dataset; they do not establish a scientific-release result.
 
@@ -21,7 +21,7 @@ A separate one-HDU binary mask FITS records rejected pixels and a sidecar record
 ## Proposed command and configuration
 
 ```text
-fits-auto-clipping --input-dir input/data --output-dir output \
+rust_fits_auto_cropping --input-dir input/data --output-dir output \
   --config input/config.toml --mode mask --threads 4
 ```
 
@@ -59,11 +59,13 @@ Keep a thin `src/main.rs`; pure algorithms in a library enable tests without the
 ```text
 input/config.toml                   editable runtime configuration
 input/doc/                          guides, methods, plan, references
-output/images/<relative-path>       processed products or symlinks to unchanged inputs
-output/masks/<relative-path>        separate mask FITS files
-output/diagnostics/<run-id>/         optional evidence and previews
-output/reports/<run-id>/             summary.json, per-image.csv, provenance.json
-output/logger/<ISO-time>_<id>.jsonl  structured activity log
+output/.state/program-version.txt   local ignored build counter
+output/runs/<run-id>/images/          processed products or symlinks to unchanged inputs
+output/runs/<run-id>/masks/           separate mask FITS files
+output/runs/<run-id>/previews/        optional labeled before/after crop PNGs
+output/runs/<run-id>/summary.json     deterministic run summary
+output/runs/<run-id>/per-image.csv    row-oriented run summary
+output/runs/<run-id>/activity_*.jsonl structured activity log with ISO timestamp
 ```
 
 Every log entry has a UTC ISO timestamp, level, run ID, event and relevant file ID. Record invocation, configuration identity, dependency/version information, discovery, eligibility, detector decisions, writes, exceptions, timing, worker/memory settings and final counts. Record major activities rather than logging every pixel. Flush on shutdown; logging/report initialization failures must fail before processing. Handle interrupts by marking the run incomplete and flushing the completed-file manifest when possible; abrupt process termination cannot guarantee a final summary.

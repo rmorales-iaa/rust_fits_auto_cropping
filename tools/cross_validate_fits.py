@@ -44,7 +44,7 @@ def verify_checksums(path: Path, hdus: fits.HDUList, required: bool = True) -> N
 
 
 def verify_provenance(path: Path, header: fits.Header) -> None:
-    if not str(header.get("CREATOR", "")).startswith("fits-auto-clipping v"):
+    if not str(header.get("CREATOR", "")).startswith("rust_fits_auto_cropping v"):
         raise AssertionError(f"{path}: CREATOR program/version card is missing")
     if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", str(header.get("DATE", ""))):
         raise AssertionError(f"{path}: DATE product timestamp is missing or malformed")
@@ -193,7 +193,7 @@ def verify_tree(input_dir: Path, output_dir: Path, fitsverify: str | None) -> tu
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True, help="one output/runs/<run-id> directory")
     parser.add_argument("--fitsverify", default=shutil.which("fitsverify"))
     args = parser.parse_args()
     try:

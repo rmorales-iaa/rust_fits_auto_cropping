@@ -13,7 +13,7 @@ Date: 2026-10-27. This plan follows the initial implementation. It treats the su
 7. Put science decision rules in a separate `input/heuristics.toml` file. Preserve conservative abstention: a candidate must have connected border support, contrast and spatial evidence, and stay within configurable area limits. A proposed mask is accepted only when evidence for artifact removal outweighs the configured penalty for losing potentially valid pixels. The current data has no ground-truth labels, so this policy can be evaluated for behavior and reviewability but its thresholds cannot be scientifically calibrated from this set alone.
 8. Expose `--recursive` as a CLI input to traverse nested directories; keep recursive traversal opt-in.
 9. Maintain a three-part local build counter from `input/program-version.txt` and add program/version/UTC creation cards to generated FITS products. Summaries must also identify the program/version so unchanged symlink products retain run provenance without modifying input headers.
-10. Publish unchanged eligible images as symlinks under `output/images/`, preserving input bytes; validate link targets independently.
+10. Publish unchanged eligible images as symlinks under `output/runs/<run-id>/images/`, preserving input bytes; validate link targets independently.
 
 ## Phases and acceptance criteria
 
