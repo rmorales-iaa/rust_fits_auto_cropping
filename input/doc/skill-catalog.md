@@ -1,6 +1,6 @@
 # Skill catalog
 
-The version-controlled source of each skill is `input/doc/skills/<name>/SKILL.md`. Copies were installed into the current user's Codex skills directory for discovery in subsequent sessions. Project AGENTS.md points directly to the versioned source so project instructions also apply without relying on discovery. Keep installed copies synchronized when these sources change; do not overwrite unrelated skills.
+The version-controlled source of each skill is `input/doc/skills/<name>/SKILL.md`. Copies were installed into the current user's Codex skills directory for discovery in subsequent sessions. Project AGENTS.md points directly to the versioned source so project instructions also apply without relying on discovery. Keep installed copies synchronized when these sources change; do not overwrite unrelated skills. The durable project state and pending-work summary is in [project memory](project-memory.md).
 
 Explicit invocation example: `$scientific-fits-engineering`.
 
