@@ -3,8 +3,8 @@ set -euo pipefail
 
 readonly FIRST_YEAR=2002
 readonly LAST_YEAR=2026
-readonly SOURCE_ROOT=/mnt/uxmal_groups/image_storage/rust_om_cal
-readonly OUTPUT_ROOT=/mnt/uxmal_groups/image_storage/cropped
+readonly SOURCE_ROOT="${RUST_FITS_AUTO_CROPPING_SOURCE_ROOT:-/mnt/uxmal_groups/image_storage/rust_om_cal}"
+readonly OUTPUT_ROOT="${RUST_FITS_AUTO_CROPPING_OUTPUT_ROOT:-/mnt/uxmal_groups/image_storage/cropped}"
 readonly SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 readonly REPOSITORY_ROOT="$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd -P)"
 readonly CONFIG_PATH="$REPOSITORY_ROOT/input/config.toml"
@@ -20,6 +20,8 @@ Each run deletes existing contents of that year's dedicated science_calibrated
 output directory before processing. Sibling bias/dark/flat links are unaffected.
 Set RUST_FITS_AUTO_CROPPING_BIN to override the executable. By default the
 script uses rust_fits_auto_cropping from PATH, then this repository's release binary.
+Set RUST_FITS_AUTO_CROPPING_SOURCE_ROOT and RUST_FITS_AUTO_CROPPING_OUTPUT_ROOT
+to override the data roots. A per-year progress bar counts completed FITS files.
 USAGE
 }
 
@@ -89,6 +91,144 @@ ensure_directory_link() {
     ln -s -- "$resolved_source" "$output_link"
 }
 
+count_fits_inputs() {
+    find "$1" -type f \
+        \( -iname '*.fits.gz' -o -iname '*.fit.gz' -o -iname '*.fts.gz' \
+        -o -iname '*.fits.fz' -o -iname '*.fit.fz' -o -iname '*.fts.fz' \
+        -o -iname '*.fits' -o -iname '*.fit' -o -iname '*.fts' -o -iname '*.fz' \) \
+        -printf '.' | wc -c | tr -d '[:space:]'
+}
+
+render_progress() {
+    local year=$1
+    local completed=$2
+    local total=$3
+    local width=30
+    local percent=$((completed * 100 / total))
+    local filled=$((completed * width / total))
+    local bar empty
+    printf -v bar '%*s' "$filled" ''
+    printf -v empty '%*s' "$((width - filled))" ''
+    bar=${bar// /#}
+    empty=${empty// /-}
+    if [[ -t 2 ]]; then
+        printf '\rYear %s [%s%s] %3d%% (%d/%d)' \
+            "$year" "$bar" "$empty" "$percent" "$completed" "$total" >&2
+    else
+        printf 'Year %s [%s%s] %3d%% (%d/%d)\n' \
+            "$year" "$bar" "$empty" "$percent" "$completed" "$total" >&2
+    fi
+}
+
+run_year_with_progress() {
+    local year=$1
+    local input_dir=$2
+    local output_dir=$3
+    local total completed last_percent status_file program_pid activity_file candidate line status
+    local had_nullglob=0
+    local -A prior_logs=()
+    total=$(count_fits_inputs "$input_dir")
+    completed=0
+    last_percent=-1
+
+    if shopt -q nullglob; then
+        had_nullglob=1
+    fi
+    shopt -s nullglob
+    if [[ -d "$output_dir" ]]; then
+        for candidate in "$output_dir"/activity_*.jsonl; do
+            [[ -f "$candidate" ]] && prior_logs["$candidate"]=1
+        done
+    fi
+    if ((had_nullglob == 0)); then
+        shopt -u nullglob
+    fi
+
+    if ((total > 0)); then
+        render_progress "$year" 0 "$total"
+        last_percent=0
+    else
+        printf 'Year %s: no matching FITS files found.\n' "$year" >&2
+    fi
+
+    status_file=$(mktemp "${TMPDIR:-/tmp}/cropped-year-status.XXXXXX")
+    (
+        set +e
+        "$PROGRAM" \
+            --input-dir "$input_dir" \
+            --output-dir "$output_dir" \
+            --recursive \
+            --mode crop \
+            --flat-output \
+            --png \
+            --sanitize-output \
+            --config "$CONFIG_PATH" \
+            --heuristics "$HEURISTICS_PATH"
+        status=$?
+        printf '%s\n' "$status" >"$status_file"
+    ) &
+    program_pid=$!
+
+    activity_file=''
+    for ((attempt = 0; attempt < 200; attempt++)); do
+        shopt -s nullglob
+        for candidate in "$output_dir"/activity_*.jsonl; do
+            [[ -f "$candidate" ]] || continue
+            if [[ -z ${prior_logs[$candidate]+known} ]]; then
+                activity_file=$candidate
+                break
+            fi
+        done
+        if ((had_nullglob == 0)); then
+            shopt -u nullglob
+        fi
+        [[ -n "$activity_file" || -s "$status_file" ]] && break
+        sleep 0.1
+    done
+
+    if [[ -n "$activity_file" && $total -gt 0 ]]; then
+        exec {activity_fd}< <(tail -n +1 -F -- "$activity_file")
+        local tail_pid=$!
+        while [[ ! -s "$status_file" ]]; do
+            if IFS= read -r -t 0.2 line <&"$activity_fd"; then
+                if [[ "$line" == *'"event":"file_finished"'* ]]; then
+                    completed=$((completed + 1))
+                    if ((completed > total)); then
+                        completed=$total
+                    fi
+                    local percent=$((completed * 100 / total))
+                    if ((percent != last_percent)); then
+                        render_progress "$year" "$completed" "$total"
+                        last_percent=$percent
+                    fi
+                fi
+            fi
+        done
+        while IFS= read -r -t 0.1 line <&"$activity_fd"; do
+            if [[ "$line" == *'"event":"file_finished"'* ]]; then
+                completed=$((completed + 1))
+                if ((completed > total)); then
+                    completed=$total
+                fi
+            fi
+        done
+        if ((completed == total && last_percent != 100)); then
+            render_progress "$year" "$completed" "$total"
+        fi
+        if [[ -t 2 ]]; then
+            printf '\n' >&2
+        fi
+        kill "$tail_pid" 2>/dev/null || true
+        wait "$tail_pid" 2>/dev/null || true
+        exec {activity_fd}<&-
+    fi
+
+    wait "$program_pid" || true
+    IFS= read -r status <"$status_file" || status=1
+    rm -f -- "$status_file"
+    return "$status"
+}
+
 process_year() {
     local year=$1
     local source_year="$SOURCE_ROOT/$year"
@@ -113,16 +253,10 @@ process_year() {
 
     printf 'Processing year %s: %s -> %s\n' \
         "$year" "$source_year/science_calibrated" "$output_year/science_calibrated"
-    "$PROGRAM" \
-        --input-dir "$source_year/science_calibrated" \
-        --output-dir "$output_year/science_calibrated" \
-        --recursive \
-        --mode crop \
-        --flat-output \
-        --png \
-        --sanitize-output \
-        --config "$CONFIG_PATH" \
-        --heuristics "$HEURISTICS_PATH"
+    run_year_with_progress \
+        "$year" \
+        "$source_year/science_calibrated" \
+        "$output_year/science_calibrated"
 }
 
 failures=0
