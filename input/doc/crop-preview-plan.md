@@ -1,6 +1,6 @@
 # Optional side-by-side crop preview plan
 
-Status: implemented and verified locally on 2026-10-27.
+Status: implemented; crop-fit display revision verified on 2026-10-28.
 
 ## Goal
 
@@ -9,7 +9,7 @@ Add `--png` as an opt-in output for accepted crop-mode images. For each image ac
 ## Rendering contract
 
 - Render grayscale with a deterministic implementation of IRAF/Astropy ZScale sampling and rejection defaults: up to 1000 evenly strided finite samples, contrast 0.25, up to five rejection iterations, 2.5-sigma rejection, and fallback to sample extrema when the accepted sample count is too small. Use one interval computed from the full source for both panels to make their pixel intensities directly comparable.
-- Keep native pixel scale. Use astronomical orientation (`y=0` at the bottom), add concise panel labels, and render invalid pixels and pixels outside a circular crop as black.
+- Keep the source panel at native scale. Fit the rectangular crop uniformly to the source panel height with nearest-neighbor sampling, preserving its aspect ratio and adding no blank crop-panel margins. Label this panel `CROP FIT` so differing display scale is explicit. Use astronomical orientation (`y=0` at the bottom), and render invalid pixels as black.
 - `--png` requires crop mode. Dry runs, masked images, kept/symlinked images, ignored files, and crops rejected by the loss utility do not produce PNGs. Existing output collision and `--overwrite` behavior applies to PNG files.
 - Write PNGs atomically and record their paths in the per-image report. A preview write failure is a per-file error; any already-verified FITS crop/mask products remain valid and are retained.
 
@@ -23,7 +23,7 @@ Add `--png` as an opt-in output for accepted crop-mode images. For each image ac
 ## Acceptance checks
 
 - With `--mode crop --png`, every accepted crop has exactly one corresponding side-by-side PNG; rejected crops and kept files do not.
-- Both panels use identical `vmin/vmax`; dimensions match source width plus crop width and a labeled top band, and vertical axis direction matches FITS pixel coordinates.
+- Both panels use identical `vmin/vmax`; the source keeps native scale and the crop panel is uniformly fitted to source-panel height with nearest-neighbor sampling, its displayed scale is labeled, dimensions match source width plus fitted crop width and a labeled top band, and vertical axis direction matches FITS pixel coordinates.
 - Astropy independently confirms representative grayscale values and ZScale limits; PNG decoder confirms valid dimensions/data.
 - No input or FITS product bytes change due to preview generation. Without `--png`, the run's `previews/` directory remains empty.
 

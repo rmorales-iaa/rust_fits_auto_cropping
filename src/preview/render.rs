@@ -1,4 +1,4 @@
-//! Side-by-side native-scale crop previews with color-coded source-panel boundaries.
+//! Side-by-side crop-fit previews with color-coded source-panel boundaries.
 use crate::{crop::CropRect, durability::sync_parent, preview::zscale::ZScale};
 use anyhow::{Context, bail};
 use image::{ImageFormat, Rgb, RgbImage};
@@ -33,18 +33,26 @@ pub fn write_crop_preview(
         bail!("preview crop bounds exceed the source image");
     }
     let scale = ZScale::from_values(values).context("source has no finite pixels for ZScale")?;
+    // Fit the after-panel to the full source-panel height while preserving its
+    // aspect ratio. Nearest-neighbor sampling is display-only and invents no
+    // intermediate FITS sample values.
+    let display_crop_height = source_height;
+    let display_crop_width = usize::try_from(
+        (bounds.width as u128 * display_crop_height as u128 + bounds.height as u128 / 2)
+            / bounds.height as u128,
+    )
+    .context("preview crop width exceeds addressable dimensions")?;
     let canvas_width = source_width
-        .checked_add(bounds.width)
+        .checked_add(display_crop_width)
         .context("preview width overflow")?;
-    let content_height = source_height.max(bounds.height);
-    let canvas_height = content_height
+    let canvas_height = source_height
         .checked_add(LABEL_HEIGHT)
         .context("preview height overflow")?;
     let width = u32::try_from(canvas_width).context("preview width exceeds PNG dimensions")?;
     let height = u32::try_from(canvas_height).context("preview height exceeds PNG dimensions")?;
     let mut canvas = RgbImage::from_pixel(width, height, Rgb([0, 0, 0]));
     draw_label(&mut canvas, 8, 5, "BEFORE");
-    draw_label(&mut canvas, source_width as u32 + 8, 5, "CROP");
+    draw_label(&mut canvas, source_width as u32 + 8, 5, "CROP FIT");
 
     for y in 0..source_height {
         let row = y * source_width;
@@ -60,20 +68,18 @@ pub fn write_crop_preview(
             }
         }
     }
-    for crop_y in 0..bounds.height {
-        let source_y = bounds.y + crop_y;
-        // Keep both panels in the same source-coordinate frame. Padding then
-        // marks only the rows removed by the crop instead of a false bottom band.
-        let png_y = LABEL_HEIGHT + source_height - 1 - source_y;
-        let row = source_y * source_width;
-        for crop_x in 0..bounds.width {
+    for display_y in 0..display_crop_height {
+        let crop_y = (((2 * display_y + 1) as u128 * bounds.height as u128)
+            / (2 * display_crop_height as u128)) as usize;
+        let png_y = LABEL_HEIGHT + display_crop_height - 1 - display_y;
+        for display_x in 0..display_crop_width {
+            let crop_x = (((2 * display_x + 1) as u128 * bounds.width as u128)
+                / (2 * display_crop_width as u128)) as usize;
             let source_x = bounds.x + crop_x;
-            if !region.retains(source_x, source_y) {
-                continue;
-            }
-            let value = values[row + source_x];
+            let source_y = bounds.y + crop_y;
+            let value = values[source_y * source_width + source_x];
             if value.is_finite() {
-                canvas.put_pixel((source_width + crop_x) as u32, png_y as u32, {
+                canvas.put_pixel((source_width + display_x) as u32, png_y as u32, {
                     let pixel = scale.to_u8(value);
                     Rgb([pixel, pixel, pixel])
                 });
@@ -165,6 +171,9 @@ fn glyph(character: char) -> [u8; 7] {
         'F' => [
             0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
         ],
+        'I' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ],
         'O' => [
             0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
         ],
@@ -173,6 +182,9 @@ fn glyph(character: char) -> [u8; 7] {
         ],
         'R' => [
             0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
         ],
         _ => [0; 7],
     }
@@ -199,7 +211,7 @@ mod tests {
         write_crop_preview(&output, &values, width, height, region).unwrap();
 
         let rendered = image::open(&output).unwrap().to_rgb8();
-        assert_eq!(rendered.dimensions(), (36, 30));
+        assert_eq!(rendered.dimensions(), (48, 30));
         assert_eq!(rendered.get_pixel(0, 29).0, [0, 0, 0]); // FITS bottom-left is PNG bottom-left.
         assert_eq!(rendered.get_pixel(8, 5).0, [255, 255, 255]); // BEFORE label.
         assert_eq!(rendered.get_pixel(width as u32 + 9, 5).0, [255, 255, 255]); // CROP label.
@@ -208,9 +220,7 @@ mod tests {
         assert_eq!(rendered.get_pixel(3, green_y).0, [255, 0, 0]);
         assert_eq!(
             rendered.get_pixel(8, green_y).0,
-            rendered.get_pixel(24 + 4, green_y).0
+            rendered.get_pixel(24 + 9, LABEL_HEIGHT as u32 + 11 - 5).0
         );
-        assert_eq!(rendered.get_pixel(24, 29).0, [0, 0, 0]); // outside the selected crop.
-        assert_eq!(rendered.get_pixel(24, 18).0, [0, 0, 0]); // source-aligned top padding.
     }
 }

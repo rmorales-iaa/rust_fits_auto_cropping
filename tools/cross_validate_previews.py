@@ -87,7 +87,9 @@ def main() -> int:
             png = np.asarray(opened.convert("RGB"))
         height, width = source.shape
         crop_height, crop_width = cropped.shape
-        expected_shape = (max(height, crop_height) + LABEL_HEIGHT, width + crop_width)
+        display_crop_height = height
+        display_crop_width = (crop_width * display_crop_height + crop_height // 2) // crop_height
+        expected_shape = (height + LABEL_HEIGHT, width + display_crop_width)
         if png.shape != (*expected_shape, 3):
             raise AssertionError(f"{png_path}: dimensions {png.shape} != {expected_shape}")
         finite = source[np.isfinite(source)]
@@ -107,15 +109,17 @@ def main() -> int:
                 raise AssertionError(
                     f"{png_path}: source pixel ({x},{y}) is {actual}, expected {expected_rgb}"
                 )
-        # Validate pixels represented in both panels, including the FITS lower-origin transform.
+        # Validate nearest-neighbor crop samples after aspect-preserving fit-to-height.
         for _ in range(args.samples):
-            x = int(rng.integers(crop_width))
-            y = int(rng.integers(crop_height))
+            display_x = int(rng.integers(display_crop_width))
+            display_y = int(rng.integers(display_crop_height))
+            x = ((2 * display_x + 1) * crop_width) // (2 * display_crop_width)
+            y = ((2 * display_y + 1) * crop_height) // (2 * display_crop_height)
             global_x, global_y = x0 + x, y0 + y
             if not (0 <= global_x < width and 0 <= global_y < height):
                 continue
-            right_y = LABEL_HEIGHT + height - 1 - global_y
-            right_x = width + x
+            right_y = LABEL_HEIGHT + display_crop_height - 1 - display_y
+            right_x = width + display_x
             if header.get("CLIPSHAP") == "CIRCLE":
                 radius = float(header["CLIPRAD"])
                 dx = global_x - float(header["CLIPCX"])

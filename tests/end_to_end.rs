@@ -922,9 +922,10 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
 
     let preview_path = product_path(&output, "previews", "circular-field.fits.png");
     let preview = image::open(&preview_path).unwrap().to_rgb8();
+    let display_crop_width = (crop_width * height + crop_height / 2) / crop_height;
     assert_eq!(
         preview.dimensions(),
-        (width as u32 + crop_width as u32, height as u32 + 18)
+        (width as u32 + display_crop_width as u32, height as u32 + 18)
     );
     let report: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
