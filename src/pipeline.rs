@@ -178,6 +178,14 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
             .collect()
     });
     outcomes.sort_by(|a, b| a.input.cmp(&b.input));
+    // Mask FITS files are implementation sidecars, not retained run products.
+    // Delete the trees before writing reports so they never advertise dangling
+    // paths after the command has exited.
+    layout.remove_transient_mask_directories()?;
+    for outcome in &mut outcomes {
+        outcome.output_mask = None;
+        outcome.output_reason_mask = None;
+    }
     report::write(
         &run_dir,
         &run_id,
@@ -665,13 +673,9 @@ fn process_one(
                                 "{e}; source retained unchanged because this integer action cannot represent added undefined pixels"
                             );
                             outcome.output_image = Some(image_path);
-                            if let Err(error) = publish_completion_manifest(
-                                layout,
-                                rel,
-                                run_id,
-                                &mut outcome,
-                                false,
-                            ) {
+                            if let Err(error) =
+                                publish_completion_manifest(layout, rel, run_id, &mut outcome)
+                            {
                                 outcome.status = OutcomeKind::Error;
                                 outcome.reason_code = "manifest_write_error";
                                 outcome.reason = format!(
@@ -775,7 +779,7 @@ fn process_one(
                         outcome.output_png = Some(preview);
                     }
                     if let Err(error) =
-                        publish_completion_manifest(layout, rel, run_id, &mut outcome, has_mask)
+                        publish_completion_manifest(layout, rel, run_id, &mut outcome)
                     {
                         outcome.status = OutcomeKind::Error;
                         outcome.reason_code = "manifest_write_error";
@@ -826,9 +830,7 @@ fn process_one(
                     return finish(outcome, timer);
                 }
                 outcome.output_image = Some(image_path);
-                if let Err(error) =
-                    publish_completion_manifest(layout, rel, run_id, &mut outcome, false)
-                {
+                if let Err(error) = publish_completion_manifest(layout, rel, run_id, &mut outcome) {
                     outcome.status = OutcomeKind::Error;
                     outcome.reason_code = "manifest_write_error";
                     outcome.reason = format!(
@@ -904,7 +906,7 @@ fn publish_passthrough_image(
     outcome
         .reason
         .push_str("; source preserved unchanged by symlink");
-    if let Err(error) = publish_completion_manifest(layout, relative, run_id, outcome, false) {
+    if let Err(error) = publish_completion_manifest(layout, relative, run_id, outcome) {
         outcome.status = OutcomeKind::Error;
         outcome.reason_code = "manifest_write_error";
         outcome.reason.push_str(&format!(
@@ -961,18 +963,12 @@ fn publish_completion_manifest(
     input_relative: &Path,
     run_id: &str,
     outcome: &mut FileOutcome,
-    has_mask: bool,
 ) -> anyhow::Result<()> {
     let manifest_path = layout.manifest_path(input_relative)?;
     let mut products = Vec::new();
     for (kind, path) in [
         ("science_image", outcome.output_image.as_deref()),
-        (
-            "mask",
-            has_mask.then_some(outcome.output_mask.as_deref()).flatten(),
-        ),
         ("preview", outcome.output_png.as_deref()),
-        ("reason_mask", outcome.output_reason_mask.as_deref()),
     ] {
         let Some(path) = path else { continue };
         let run_relative = path

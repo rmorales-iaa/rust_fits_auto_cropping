@@ -8,6 +8,17 @@ pub struct ZScale {
 
 impl ZScale {
     pub fn from_values(values: &[f64]) -> Option<Self> {
+        Self::from_iter_factory(|| values.iter().copied())
+    }
+
+    /// Estimate a stretch from a replayable sample source without materializing
+    /// its entire finite-pixel set. This keeps large crop previews bounded to
+    /// the deterministic 1,000-sample ZScale working set.
+    pub fn from_iter_factory<F, I>(values: F) -> Option<Self>
+    where
+        F: Fn() -> I,
+        I: Iterator<Item = f64>,
+    {
         const MAX_SAMPLES: usize = 1000;
         const CONTRAST: f64 = 0.25;
         const MAX_REJECT: f64 = 0.5;
@@ -15,16 +26,16 @@ impl ZScale {
         const REJECTION_SIGMA: f64 = 2.5;
         const MAX_ITERATIONS: usize = 5;
 
-        let finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
-        if finite.is_empty() {
+        let finite_count = values().filter(|value| value.is_finite()).count();
+        if finite_count == 0 {
             return None;
         }
-        let stride = (finite.len() / MAX_SAMPLES).max(1);
-        let mut samples: Vec<f64> = finite
-            .iter()
-            .step_by(stride)
+        let stride = (finite_count / MAX_SAMPLES).max(1);
+        let mut samples: Vec<f64> = values()
+            .filter(|value| value.is_finite())
+            .enumerate()
+            .filter_map(|(index, value)| (index % stride == 0).then_some(value))
             .take(MAX_SAMPLES)
-            .copied()
             .collect();
         samples.sort_by(f64::total_cmp);
         let n = samples.len();
@@ -168,6 +179,10 @@ mod tests {
         );
         assert!(ZScale::from_values(&with_invalid).is_some());
         assert!(ZScale::from_values(&[f64::NAN, f64::INFINITY]).is_none());
+        assert_eq!(
+            ZScale::from_values(&with_invalid),
+            ZScale::from_iter_factory(|| with_invalid.iter().copied())
+        );
     }
 
     #[test]

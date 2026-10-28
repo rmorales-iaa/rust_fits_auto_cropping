@@ -7,7 +7,8 @@ use tempfile::NamedTempFile;
 
 const LABEL_HEIGHT: usize = 18;
 
-/// Write a labeled source/crop PNG using one source-derived ZScale interval.
+/// Write a labeled source/crop PNG with an independently fitted ZScale interval
+/// for the source and the final crop, as image viewers do for separate images.
 pub fn write_crop_preview(
     destination: &Path,
     values: &[f64],
@@ -32,7 +33,15 @@ pub fn write_crop_preview(
     {
         bail!("preview crop bounds exceed the source image");
     }
-    let scale = ZScale::from_values(values).context("source has no finite pixels for ZScale")?;
+    let source_scale =
+        ZScale::from_values(values).context("source has no finite pixels for ZScale")?;
+    let crop_scale = ZScale::from_iter_factory(|| {
+        (bounds.y..bounds.y + bounds.height).flat_map(|y| {
+            let start = y * source_width + bounds.x;
+            values[start..start + bounds.width].iter().copied()
+        })
+    })
+    .context("final crop has no finite pixels for ZScale")?;
     // Fit the after-panel to the full source-panel height while preserving its
     // aspect ratio. Nearest-neighbor sampling is display-only and invents no
     // intermediate FITS sample values.
@@ -60,7 +69,7 @@ pub fn write_crop_preview(
         for x in 0..source_width {
             let value = values[row + x];
             if value.is_finite() {
-                let pixel = scale.to_u8(value);
+                let pixel = source_scale.to_u8(value);
                 canvas.put_pixel(x as u32, png_y as u32, Rgb([pixel, pixel, pixel]));
             }
             if let Some(color) = crop_boundary_color(region, x, y, source_width, source_height) {
@@ -80,7 +89,7 @@ pub fn write_crop_preview(
             let value = values[source_y * source_width + source_x];
             if value.is_finite() {
                 canvas.put_pixel((source_width + display_x) as u32, png_y as u32, {
-                    let pixel = scale.to_u8(value);
+                    let pixel = crop_scale.to_u8(value);
                     Rgb([pixel, pixel, pixel])
                 });
             }
@@ -218,9 +227,53 @@ mod tests {
         let green_y = LABEL_HEIGHT as u32 + height as u32 - 1 - 4;
         assert_eq!(rendered.get_pixel(4, green_y).0, [0, 255, 0]);
         assert_eq!(rendered.get_pixel(3, green_y).0, [255, 0, 0]);
+        let shared_sample = values[4 * width + 8];
+        let crop_values: Vec<f64> = (2..8)
+            .flat_map(|y| values[y * width + 4..y * width + 16].iter().copied())
+            .collect();
+        let crop_scale = ZScale::from_values(&crop_values).unwrap();
+        let crop_gray = crop_scale.to_u8(shared_sample);
         assert_eq!(
-            rendered.get_pixel(8, green_y).0,
-            rendered.get_pixel(24 + 9, LABEL_HEIGHT as u32 + 11 - 5).0
+            rendered.get_pixel(24 + 9, LABEL_HEIGHT as u32 + 11 - 5).0,
+            [crop_gray; 3]
         );
+    }
+
+    #[test]
+    fn crop_panel_uses_its_own_zscale_interval() {
+        let temp = tempdir().unwrap();
+        let output = temp.path().join("crop.png");
+        let (width, height) = (20, 10);
+        let mut values: Vec<f64> = (0..width * height).map(|index| index as f64).collect();
+        let region = CropRect {
+            x: 10,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        // The selected crop samples occupy a distinct range from the source
+        // extrema, making shared and crop-derived stretches observably differ.
+        for y in 0..height {
+            for x in 10..20 {
+                values[y * width + x] = 10.0 + (y * 10 + x - 10) as f64;
+            }
+        }
+        write_crop_preview(&output, &values, width, height, region).unwrap();
+        let rendered = image::open(&output).unwrap().to_rgb8();
+        let source_scale = ZScale::from_values(&values).unwrap();
+        let mut crop_samples = Vec::new();
+        for y in 0..height {
+            for x in 10..20 {
+                crop_samples.push(values[y * width + x]);
+            }
+        }
+        let crop_scale = ZScale::from_values(&crop_samples).unwrap();
+        let crop_center_x = width as u32 + 5;
+        let crop_center_y = LABEL_HEIGHT as u32 + height as u32 - 1 - 5;
+        let actual_crop = rendered.get_pixel(crop_center_x, crop_center_y).0[0];
+        let expected_crop = crop_scale.to_u8(values[5 * width + 15]);
+        let shared_scale_value = source_scale.to_u8(values[5 * width + 15]);
+        assert_eq!(actual_crop, expected_crop);
+        assert_ne!(actual_crop, shared_scale_value);
     }
 }

@@ -63,6 +63,26 @@ impl OutputLayout {
         &self.run
     }
 
+    /// Remove transient binary action-mask trees before reports are finalized.
+    /// These sidecars are used only while writing and checking science images;
+    /// they are intentionally not retained as run outputs.
+    pub fn remove_transient_mask_directories(&self) -> anyhow::Result<()> {
+        for name in ["masks", "reason_masks"] {
+            let path = self.run.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    remove_entry_without_following_links(&path)?;
+                    sync_parent(&path)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("checking {}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve an input-relative destination after validating every component.
     pub fn product_path(
         &self,
@@ -121,6 +141,29 @@ impl OutputLayout {
         filename.push(".complete.json");
         Ok(PathBuf::from(filename))
     }
+}
+
+impl Drop for OutputLayout {
+    fn drop(&mut self) {
+        // Best-effort fallback for early returns and unwinding. The normal
+        // pipeline calls the checked cleanup method and reports any failures.
+        for name in ["masks", "reason_masks"] {
+            let path = self.run.join(name);
+            if fs::symlink_metadata(&path).is_ok() {
+                let _ = remove_entry_without_following_links(&path);
+            }
+        }
+    }
+}
+
+fn remove_entry_without_following_links(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+    .with_context(|| format!("removing transient output entry {}", path.display()))
 }
 
 #[derive(Clone, Copy)]
@@ -290,5 +333,26 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn drop_removes_transient_mask_trees_on_early_exit() {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir(&input).unwrap();
+        let layout = OutputLayout::prepare(&output, &input, "cleanup-test").unwrap();
+        let masks = layout.run().join("masks/nested");
+        let reasons = layout.run().join("reason_masks/nested");
+        fs::create_dir_all(&masks).unwrap();
+        fs::create_dir_all(&reasons).unwrap();
+        fs::write(masks.join("mask.fits"), b"temporary").unwrap();
+        fs::write(reasons.join("reason.fits"), b"temporary").unwrap();
+        let run = layout.run().to_path_buf();
+
+        drop(layout);
+
+        assert!(!run.join("masks").exists());
+        assert!(!run.join("reason_masks").exists());
     }
 }

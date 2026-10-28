@@ -97,6 +97,16 @@ def verify_checksums(path: Path, hdus: fits.HDUList, required: bool = True) -> N
         raise AssertionError(f"{path}: Astropy checksum verification failed")
 
 
+def verify_crop_samples(original: np.ndarray, actual: np.ndarray, x0: int, y0: int, path: Path) -> None:
+    """Check crop pixels against their input region without mask sidecars."""
+    expected = original[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]]
+    equal_nan = np.issubdtype(np.result_type(expected.dtype, actual.dtype), np.floating)
+    if expected.shape != actual.shape or not np.array_equal(
+        actual, expected, equal_nan=equal_nan
+    ):
+        raise AssertionError(f"{path}: rectangular crop samples differ from the input region")
+
+
 def verify_provenance(path: Path, header: fits.Header) -> None:
     if not str(header.get("CREATOR", "")).startswith("rust_fits_auto_cropping v"):
         raise AssertionError(f"{path}: CREATOR program/version card is missing")
@@ -362,13 +372,7 @@ def verify_tree(
                     or int(header.get("NAXIS2", -1)) != actual.shape[0]
                 ):
                     raise AssertionError(f"{output_path}: NAXIS cards disagree with crop dimensions")
-                samples_equal = (
-                    np.array_equal(expected, actual, equal_nan=True)
-                    if np.issubdtype(actual.dtype, np.floating)
-                    else np.array_equal(expected, actual)
-                )
-                if not samples_equal:
-                    raise AssertionError(f"{output_path}: rectangular crop samples changed")
+                verify_crop_samples(original, actual, x0, y0, output_path)
             elif original.shape != actual.shape:
                 raise AssertionError(f"{output_path}: dimensions changed without crop provenance")
             if mask_path.exists():
@@ -447,7 +451,9 @@ def verify_tree(
                 if (output_dir / "reason_masks" / relative).exists():
                     raise AssertionError(f"{output_path}: reason plane exists without a binary mask")
                 verify_checksums(output_path, output, required=False)
-                if not np.array_equal(actual, original, equal_nan=True):
+                if is_crop:
+                    verify_crop_samples(original, actual, x0, y0, output_path)
+                elif not np.array_equal(actual, original, equal_nan=True):
                     raise AssertionError(f"{output_path}: kept image differs from its input")
         if fitsverify:
             reason_path = output_dir / "reason_masks" / relative

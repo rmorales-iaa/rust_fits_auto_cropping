@@ -156,40 +156,8 @@ fn artifact() -> Vec<f64> {
     data
 }
 
-fn read_mask(path: &Path) -> Vec<u8> {
-    let f = FitsFile::from_file(path).unwrap();
-    match &f.primary().data {
-        HduData::Image(img) => match &img.pixels {
-            PixelData::U8(v) => v.clone(),
-            _ => panic!("expected byte mask"),
-        },
-        _ => panic!("expected image"),
-    }
-}
-
-fn read_reason_mask(path: &Path) -> (Vec<usize>, Vec<u8>, String) {
-    let f = FitsFile::from_file(path).unwrap();
-    let image = match &f.primary().data {
-        HduData::Image(img) => img,
-        _ => panic!("expected reason image"),
-    };
-    let values = match &image.pixels {
-        PixelData::U8(values) => values.clone(),
-        _ => panic!("expected byte reason plane"),
-    };
-    (
-        image.axes.clone(),
-        values,
-        f.primary()
-            .header
-            .get_string("RSCHEME")
-            .unwrap()
-            .to_string(),
-    )
-}
-
 #[test]
-fn optional_reason_plane_records_actions_and_is_checksummed_in_manifest() {
+fn transient_mask_trees_are_removed_and_not_listed_as_run_products() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
     let output = t.path().join("out");
@@ -200,39 +168,26 @@ fn optional_reason_plane_records_actions_and_is_checksummed_in_manifest() {
     create_fits(&input.join("reason.fits"), -64, 96, 96, &pixels);
 
     assert!(invoke_reason_mask(&input, &output, &input.join("config.toml")).success());
-    let reason_path = product_path(&output, "reason_masks", "reason.fits");
-    let (axes, codes, scheme) = read_reason_mask(&reason_path);
-    assert_eq!(axes, [96, 96]);
-    assert_eq!(scheme, "PIXACT1");
-    assert!(codes.iter().all(|code| *code <= 3));
-    assert_eq!(codes[0], 3, "pre-existing undefined takes precedence");
-    assert!(
-        codes[1..24].contains(&1),
-        "accepted artifact boundary is marked"
-    );
-    assert!(codes.contains(&0));
+    assert!(!run_dir(&output).join("masks").exists());
+    assert!(!run_dir(&output).join("reason_masks").exists());
 
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["schema_version"], 8);
     assert_eq!(summary["output_images"], summary["total"]);
-    assert_eq!(
-        summary["files"][0]["output_reason_mask"],
-        reason_path.to_string_lossy().as_ref()
-    );
+    assert!(summary["files"][0]["output_reason_mask"].is_null());
     let manifest_path = run_dir(&output)
         .join("manifests")
         .join("reason.fits.complete.json");
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
-    let reason_product = manifest["products"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|product| product["kind"] == "reason_mask")
-        .unwrap();
-    assert_eq!(reason_product["sha256"], file_sha256(&reason_path));
-    assert_eq!(reason_product["sha256"].as_str().unwrap().len(), 64);
+    assert!(
+        manifest["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|product| { product["kind"] != "mask" && product["kind"] != "reason_mask" })
+    );
 }
 
 #[test]
@@ -298,10 +253,8 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
                 .is_some_and(|value| value.contains("generated_utc="))
     }));
     assert!(f.primary().verify_datasum().is_ok());
-    let mask = read_mask(&product_path(&output, "masks", "float.fits"));
-    assert_eq!(mask.len(), 96 * 96);
-    assert_eq!(mask[0], 0);
-    assert_eq!(mask[95 * 96 + 95], 0);
+    assert!(!run_dir(&output).join("masks").exists());
+    assert!(!run_dir(&output).join("reason_masks").exists());
     assert!(
         fs::symlink_metadata(product_path(&output, "images", "clean.fits"))
             .unwrap()
@@ -326,10 +279,6 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
         clean_manifest["products"][0]["sha256"],
         file_sha256(&product_path(&output, "images", "clean.fits"))
     );
-    let m = FitsFile::from_file(product_path(&output, "masks", "float.fits")).unwrap();
-    assert_eq!(m.primary().header.get_float("CRPIX1"), Some(48.5));
-    assert_eq!(m.primary().header.get_string("BUNIT"), None);
-    assert_eq!(m.primary().header.get_string("CTYPE1"), Some("RA---TAN"));
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     let float_result = v["files"]
@@ -543,9 +492,15 @@ fn detection_is_invariant_to_scaling_and_descriptive_headers() {
     );
     file.to_file(&scaled).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let base_mask = read_mask(&product_path(&output, "masks", "base.fits"));
-    let scaled_mask = read_mask(&product_path(&output, "masks", "scaled.fits"));
-    assert_eq!(base_mask, scaled_mask);
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    let files = summary["files"].as_array().unwrap();
+    assert_eq!(files[0]["input"], "base.fits");
+    assert_eq!(files[1]["input"], "scaled.fits");
+    assert_eq!(
+        files[0]["proposed_mask_pixels"],
+        files[1]["proposed_mask_pixels"]
+    );
 }
 
 #[test]
@@ -665,8 +620,7 @@ fn existing_blank_pixels_remain_undefined_and_are_not_newly_masked() {
         .set("BLANK", HeaderValue::Integer(i16::MIN as i64), None);
     file.to_file(input.join("with-blank.fits")).unwrap();
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
-    let mask = read_mask(&product_path(&output, "masks", "with-blank.fits"));
-    assert_eq!(mask[48 * 96 + 48], 0);
+    assert!(!run_dir(&output).join("masks").exists());
     let out = FitsFile::from_file(product_path(&output, "images", "with-blank.fits")).unwrap();
     assert_eq!(out.primary().header.get_int("BLANK"), Some(i16::MIN as i64));
     let img = match &out.primary().data {
@@ -792,16 +746,8 @@ fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference
         );
     }
     assert!(cropped.primary().verify_datasum().is_ok());
-    let mask_file =
-        FitsFile::from_file(product_path(&output, "masks", "four-corners.fits")).unwrap();
-    assert_eq!(
-        mask_file.primary().header.require_int("NAXIS1").unwrap(),
-        width as i64
-    );
-    assert_eq!(
-        mask_file.primary().header.require_int("NAXIS2").unwrap(),
-        height as i64
-    );
+    assert!(!run_dir(&output).join("masks").exists());
+    assert!(!run_dir(&output).join("reason_masks").exists());
 }
 
 #[test]
@@ -1133,8 +1079,7 @@ fn int32_and_odd_rectangular_images_keep_dimensions() {
     create_fits(&input.join("odd-int32.fits"), 32, width, height, &data);
     assert!(invoke(&input, &output, &input.join("config.toml")).success());
     let out = FitsFile::from_file(product_path(&output, "images", "odd-int32.fits")).unwrap();
-    let mask = read_mask(&product_path(&output, "masks", "odd-int32.fits"));
-    assert_eq!(mask.len(), width * height);
+    assert!(!run_dir(&output).join("masks").exists());
     let img = match &out.primary().data {
         HduData::Image(v) => v,
         _ => panic!("expected image"),
@@ -1231,16 +1176,13 @@ fn serial_and_parallel_workers_produce_identical_masks() {
             assert_eq!(a[key], b[key], "parallel mismatch in {key}");
         }
     }
+    assert!(!run_dir(&serial).join("masks").exists());
+    assert!(!run_dir(&serial).join("reason_masks").exists());
+    assert!(!run_dir(&parallel).join("masks").exists());
+    assert!(!run_dir(&parallel).join("reason_masks").exists());
     for name in ["a.fits", "b.fits"] {
-        let serial_mask = run_dir(&serial).join("masks").join(name);
-        let parallel_mask = run_dir(&parallel).join("masks").join(name);
-        assert_eq!(serial_mask.exists(), parallel_mask.exists());
-        if serial_mask.exists() {
-            assert_eq!(read_mask(&serial_mask), read_mask(&parallel_mask));
-        } else {
-            assert!(run_dir(&serial).join("images").join(name).exists());
-            assert!(run_dir(&parallel).join("images").join(name).exists());
-        }
+        assert!(run_dir(&serial).join("images").join(name).exists());
+        assert!(run_dir(&parallel).join("images").join(name).exists());
     }
 }
 

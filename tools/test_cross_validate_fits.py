@@ -11,6 +11,7 @@ import numpy as np
 from astropy.io.fits import Header
 
 from tools.cross_validate_fits import (
+    verify_crop_samples,
     verify_preserved_header,
     verify_passthrough_symlink,
     verify_reason_codes,
@@ -132,6 +133,17 @@ class VerifyReasonCodeTests(unittest.TestCase):
         codes = np.array([[0, 2]], dtype=np.uint8)
         with self.assertRaisesRegex(AssertionError, "code 3"):
             verify_reason_codes(original, header, exclusion, codes, True, Path("bad-reasons.fits"))
+
+
+class VerifyCropSamplesTests(unittest.TestCase):
+    def test_crop_is_checked_against_the_exact_source_region_without_masks(self) -> None:
+        source = np.arange(30, dtype=np.int16).reshape(5, 6)
+        crop = source[1:4, 2:5].copy()
+        verify_crop_samples(source, crop, 2, 1, Path("crop.fits"))
+
+        crop[0, 0] += 1
+        with self.assertRaisesRegex(AssertionError, "crop samples differ"):
+            verify_crop_samples(source, crop, 2, 1, Path("bad-crop.fits"))
 
 
 class VerifyHeaderPolicyTests(unittest.TestCase):

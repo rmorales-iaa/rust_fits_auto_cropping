@@ -94,6 +94,8 @@ def main() -> int:
             raise AssertionError(f"{png_path}: dimensions {png.shape} != {expected_shape}")
         finite = source[np.isfinite(source)]
         lower, upper = ZScaleInterval().get_limits(finite)
+        crop_finite = cropped[np.isfinite(cropped)]
+        crop_lower, crop_upper = ZScaleInterval().get_limits(crop_finite)
         rng = np.random.default_rng(0)
         points = [(int(rng.integers(width)), int(rng.integers(height))) for _ in range(args.samples)]
         for x, y in points:
@@ -132,7 +134,7 @@ def main() -> int:
             crop_value = cropped[y, x]
             if np.isfinite(crop_value):
                 right = tuple(png[right_y, right_x])
-                expected = expected_u8(float(source_value), float(lower), float(upper))
+                expected = expected_u8(float(crop_value), float(crop_lower), float(crop_upper))
                 if right != (expected, expected, expected):
                     raise AssertionError(
                         f"{png_path}: crop panel mismatch at source ({global_x},{global_y})"
