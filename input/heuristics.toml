@@ -15,4 +15,10 @@ minimum_evidence_ratio = 1.25
 maximum_evidence_ratio = 5.0
 valid_pixel_loss_cost = 1.5
 minimum_net_utility = 0.001
-maximum_crop_sacrifice_fraction = 0.41
+maximum_crop_sacrifice_fraction = 0.25 # fallback for older files without the area-count table.
+
+[heuristics.crop_sacrifice_fraction_by_border_component_count]
+one = 0.25
+two = 0.30
+three = 0.35
+four_or_more = 0.41

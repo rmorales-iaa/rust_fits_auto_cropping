@@ -169,6 +169,7 @@ mod tests {
             valid_pixel_loss_cost: 1.5,
             minimum_net_utility: 0.001,
             maximum_crop_sacrifice_fraction: 0.25,
+            crop_sacrifice_fraction_by_border_component_count: None,
         }
     }
 

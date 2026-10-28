@@ -485,25 +485,26 @@ fn process_one(
                         .max(1);
                     let crop_sacrifice_fraction =
                         outcome.unmasked_pixels_sacrificed as f64 / remaining_defined as f64;
-                    crop_accepted = crop_sacrifice_fraction
-                        <= heuristics.heuristics.maximum_crop_sacrifice_fraction
+                    let crop_sacrifice_limit = heuristics
+                        .heuristics
+                        .crop_sacrifice_limit(detection.accepted_components);
+                    crop_accepted = crop_sacrifice_fraction <= crop_sacrifice_limit
                         && outcome.net_utility >= heuristics.heuristics.minimum_net_utility;
                     if !crop_accepted {
                         outcome.status = OutcomeKind::Kept;
-                        outcome.reason_code = if crop_sacrifice_fraction
-                            > heuristics.heuristics.maximum_crop_sacrifice_fraction
-                        {
+                        outcome.reason_code = if crop_sacrifice_fraction > crop_sacrifice_limit {
                             "crop_sacrifice_limit"
                         } else {
                             "crop_utility_rejected"
                         };
                     }
                     outcome.reason.push_str(&format!(
-                        "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels and sacrifices {} unmasked pixels ({:.1}% of remaining defined area; configured maximum {:.1}%); crop utility {:.4} (benefit {:.4} - loss {:.4}) {}",
+                        "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels and sacrifices {} unmasked pixels ({:.1}% of remaining defined area; limit {:.1}% for {} accepted border-connected area(s)); crop utility {:.4} (benefit {:.4} - loss {:.4}) {}",
                         rect.shape_name(), bounds.x, bounds.y, bounds.width, bounds.height, rect.retained_pixels(),
                         outcome.artifact_pixels_removed, outcome.unmasked_pixels_sacrificed,
                         100.0 * crop_sacrifice_fraction,
-                        100.0 * heuristics.heuristics.maximum_crop_sacrifice_fraction,
+                        100.0 * crop_sacrifice_limit,
+                        detection.accepted_components,
                         outcome.net_utility, outcome.artifact_benefit, outcome.valid_pixel_loss,
                         if crop_accepted { "accepted" } else { "rejected; source retained" }
                     ));

@@ -31,6 +31,22 @@ CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. `--png` is 
 | `heuristics.maximum_evidence_ratio` | 5.0 | Cap on the diagnostic evidence ratio so a single extreme tile cannot dominate the decision. |
 | `heuristics.valid_pixel_loss_cost` | 1.5 | Penalty weight for potentially valid science pixels lost. |
 | `heuristics.minimum_net_utility` | 0.001 | Minimum benefit-minus-loss score required to clip. |
-| `heuristics.maximum_crop_sacrifice_fraction` | 0.41 | Maximum fraction of defined non-artifact pixels that crop geometry may sacrifice. If exceeded, keep the original image unchanged. |
+| `heuristics.maximum_crop_sacrifice_fraction` | 0.25 | Legacy fallback for heuristic files without the component-count table. |
+| `heuristics.crop_sacrifice_fraction_by_border_component_count.one` | 0.25 | Crop sacrifice cap for one accepted contiguous artifact area touching an image border. |
+| `.two` | 0.30 | Cap for two accepted border-touching areas. |
+| `.three` | 0.35 | Cap for three accepted border-touching areas. |
+| `.four_or_more` | 0.41 | Cap for four or more accepted border-touching areas. |
 
-For candidate fraction `f` and capped evidence ratio `e`, the current diagnostic decision computes artifact benefit `f*e`, valid-pixel loss `cost*f/(1-f)`, and net utility `benefit-loss`. Each disconnected border component must independently pass minimum tile count, minimum/maximum fraction, minimum evidence and minimum utility; aggregate gates also apply to accepted components together. The score is a decision index, **not a calibrated probability or scientific loss estimate**. No rule expands the mask beyond the border-connected candidate. Crop mode is reached only after this mask utility passes; it recomputes loss from additional unmasked geometry sacrifice and keeps the source when that sacrifice exceeds `maximum_crop_sacrifice_fraction` of defined non-artifact pixels. The [audit](scientific-audit-2026-10-27.md) identifies remaining inconsistency between mask/crop policy and uncalibrated utility. The [active plan](scientific-improvement-plan.md) defines a future versioned, common decision policy; its proposed keys are not supported by this release. Calibrate defaults on development/calibration groups and assess them on untouched held-out frames before production use.
+```toml
+[heuristics]
+# Fallback for older configurations without the tier table.
+maximum_crop_sacrifice_fraction = 0.25
+
+[heuristics.crop_sacrifice_fraction_by_border_component_count]
+one = 0.25
+two = 0.30
+three = 0.35
+four_or_more = 0.41
+```
+
+For candidate fraction `f` and capped evidence ratio `e`, the current diagnostic decision computes artifact benefit `f*e`, valid-pixel loss `cost*f/(1-f)`, and net utility `benefit-loss`. Each disconnected border component must independently pass minimum tile count, minimum/maximum fraction, minimum evidence and minimum utility; aggregate gates also apply to accepted components together. The score is a decision index, **not a calibrated probability or scientific loss estimate**. No rule expands the mask beyond the border-connected candidate. Crop mode is reached only after this mask utility passes; it recomputes loss from additional unmasked geometry sacrifice and chooses the configured cap from the count of accepted border-connected components and keeps the source when its sacrifice exceeds that cap. Each counted component is connected to at least one outer image edge; one component that touches several edges still counts once. The caps are an operational heuristic and have not been calibrated against independent science labels. The [audit](scientific-audit-2026-10-27.md) identifies remaining inconsistency between mask/crop policy and uncalibrated utility. The [active plan](scientific-improvement-plan.md) defines a future versioned, common decision policy; its proposed keys are not supported by this release. Calibrate defaults on development/calibration groups and assess them on untouched held-out frames before production use.

@@ -87,11 +87,39 @@ pub struct HeuristicRules {
     pub valid_pixel_loss_cost: f64,
     pub minimum_net_utility: f64,
     #[serde(default = "default_maximum_crop_sacrifice_fraction")]
+    /// Legacy/fallback limit used by heuristic files without a component-count table.
     pub maximum_crop_sacrifice_fraction: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop_sacrifice_fraction_by_border_component_count: Option<CropSacrificeLimits>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CropSacrificeLimits {
+    pub one: f64,
+    pub two: f64,
+    pub three: f64,
+    pub four_or_more: f64,
+}
+
+impl HeuristicRules {
+    /// Return the configured cap for accepted 4-connected artifact components
+    /// that each touch at least one image border.
+    pub fn crop_sacrifice_limit(&self, border_component_count: usize) -> f64 {
+        let Some(limits) = self.crop_sacrifice_fraction_by_border_component_count else {
+            return self.maximum_crop_sacrifice_fraction;
+        };
+        match border_component_count {
+            0 | 1 => limits.one,
+            2 => limits.two,
+            3 => limits.three,
+            _ => limits.four_or_more,
+        }
+    }
 }
 
 fn default_maximum_crop_sacrifice_fraction() -> f64 {
-    0.41
+    0.25
 }
 
 impl Config {
@@ -171,6 +199,20 @@ impl HeuristicsConfig {
         {
             bail!("heuristics.maximum_crop_sacrifice_fraction must be in [0, 1]");
         }
+        if let Some(limits) = h.crop_sacrifice_fraction_by_border_component_count {
+            let values = [limits.one, limits.two, limits.three, limits.four_or_more];
+            if values
+                .iter()
+                .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+            {
+                bail!("crop sacrifice limits by border-component count must be in [0, 1]");
+            }
+            if values.windows(2).any(|pair| pair[0] > pair[1]) {
+                bail!(
+                    "crop sacrifice limits must not decrease as border-component count increases"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -211,7 +253,13 @@ minimum_evidence_ratio = 1.25
 maximum_evidence_ratio = 5.0
 valid_pixel_loss_cost = 1.5
 minimum_net_utility = 0.001
-maximum_crop_sacrifice_fraction = 0.41
+maximum_crop_sacrifice_fraction = 0.25
+
+[heuristics.crop_sacrifice_fraction_by_border_component_count]
+one = 0.25
+two = 0.30
+three = 0.35
+four_or_more = 0.41
 "#;
 
 #[cfg(test)]
@@ -237,9 +285,26 @@ mod tests {
     #[test]
     fn rejects_crop_sacrifice_fraction_outside_unit_interval() {
         let text = DEFAULT_HEURISTICS.replace(
-            "maximum_crop_sacrifice_fraction = 0.41",
+            "maximum_crop_sacrifice_fraction = 0.25",
             "maximum_crop_sacrifice_fraction = 1.1",
         );
+        let config: HeuristicsConfig = toml::from_str(&text).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn crop_sacrifice_limit_increases_by_count_of_border_connected_areas() {
+        let config: HeuristicsConfig = toml::from_str(DEFAULT_HEURISTICS).unwrap();
+        assert_eq!(config.heuristics.crop_sacrifice_limit(1), 0.25);
+        assert_eq!(config.heuristics.crop_sacrifice_limit(2), 0.30);
+        assert_eq!(config.heuristics.crop_sacrifice_limit(3), 0.35);
+        assert_eq!(config.heuristics.crop_sacrifice_limit(4), 0.41);
+        assert_eq!(config.heuristics.crop_sacrifice_limit(8), 0.41);
+    }
+
+    #[test]
+    fn rejects_decreasing_crop_sacrifice_limits() {
+        let text = DEFAULT_HEURISTICS.replace("two = 0.30", "two = 0.20");
         let config: HeuristicsConfig = toml::from_str(&text).unwrap();
         assert!(config.validate().is_err());
     }
