@@ -15,13 +15,13 @@ pub struct Args {
     /// Input directory containing FITS images.
     #[arg(long)]
     pub input_dir: PathBuf,
-    /// Output root; each run is isolated under runs/<UTC-run-id>/.
+    /// Output root; runs are isolated by default unless --flat-output is used.
     #[arg(long)]
     pub output_dir: PathBuf,
-    /// Write directly under the output directory instead of output/runs/<run-id>/.
+    /// Write science images at the output root; previews stay in previews/.
     #[arg(long)]
     pub flat_output: bool,
-    /// Remove all existing entries in the output root before processing.
+    /// Delete all existing entries in the output root before processing.
     #[arg(long)]
     pub sanitize_output: bool,
     /// TOML configuration. Defaults to input/config.toml when present.
@@ -42,7 +42,7 @@ pub struct Args {
     /// Include nested directories in input discovery.
     #[arg(long)]
     pub recursive: bool,
-    /// Worker threads; 0 uses all available logical CPUs, subject to the memory budget.
+    /// Worker threads (default 4 in config); 0 requests all logical CPUs, subject to CPU and memory limits.
     #[arg(long)]
     pub threads: Option<usize>,
     /// Inspect and report candidates without writing images, symlinks or masks.
@@ -51,7 +51,7 @@ pub struct Args {
     /// Total memory budget shared by image workers (MiB).
     #[arg(long)]
     pub memory_budget_mib: Option<usize>,
-    /// Allow conflicting products within the current isolated run to be replaced.
+    /// Allow existing output products to be replaced.
     #[arg(long)]
     pub overwrite: bool,
 }

@@ -16,6 +16,8 @@ Usage: $(basename "$0") [--year YEAR]
 
 Without arguments, process every year from $FIRST_YEAR through $LAST_YEAR.
 Use --year YEAR to process one year (for example, --year 2002).
+Each run deletes existing contents of that year's dedicated science_calibrated
+output directory before processing. Sibling bias/dark/flat links are unaffected.
 Set RUST_FITS_AUTO_CROPPING_BIN to override the executable. By default the
 script uses rust_fits_auto_cropping from PATH, then this repository's release binary.
 USAGE
