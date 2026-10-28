@@ -408,24 +408,22 @@ fn process_one(
                 } else {
                     None
                 };
+                let crop_wcs_mask_fallback = matches!(config.processing.mode, ProcessingMode::Crop)
+                    && image.crop_wcs_unsupported.is_some();
                 let mut crop_accepted = false;
                 if matches!(config.processing.mode, ProcessingMode::Crop) && crop.is_none() {
-                    outcome.status = OutcomeKind::Kept;
-                    outcome.reason_code = if image.crop_wcs_unsupported.is_some() {
-                        "crop_unsupported_wcs"
+                    if crop_wcs_mask_fallback {
+                        outcome.reason_code = "crop_wcs_mask_fallback";
+                        outcome.reason.push_str(
+                            "; crop was omitted and the detected border pixels were applied as a dimension-preserving full-frame mask",
+                        );
                     } else {
-                        "crop_geometry_unavailable"
-                    };
-                    let reason = image.crop_wcs_unsupported.as_ref().map_or_else(
-                        || {
-                            "no positive-area rectangle excludes every detected artifact pixel"
-                                .into()
-                        },
-                        |reason| format!("crop declined: {reason}"),
-                    );
-                    outcome.reason.push_str("; ");
-                    outcome.reason.push_str(&reason);
-                    outcome.reason.push_str("; source retained unchanged");
+                        outcome.status = OutcomeKind::Kept;
+                        outcome.reason_code = "crop_geometry_unavailable";
+                        outcome.reason.push_str(
+                            "; no positive-area rectangle excludes every detected artifact pixel; source retained unchanged",
+                        );
+                    }
                 }
                 if options.dry_run && detection.accepted && outcome.status == OutcomeKind::Clipped {
                     outcome.status = OutcomeKind::Proposed;
@@ -611,7 +609,9 @@ fn process_one(
                             ),
                             true,
                         )
-                    } else if matches!(config.processing.mode, ProcessingMode::Mask) {
+                    } else if matches!(config.processing.mode, ProcessingMode::Mask)
+                        || crop_wcs_mask_fallback
+                    {
                         (
                             write_products(&image_path, &mask_path, &image, &detection.mask),
                             true,
@@ -758,6 +758,8 @@ fn process_one(
                             outcome.reason_code = "crop_applied";
                         } else if matches!(config.processing.mode, ProcessingMode::Mask) {
                             outcome.reason_code = "mask_applied";
+                        } else if crop_wcs_mask_fallback {
+                            outcome.reason_code = "crop_wcs_mask_fallback";
                         }
                     }
                     if crop_accepted && let Some(preview) = png_path {

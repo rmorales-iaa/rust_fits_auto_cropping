@@ -751,7 +751,7 @@ fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference
 }
 
 #[test]
-fn crop_mode_keeps_images_with_lookup_table_distortions() {
+fn crop_mode_processes_lookup_distortion_images_with_full_frame_mask_fallback() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
     let output = t.path().join("out");
@@ -771,22 +771,32 @@ fn crop_mode_keeps_images_with_lookup_table_distortions() {
     fits.to_file(&source).unwrap();
 
     assert!(invoke(&input, &output, &config_path).success());
+    let image_path = product_path(&output, "images", "lookup-distortion.fits");
     assert!(
-        fs::symlink_metadata(product_path(&output, "images", "lookup-distortion.fits"))
+        !fs::symlink_metadata(&image_path)
             .unwrap()
             .file_type()
             .is_symlink()
     );
-    assert!(!product_path(&output, "masks", "lookup-distortion.fits").exists());
+    let output_image = FitsFile::from_file(image_path).unwrap();
+    assert!(matches!(
+        &output_image.primary().data,
+        HduData::Image(image) if matches!(&image.pixels, PixelData::F32(values)
+            if !values[0].is_finite() && values[95 * 96 + 95].is_finite())
+    ));
+    assert!(!run_dir(&output).join("masks").exists());
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
-    assert_eq!(summary["kept"], 1);
+    assert_eq!(summary["clipped"], 1);
+    assert_eq!(summary["files"][0]["status"], "clipped");
+    assert_eq!(summary["files"][0]["reason_code"], "crop_wcs_mask_fallback");
     assert!(
         summary["files"][0]["reason"]
             .as_str()
             .unwrap()
             .contains("lookup-table distortion")
     );
+    assert!(summary["files"][0]["output_mask"].is_null());
 }
 
 #[test]

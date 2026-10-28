@@ -147,6 +147,11 @@ pub fn read_image(
         bail!("FITS array size does not match NAXIS dimensions");
     }
     let crop_wcs_unsupported = crop_wcs_unsupported(&hdu.header);
+    if let Some(reason) = &crop_wcs_unsupported {
+        metadata_warnings.push(format!(
+            "metadata note: {reason}; pixel statistics are still processed"
+        ));
+    }
     Ok(Ok(Image {
         width,
         height,
