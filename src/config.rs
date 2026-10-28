@@ -91,7 +91,7 @@ pub struct HeuristicRules {
 }
 
 fn default_maximum_crop_sacrifice_fraction() -> f64 {
-    0.25
+    0.41
 }
 
 impl Config {
@@ -211,7 +211,7 @@ minimum_evidence_ratio = 1.25
 maximum_evidence_ratio = 5.0
 valid_pixel_loss_cost = 1.5
 minimum_net_utility = 0.001
-maximum_crop_sacrifice_fraction = 0.25
+maximum_crop_sacrifice_fraction = 0.41
 "#;
 
 #[cfg(test)]
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn rejects_crop_sacrifice_fraction_outside_unit_interval() {
         let text = DEFAULT_HEURISTICS.replace(
-            "maximum_crop_sacrifice_fraction = 0.25",
+            "maximum_crop_sacrifice_fraction = 0.41",
             "maximum_crop_sacrifice_fraction = 1.1",
         );
         let config: HeuristicsConfig = toml::from_str(&text).unwrap();

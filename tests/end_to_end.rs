@@ -80,7 +80,7 @@ fn config(dir: &Path) {
         "[processing]\nthreads=2\nrecursive=false\nmemory_budget_mib=1024\nmaximum_image_mib=256\nmode=\"mask\"\n",
     )
     .unwrap();
-    fs::write(dir.join("heuristics.toml"), "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\nmaximum_crop_sacrifice_fraction=0.25\n").unwrap();
+    fs::write(dir.join("heuristics.toml"), "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\nmaximum_crop_sacrifice_fraction=0.41\n").unwrap();
 }
 
 fn invoke(input: &Path, output: &Path, cfg: &Path) -> std::process::ExitStatus {
@@ -813,7 +813,7 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
     fs::write(&config_path, config_text).unwrap();
     let heuristic_path = input.join("heuristics.toml");
     let heuristic_text = fs::read_to_string(&heuristic_path).unwrap().replace(
-        "maximum_crop_sacrifice_fraction=0.25",
+        "maximum_crop_sacrifice_fraction=0.41",
         "maximum_crop_sacrifice_fraction=1.0",
     );
     fs::write(&heuristic_path, heuristic_text).unwrap();
@@ -1018,7 +1018,7 @@ fn crop_mode_keeps_source_when_geometry_sacrifices_too_much_clean_area() {
     fs::write(&config_path, config_text).unwrap();
     let heuristic_path = input.join("heuristics.toml");
     let heuristic_text = fs::read_to_string(&heuristic_path).unwrap().replace(
-        "maximum_crop_sacrifice_fraction=0.25",
+        "maximum_crop_sacrifice_fraction=0.41",
         "maximum_crop_sacrifice_fraction=0.10",
     );
     fs::write(&heuristic_path, heuristic_text).unwrap();
