@@ -118,7 +118,7 @@ process_year() {
         --mode crop \
         --flat-output \
         --png \
-        --overwrite \
+        --sanitize-output \
         --config "$CONFIG_PATH" \
         --heuristics "$HEURISTICS_PATH"
 }

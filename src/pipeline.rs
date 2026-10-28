@@ -135,6 +135,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         &input,
         &run_id,
         args.flat_output,
+        args.sanitize_output,
     )?);
     let run_dir = layout.run().to_path_buf();
     let mut logger = Logger::create(&run_dir, &run_id)?;

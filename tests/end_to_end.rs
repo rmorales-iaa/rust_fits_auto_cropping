@@ -1435,6 +1435,8 @@ fn flat_output_writes_products_directly_under_output_directory() {
     let input = t.path().join("in");
     let output = t.path().join("science_calibrated");
     fs::create_dir(&input).unwrap();
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("stale-output.txt"), b"remove before use").unwrap();
     config(&input);
     create_fits(&input.join("candidate.fits"), -32, 96, 96, &artifact());
 
@@ -1447,18 +1449,23 @@ fn flat_output_writes_products_directly_under_output_directory() {
         .arg(input.join("config.toml"))
         .args(["--heuristics"])
         .arg(input.join("heuristics.toml"))
-        .args(["--mode", "crop", "--flat-output"])
+        .args(["--mode", "crop", "--flat-output", "--sanitize-output"])
         .status()
         .unwrap();
     assert!(status.success());
 
-    let image_entries: Vec<_> = fs::read_dir(output.join("images"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    assert_eq!(image_entries.len(), 1);
+    assert!(
+        output.join("candidate.fits").is_file(),
+        "flat-output entries: {:?}",
+        fs::read_dir(&output)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+    assert!(!output.join("images").exists());
     assert!(output.join("summary.json").is_file());
     assert!(output.join("per-image.csv").is_file());
+    assert!(!output.join("stale-output.txt").exists());
     assert!(!output.join("runs").exists());
     assert!(!output.join("previews").exists());
     assert!(!output.join("manifests").exists());
@@ -1470,7 +1477,7 @@ fn flat_output_writes_products_directly_under_output_directory() {
         summary["files"][0]["output_image"]
             .as_str()
             .unwrap()
-            .starts_with(output.join("images").to_str().unwrap())
+            .starts_with(output.to_str().unwrap())
     );
 
     let repeated_status = Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))

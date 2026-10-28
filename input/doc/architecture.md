@@ -12,4 +12,4 @@ The initial detector operates on fixed-size tiles. It obtains robust median and 
 
 When requested with `--png` in crop mode, a post-decision renderer uses the Rust `image` crate's PNG encoder. It estimates one source-wide ZScale interval and draws labeled native-scale panels under `output/runs/<run-id>/previews/`. Preview paths are included in reports and activity events; rendering does not participate in detection or crop selection.
 
-The default output layout isolates each invocation under `runs/<run-id>/`. The opt-in `--flat-output` layout sets the run directory to the requested output root directly; the yearly storage script uses this for a fixed per-year destination. Both layouts retain per-run summary, CSV and activity log files.
+The default output layout isolates each invocation under `runs/<run-id>/` and stores science images in `images/`. The opt-in `--flat-output` layout sets the run root to the requested output root, stores science image files directly there, and continues to place previews under `previews/`. Reports and the activity log remain at the root. The yearly storage script uses this flat layout for its fixed per-year destination.
