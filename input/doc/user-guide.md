@@ -35,7 +35,7 @@ cargo run --release -- --input-dir input/data --output-dir output --mode crop --
 cargo run --release -- --input-dir input/data --output-dir output --reason-mask
 ```
 
-Each accepted crop gets `output/runs/<run-id>/previews/<input-relative-path>.png`: grayscale source at left, rectangular crop at right, shared source-derived ZScale, labeled panels, native pixel scale and FITS lower-origin orientation. On the source panel, a green line marks retained crop pixels and a red line marks adjacent pixels removed by the crop. The right-hand FITS rendering remains grayscale. Invalid source values render black except where the diagnostic boundary lines are drawn. Previews are diagnostic displays; FITS files remain the science products. The path is included in each JSON/CSV record. The flag is rejected unless the effective processing mode is `crop`.
+Each accepted crop gets `output/runs/<run-id>/previews/<input-relative-path>.png`: grayscale source at left, rectangular crop at right, shared source-derived ZScale, labeled panels, native pixel scale and FITS lower-origin orientation. On the source panel, a green line marks retained crop pixels and a red line marks adjacent pixels removed by the crop. The right-hand FITS rendering remains grayscale and is aligned to the crop origin in the source panel coordinate frame. Its black top/bottom canvas margins represent source rows excluded by the crop; they are not samples or padding in the generated FITS image. Invalid source values render black except where the diagnostic boundary lines are drawn. Previews are diagnostic displays; FITS files remain the science products. The path is included in each JSON/CSV record. The flag is rejected unless the effective processing mode is `crop`.
 
 ## Products
 

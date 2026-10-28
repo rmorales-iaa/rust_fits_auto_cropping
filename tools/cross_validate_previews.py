@@ -114,7 +114,7 @@ def main() -> int:
             global_x, global_y = x0 + x, y0 + y
             if not (0 <= global_x < width and 0 <= global_y < height):
                 continue
-            right_y = LABEL_HEIGHT + crop_height - 1 - y
+            right_y = LABEL_HEIGHT + height - 1 - global_y
             right_x = width + x
             if header.get("CLIPSHAP") == "CIRCLE":
                 radius = float(header["CLIPRAD"])

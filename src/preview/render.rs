@@ -62,7 +62,9 @@ pub fn write_crop_preview(
     }
     for crop_y in 0..bounds.height {
         let source_y = bounds.y + crop_y;
-        let png_y = LABEL_HEIGHT + bounds.height - 1 - crop_y;
+        // Keep both panels in the same source-coordinate frame. Padding then
+        // marks only the rows removed by the crop instead of a false bottom band.
+        let png_y = LABEL_HEIGHT + source_height - 1 - source_y;
         let row = source_y * source_width;
         for crop_x in 0..bounds.width {
             let source_x = bounds.x + crop_x;
@@ -206,10 +208,9 @@ mod tests {
         assert_eq!(rendered.get_pixel(3, green_y).0, [255, 0, 0]);
         assert_eq!(
             rendered.get_pixel(8, green_y).0,
-            rendered
-                .get_pixel(24 + 4, LABEL_HEIGHT as u32 + 6 - 1 - 2)
-                .0
+            rendered.get_pixel(24 + 4, green_y).0
         );
         assert_eq!(rendered.get_pixel(24, 29).0, [0, 0, 0]); // outside the selected crop.
+        assert_eq!(rendered.get_pixel(24, 18).0, [0, 0, 0]); // source-aligned top padding.
     }
 }
