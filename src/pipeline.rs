@@ -47,7 +47,7 @@ impl std::error::Error for RunError {}
 #[derive(Debug)]
 struct BatchFailure {
     count: usize,
-    run_id: String,
+    summary_path: PathBuf,
 }
 #[derive(Clone, Copy)]
 struct ProductOptions {
@@ -60,8 +60,9 @@ impl std::fmt::Display for BatchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} file(s) failed; see runs/{}/summary.json",
-            self.count, self.run_id
+            "{} file(s) failed; see {}",
+            self.count,
+            self.summary_path.display()
         )
     }
 }
@@ -129,7 +130,12 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         (config.processing.memory_budget_mib / config.processing.maximum_image_mib).max(1);
     let workers = requested.min(memory_limited);
     let run_id = Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
-    let layout = Arc::new(OutputLayout::prepare(&args.output_dir, &input, &run_id)?);
+    let layout = Arc::new(OutputLayout::prepare(
+        &args.output_dir,
+        &input,
+        &run_id,
+        args.flat_output,
+    )?);
     let run_dir = layout.run().to_path_buf();
     let mut logger = Logger::create(&run_dir, &run_id)?;
     logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output_root":layout.root(),"run_directory":&run_dir,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
@@ -242,7 +248,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     if errors > 0 {
         return Err(BatchFailure {
             count: errors,
-            run_id: run_id.clone(),
+            summary_path: run_dir.join("summary.json"),
         }
         .into());
     }

@@ -1430,6 +1430,65 @@ fn compressed_and_multi_hdu_fits_are_ignored() {
 }
 
 #[test]
+fn flat_output_writes_products_directly_under_output_directory() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("science_calibrated");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    create_fits(&input.join("candidate.fits"), -32, 96, 96, &artifact());
+
+    let status = Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
+        .args(["--input-dir"])
+        .arg(&input)
+        .args(["--output-dir"])
+        .arg(&output)
+        .args(["--config"])
+        .arg(input.join("config.toml"))
+        .args(["--heuristics"])
+        .arg(input.join("heuristics.toml"))
+        .args(["--mode", "crop", "--flat-output"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let image_entries: Vec<_> = fs::read_dir(output.join("images"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(image_entries.len(), 1);
+    assert!(output.join("summary.json").is_file());
+    assert!(output.join("per-image.csv").is_file());
+    assert!(!output.join("runs").exists());
+    assert!(!output.join("previews").exists());
+    assert!(!output.join("manifests").exists());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["total"], 1);
+    assert_eq!(summary["output_images"], 1);
+    assert!(
+        summary["files"][0]["output_image"]
+            .as_str()
+            .unwrap()
+            .starts_with(output.join("images").to_str().unwrap())
+    );
+
+    let repeated_status = Command::new(env!("CARGO_BIN_EXE_rust_fits_auto_cropping"))
+        .args(["--input-dir"])
+        .arg(&input)
+        .args(["--output-dir"])
+        .arg(&output)
+        .args(["--config"])
+        .arg(input.join("config.toml"))
+        .args(["--heuristics"])
+        .arg(input.join("heuristics.toml"))
+        .args(["--mode", "crop", "--flat-output", "--overwrite"])
+        .status()
+        .unwrap();
+    assert!(repeated_status.success());
+}
+
+#[test]
 fn recursive_flag_discovers_nested_fits() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");

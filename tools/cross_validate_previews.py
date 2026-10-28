@@ -27,7 +27,10 @@ def expected_u8(value: float, lower: float, upper: float) -> int:
     span = upper - lower
     if not np.isfinite(value) or not np.isfinite(span) or span <= 0:
         return 0
-    return int(np.rint(np.clip((value - lower) / span, 0, 1) * 255))
+    # Rust f64::round (used by the renderer) rounds halfway values away from
+    # zero; NumPy rint uses ties-to-even and can report a false one-level diff.
+    scaled = np.clip((value - lower) / span, 0, 1) * 255
+    return int(np.floor(scaled + 0.5))
 
 
 def crop_outline_masks(retained: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -50,7 +53,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("summary", type=Path, help="run summary.json")
     parser.add_argument("input_dir", type=Path, help="original input root")
-    parser.add_argument("output_dir", type=Path, help="one output/runs/<run-id> directory")
+    parser.add_argument("output_dir", type=Path, help="run directory (or flat output root)")
     parser.add_argument("--samples", type=int, default=200, help="sample checks per PNG")
     args = parser.parse_args()
     summary = json.loads(args.summary.read_text())

@@ -14,7 +14,12 @@ pub struct OutputLayout {
 }
 
 impl OutputLayout {
-    pub fn prepare(requested: &Path, input_root: &Path, run_id: &str) -> anyhow::Result<Self> {
+    pub fn prepare(
+        requested: &Path,
+        input_root: &Path,
+        run_id: &str,
+        flat_output: bool,
+    ) -> anyhow::Result<Self> {
         if run_id.is_empty()
             || run_id == "."
             || run_id == ".."
@@ -42,14 +47,28 @@ impl OutputLayout {
         }
         sync_parent(&root)?;
 
-        let runs = root.join("runs");
-        ensure_plain_directory(&runs)?;
-        let run = runs.join(run_id);
-        fs::create_dir(&run)
-            .with_context(|| format!("creating unique run output directory {}", run.display()))?;
-        sync_parent(&run)?;
-        for name in ["images", "masks"] {
-            fs::create_dir(run.join(name))?;
+        let run = if flat_output {
+            root.clone()
+        } else {
+            let runs = root.join("runs");
+            ensure_plain_directory(&runs)?;
+            let run = runs.join(run_id);
+            fs::create_dir(&run).with_context(|| {
+                format!("creating unique run output directory {}", run.display())
+            })?;
+            sync_parent(&run)?;
+            run
+        };
+        if flat_output {
+            // Fixed output roots are reusable across invocations; product-level
+            // overwrite policy remains controlled by the caller.
+            for name in ["images", "masks"] {
+                ensure_plain_directory(&run.join(name))?;
+            }
+        } else {
+            for name in ["images", "masks"] {
+                fs::create_dir(run.join(name))?;
+            }
         }
         sync_directory(&run)?;
         Ok(Self { root, run })
@@ -264,7 +283,7 @@ mod tests {
         fs::create_dir(&input).unwrap();
         fs::create_dir(&output).unwrap();
         fs::write(output.join("user-note.txt"), "preserved").unwrap();
-        let layout = OutputLayout::prepare(&output, &input, "20261027T120000000Z").unwrap();
+        let layout = OutputLayout::prepare(&output, &input, "20261027T120000000Z", false).unwrap();
         assert_eq!(
             layout
                 .product_path(ProductCategory::Image, Path::new("night/frame.fits"))
@@ -286,7 +305,14 @@ mod tests {
             fs::read_to_string(output.join("user-note.txt")).unwrap(),
             "preserved"
         );
-        assert!(OutputLayout::prepare(&output, &input, "20261027T120000000Z").is_err());
+        assert!(OutputLayout::prepare(&output, &input, "20261027T120000000Z", false).is_err());
+        let direct_output = temp.path().join("direct-output");
+        fs::create_dir(&direct_output).unwrap();
+        let direct = OutputLayout::prepare(&direct_output, &input, "direct-run", true).unwrap();
+        assert_eq!(direct.run(), fs::canonicalize(&direct_output).unwrap());
+        assert!(!direct_output.join("runs").exists());
+        let repeated = OutputLayout::prepare(&direct_output, &input, "direct-run-2", true).unwrap();
+        assert_eq!(repeated.run(), direct.run());
     }
 
     #[test]
@@ -300,12 +326,12 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&output, &linked).unwrap();
         #[cfg(unix)]
-        assert!(OutputLayout::prepare(&linked, &input, "r1").is_err());
-        assert!(OutputLayout::prepare(&input, &input, "r2").is_err());
+        assert!(OutputLayout::prepare(&linked, &input, "r1", false).is_err());
+        assert!(OutputLayout::prepare(&input, &input, "r2", false).is_err());
         let nested = input.join("new-output");
-        assert!(OutputLayout::prepare(&nested, &input, "r2b").is_err());
+        assert!(OutputLayout::prepare(&nested, &input, "r2b", false).is_err());
         assert!(!nested.exists());
-        let layout = OutputLayout::prepare(&output, &input, "r3").unwrap();
+        let layout = OutputLayout::prepare(&output, &input, "r3", false).unwrap();
         assert!(
             layout
                 .product_path(ProductCategory::Image, Path::new("../escape.fits"))
@@ -330,7 +356,7 @@ mod tests {
         let input = temp.path().join("input");
         let output = temp.path().join("output");
         fs::create_dir(&input).unwrap();
-        let layout = OutputLayout::prepare(&output, &input, "cleanup-test").unwrap();
+        let layout = OutputLayout::prepare(&output, &input, "cleanup-test", false).unwrap();
         let masks = layout.run().join("masks/nested");
         let reasons = layout.run().join("reason_masks/nested");
         fs::create_dir_all(&masks).unwrap();

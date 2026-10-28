@@ -116,7 +116,9 @@ process_year() {
         --output-dir "$output_year/science_calibrated" \
         --recursive \
         --mode crop \
+        --flat-output \
         --png \
+        --overwrite \
         --config "$CONFIG_PATH" \
         --heuristics "$HEURISTICS_PATH"
 }
