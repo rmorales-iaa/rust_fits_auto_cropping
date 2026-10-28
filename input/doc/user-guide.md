@@ -26,7 +26,7 @@ For a dry run that writes reports and logs without science image or mask product
 cargo run --release -- --input-dir input/data --output-dir output --dry-run
 ```
 
-Use `--recursive` to search subdirectories, `--heuristics PATH` to select a separate science-rule file, `--mode crop` to write the maximum-area fully clean rectangle (`mask` is the default), `--threads N` to cap workers, `--memory-budget-mib N` to set the total image workspace budget, and `--overwrite` to permit a path collision within the current run. `--help` lists the current options. Input and output trees may not overlap. Originals are never edited.
+Use `--recursive` to search subdirectories, `--heuristics PATH` to select a separate science-rule file, `--mode crop` to write the maximum-area fully clean rectangle (`mask` is the default), `--threads N` to cap workers, `--memory-budget-mib N` to set the total image workspace budget, and `--overwrite` to permit a path collision within the current run. The configured thread default is 4; use `processing.threads = 0` to request all available logical CPUs, subject to the memory cap. `--help` lists the current options. Input and output trees may not overlap. Originals are never edited.
 
 To review accepted crop geometry visually, add `--png` while running in crop mode:
 

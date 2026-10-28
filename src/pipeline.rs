@@ -11,6 +11,7 @@ use crate::{
     output_layout::{OutputLayout, ProductCategory},
     preview::write_crop_preview,
     reason_mask, report,
+    workers::effective_worker_count,
     writer::{write_cropped_products, write_products, write_reason_mask},
 };
 use anyhow::{Context, bail};
@@ -121,14 +122,15 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let source_heuristics_hash = format!("{:x}", Sha256::digest(heuristics_text.as_bytes()));
     let heuristics_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&heuristics)?));
     let executable_sha256 = executable_sha256()?;
-    let requested = if config.processing.threads == 0 {
-        rayon::current_num_threads().max(1)
-    } else {
-        config.processing.threads.max(1)
-    };
-    let memory_limited =
-        (config.processing.memory_budget_mib / config.processing.maximum_image_mib).max(1);
-    let workers = requested.min(memory_limited);
+    let available_cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let workers = effective_worker_count(
+        config.processing.threads,
+        available_cores,
+        config.processing.memory_budget_mib,
+        config.processing.maximum_image_mib,
+    );
     let run_id = Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
     let layout = Arc::new(OutputLayout::prepare(
         &args.output_dir,

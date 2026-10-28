@@ -1,6 +1,6 @@
 # Operational settings. Science decision thresholds are in heuristics.toml.
 [processing]
-threads = 0 # 0 selects available logical CPUs, bounded by the memory budget.
+threads = 4 # 0 selects all available logical CPUs, bounded by the memory budget.
 recursive = false
 memory_budget_mib = 2048
 maximum_image_mib = 512

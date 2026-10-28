@@ -42,7 +42,7 @@ pub struct Args {
     /// Include nested directories in input discovery.
     #[arg(long)]
     pub recursive: bool,
-    /// Number of workers (0 uses available logical CPUs).
+    /// Worker threads; 0 uses all available logical CPUs, subject to the memory budget.
     #[arg(long)]
     pub threads: Option<usize>,
     /// Inspect and report candidates without writing images, symlinks or masks.

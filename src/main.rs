@@ -12,6 +12,7 @@ mod pipeline;
 mod preview;
 mod reason_mask;
 mod report;
+mod workers;
 mod writer;
 
 use clap::Parser;

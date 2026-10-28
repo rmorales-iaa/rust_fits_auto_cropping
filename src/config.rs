@@ -231,7 +231,7 @@ fn read_config(path: Option<&Path>, default: &str, default_path: &str) -> anyhow
 
 const DEFAULT_CONFIG: &str = r#"
 [processing]
-threads = 0
+threads = 4
 recursive = false
 memory_budget_mib = 2048
 maximum_image_mib = 512
@@ -311,8 +311,14 @@ mod tests {
 
     #[test]
     fn rejects_crop_setting_as_unknown_processing_option() {
-        let text = DEFAULT_CONFIG.replace("threads = 0", "threads = 0\nmode = \"crop\"");
+        let text = DEFAULT_CONFIG.replace("threads = 4", "threads = 4\nmode = \"crop\"");
         assert!(toml::from_str::<Config>(&text).is_err());
+    }
+
+    #[test]
+    fn default_processing_config_uses_four_workers() {
+        let config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+        assert_eq!(config.processing.threads, 4);
     }
 
     #[test]

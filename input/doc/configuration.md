@@ -6,13 +6,13 @@ Operational settings live in `input/config.toml`. Scientific decision thresholds
 
 | Key | Default | Meaning |
 | --- | ---: | --- |
-| `processing.threads` | 0 | 0 selects available logical CPUs; workers are capped by the memory budget. |
+| `processing.threads` | 4 | Worker-thread ceiling. Set to `0` to request all available logical CPUs. The final count is capped by CPUs available to the process and the configured memory budget. |
 | `processing.recursive` | false | Search subdirectories. `--recursive` enables this for a run. |
 | `processing.memory_budget_mib` | 2048 MiB | Shared estimated image workspace used to cap concurrent workers. |
 | `processing.maximum_image_mib` | 512 MiB | Per-image estimated workspace limit using 32 bytes per pixel; this is not a measured peak-allocation or process-RSS cap. |
 | `processing.mode` | `mask` | `mask` preserves dimensions and marks candidate pixels undefined; `crop` writes the exact maximum-area axis-aligned rectangle containing no detector-proposed artifacts or originally undefined samples. The rectangle is optimal over the full image mask, with no circle constraint. FITS `NAXIS1/2` match its width/height. CLI `--mode mask` or `--mode crop` overrides this setting. |
 
-CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. `--png` is an opt-in crop-mode display output, not a configuration key. Each invocation creates a new isolated run directory; `--overwrite` only permits collisions inside that run and does not remove older runs.
+CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. Processing runs in parallel through a bounded Rayon worker pool. `processing.threads = 4` is the default; `0` requests all available logical CPUs, subject to the CPU quota and per-run memory limit. The run log records the configured value and effective worker count. `--png` is an opt-in crop-mode display output, not a configuration key. Each invocation creates a new isolated run directory; `--overwrite` only permits collisions inside that run and does not remove older runs.
 
 ## Decision rules: `input/heuristics.toml`
 
