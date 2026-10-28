@@ -19,7 +19,6 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -27,7 +26,6 @@ use std::{
     },
     time::Instant,
 };
-use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
 #[derive(Debug)]
@@ -154,7 +152,6 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
                 let outcome = process_one(
                     path,
                     &input,
-                    &run_id,
                     &layout,
                     &config,
                     &heuristics,
@@ -287,7 +284,6 @@ fn executable_sha256() -> anyhow::Result<String> {
 fn process_one(
     path: &Path,
     input: &Path,
-    run_id: &str,
     layout: &OutputLayout,
     config: &Config,
     heuristics: &HeuristicsConfig,
@@ -306,7 +302,7 @@ fn process_one(
         );
         outcome.reason_code = "compressed_ignored";
         if !options.dry_run {
-            publish_passthrough_image(path, rel, run_id, layout, options.overwrite, &mut outcome);
+            publish_passthrough_image(path, rel, layout, options.overwrite, &mut outcome);
         }
         return finish(outcome, timer);
     }
@@ -320,14 +316,7 @@ fn process_one(
             );
             outcome.reason_code = reason_code;
             if !options.dry_run {
-                publish_passthrough_image(
-                    path,
-                    rel,
-                    run_id,
-                    layout,
-                    options.overwrite,
-                    &mut outcome,
-                );
+                publish_passthrough_image(path, rel, layout, options.overwrite, &mut outcome);
             }
             outcome
         }
@@ -336,14 +325,7 @@ fn process_one(
                 FileOutcome::new(rel.to_path_buf(), OutcomeKind::Error, format!("{error:#}"));
             outcome.reason_code = "input_read_error";
             if !options.dry_run {
-                publish_passthrough_image(
-                    path,
-                    rel,
-                    run_id,
-                    layout,
-                    options.overwrite,
-                    &mut outcome,
-                );
+                publish_passthrough_image(path, rel, layout, options.overwrite, &mut outcome);
             }
             outcome
         }
@@ -562,19 +544,9 @@ fn process_one(
                     } else {
                         None
                     };
-                    let manifest_path = match layout.manifest_path(rel) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            outcome.status = OutcomeKind::Error;
-                            outcome.reason_code = "output_path_error";
-                            outcome.reason = error.to_string();
-                            return finish(outcome, timer);
-                        }
-                    };
                     if !options.overwrite
                         && (path_exists(&image_path)
                             || path_exists(&mask_path)
-                            || path_exists(&manifest_path)
                             || reason_mask_path
                                 .as_ref()
                                 .is_some_and(|path| path_exists(path))
@@ -583,16 +555,6 @@ fn process_one(
                         outcome.status = OutcomeKind::Error;
                         outcome.reason_code = "output_exists_error";
                         outcome.reason = "output exists; pass --overwrite".into();
-                        return finish(outcome, timer);
-                    }
-                    if options.overwrite
-                        && let Err(error) = remove_existing_product(&manifest_path)
-                    {
-                        outcome.status = OutcomeKind::Error;
-                        outcome.reason_code = "output_cleanup_error";
-                        outcome.reason = format!(
-                            "could not invalidate previous completion manifest before replacing products: {error}"
-                        );
                         return finish(outcome, timer);
                     }
                     let (write_result, has_mask) = if crop_accepted {
@@ -674,15 +636,6 @@ fn process_one(
                                 "{e}; source retained unchanged because this integer action cannot represent added undefined pixels"
                             );
                             outcome.output_image = Some(image_path);
-                            if let Err(error) =
-                                publish_completion_manifest(layout, rel, run_id, &mut outcome)
-                            {
-                                outcome.status = OutcomeKind::Error;
-                                outcome.reason_code = "manifest_write_error";
-                                outcome.reason = format!(
-                                    "source symlink was created but its completion manifest failed: {error:#}"
-                                );
-                            }
                             return finish(outcome, timer);
                         }
                         outcome.status = OutcomeKind::Error;
@@ -781,15 +734,6 @@ fn process_one(
                         }
                         outcome.output_png = Some(preview);
                     }
-                    if let Err(error) =
-                        publish_completion_manifest(layout, rel, run_id, &mut outcome)
-                    {
-                        outcome.status = OutcomeKind::Error;
-                        outcome.reason_code = "manifest_write_error";
-                        outcome.reason = format!(
-                            "products were written but the completion manifest failed: {error:#}"
-                        );
-                    }
                 }
             } else if !options.dry_run {
                 let image_path = match layout.product_path(ProductCategory::Image, rel) {
@@ -801,29 +745,10 @@ fn process_one(
                         return finish(outcome, timer);
                     }
                 };
-                let manifest_path = match layout.manifest_path(rel) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        outcome.status = OutcomeKind::Error;
-                        outcome.reason_code = "output_path_error";
-                        outcome.reason = error.to_string();
-                        return finish(outcome, timer);
-                    }
-                };
-                if !options.overwrite && (path_exists(&image_path) || path_exists(&manifest_path)) {
+                if !options.overwrite && path_exists(&image_path) {
                     outcome.status = OutcomeKind::Error;
                     outcome.reason_code = "output_exists_error";
                     outcome.reason = "output exists; pass --overwrite".into();
-                    return finish(outcome, timer);
-                }
-                if options.overwrite
-                    && let Err(error) = remove_existing_product(&manifest_path)
-                {
-                    outcome.status = OutcomeKind::Error;
-                    outcome.reason_code = "output_cleanup_error";
-                    outcome.reason = format!(
-                        "could not invalidate previous completion manifest before replacing symlink: {error}"
-                    );
                     return finish(outcome, timer);
                 }
                 if let Err(e) = create_kept_symlink(path, &image_path) {
@@ -833,13 +758,6 @@ fn process_one(
                     return finish(outcome, timer);
                 }
                 outcome.output_image = Some(image_path);
-                if let Err(error) = publish_completion_manifest(layout, rel, run_id, &mut outcome) {
-                    outcome.status = OutcomeKind::Error;
-                    outcome.reason_code = "manifest_write_error";
-                    outcome.reason = format!(
-                        "source symlink was created but its completion manifest failed: {error:#}"
-                    );
-                }
             }
             outcome
         }
@@ -850,7 +768,6 @@ fn process_one(
 fn publish_passthrough_image(
     input_path: &Path,
     relative: &Path,
-    run_id: &str,
     layout: &OutputLayout,
     overwrite: bool,
     outcome: &mut FileOutcome,
@@ -866,18 +783,7 @@ fn publish_passthrough_image(
             return;
         }
     };
-    let manifest_path = match layout.manifest_path(relative) {
-        Ok(path) => path,
-        Err(error) => {
-            outcome.status = OutcomeKind::Error;
-            outcome.reason_code = "output_path_error";
-            outcome.reason.push_str(&format!(
-                "; could not create completion-manifest path: {error}"
-            ));
-            return;
-        }
-    };
-    if !overwrite && (path_exists(&image_path) || path_exists(&manifest_path)) {
+    if !overwrite && path_exists(&image_path) {
         outcome.status = OutcomeKind::Error;
         outcome.reason_code = "output_exists_error";
         outcome
@@ -885,17 +791,13 @@ fn publish_passthrough_image(
             .push_str("; pass-through output already exists");
         return;
     }
-    if overwrite {
-        for existing in [&manifest_path, &image_path] {
-            if let Err(error) = remove_existing_product(existing) {
-                outcome.status = OutcomeKind::Error;
-                outcome.reason_code = "output_cleanup_error";
-                outcome
-                    .reason
-                    .push_str(&format!("; could not replace pass-through output: {error}"));
-                return;
-            }
-        }
+    if overwrite && let Err(error) = remove_existing_product(&image_path) {
+        outcome.status = OutcomeKind::Error;
+        outcome.reason_code = "output_cleanup_error";
+        outcome
+            .reason
+            .push_str(&format!("; could not replace pass-through output: {error}"));
+        return;
     }
     if let Err(error) = create_kept_symlink(input_path, &image_path) {
         outcome.status = OutcomeKind::Error;
@@ -909,13 +811,6 @@ fn publish_passthrough_image(
     outcome
         .reason
         .push_str("; source preserved unchanged by symlink");
-    if let Err(error) = publish_completion_manifest(layout, relative, run_id, outcome) {
-        outcome.status = OutcomeKind::Error;
-        outcome.reason_code = "manifest_write_error";
-        outcome.reason.push_str(&format!(
-            "; pass-through symlink manifest failed: {error:#}"
-        ));
-    }
 }
 
 fn create_kept_symlink(from: &Path, to: &Path) -> anyhow::Result<()> {
@@ -959,90 +854,6 @@ fn remove_existing_product(path: &Path) -> anyhow::Result<()> {
         sync_parent(path)?;
     }
     Ok(())
-}
-
-fn publish_completion_manifest(
-    layout: &OutputLayout,
-    input_relative: &Path,
-    run_id: &str,
-    outcome: &mut FileOutcome,
-) -> anyhow::Result<()> {
-    let manifest_path = layout.manifest_path(input_relative)?;
-    let mut products = Vec::new();
-    for (kind, path) in [
-        ("science_image", outcome.output_image.as_deref()),
-        ("preview", outcome.output_png.as_deref()),
-    ] {
-        let Some(path) = path else { continue };
-        let run_relative = path
-            .strip_prefix(layout.run())
-            .context("product path is outside its run directory")?;
-        let metadata = fs::metadata(path)
-            .with_context(|| format!("reading completed product metadata {}", path.display()))?;
-        let symlink = fs::symlink_metadata(path)?.file_type().is_symlink();
-        let content_sha256 = hash_file(path)?;
-        if symlink
-            && kind == "science_image"
-            && outcome
-                .source_sha256
-                .as_deref()
-                .is_some_and(|source_sha256| source_sha256 != content_sha256)
-        {
-            bail!("kept-image symlink no longer resolves to the parsed source bytes");
-        }
-        products.push(serde_json::json!({
-            "kind": kind,
-            "path": run_relative,
-            "bytes": metadata.len(),
-            "sha256": content_sha256,
-            "symlink": symlink,
-        }));
-    }
-    let status = match &outcome.status {
-        OutcomeKind::Clipped => "clipped",
-        OutcomeKind::Proposed => "proposed",
-        OutcomeKind::Kept => "kept",
-        OutcomeKind::Ignored => "ignored",
-        OutcomeKind::Error => "error",
-    };
-    let contents = serde_json::to_vec_pretty(&serde_json::json!({
-        "manifest_version": 3,
-        "complete": true,
-        "run_id": run_id,
-        "input": input_relative,
-        "input_sha256": outcome.source_sha256.as_deref(),
-        "status": status,
-        "completed_utc": Utc::now().to_rfc3339(),
-        "products": products,
-    }))?;
-    let parent = manifest_path
-        .parent()
-        .context("completion manifest has no parent directory")?;
-    let mut staged = NamedTempFile::new_in(parent)?;
-    staged.write_all(&contents)?;
-    staged.as_file().sync_all()?;
-    staged
-        .persist(&manifest_path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("publishing completion manifest {}", manifest_path.display()))?;
-    sync_parent(&manifest_path)?;
-    outcome.output_manifest = Some(manifest_path);
-    Ok(())
-}
-
-fn hash_file(path: &Path) -> anyhow::Result<String> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("opening product for SHA-256 {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn eligibility_reason(reason: crate::fits_image::Eligibility) -> String {

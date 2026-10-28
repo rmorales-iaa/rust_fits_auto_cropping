@@ -1,11 +1,11 @@
 //! Rust-native FITS loading, eligibility checks, and detection-value conversion.
 use anyhow::{Context, bail};
-use fitskit::{FitsFile, HduData, Header, PixelData};
+use fitskit::{FitsFile, HduData, Header, Keyword, PixelData};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
     fs::File,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Cursor, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -42,10 +42,20 @@ pub struct Image {
     pub blank_value: Option<i64>,
     pub metadata_warnings: Vec<String>,
     pub crop_wcs_unsupported: Option<String>,
+    /// Original non-standard/raw cards to restore verbatim in generated products.
+    pub raw_header_cards: Vec<RawHeaderCard>,
     /// Parsed source snapshot used by both classification and product writing.
     pub source_fits: FitsFile,
     /// SHA-256 of the exact open source file used to build `source_fits`.
     pub source_sha256: String,
+}
+
+#[derive(Clone)]
+pub struct RawHeaderCard {
+    pub(crate) offset: u64,
+    pub(crate) replacement: [u8; 80],
+    pub(crate) original: [u8; 80],
+    pub(crate) annotation: Option<String>,
 }
 
 /// Parse a FITS file using fitskit and validate the single-HDU 2D image contract.
@@ -57,7 +67,7 @@ pub fn read_image(
     let mut source =
         File::open(path).with_context(|| format!("opening FITS {}", path.display()))?;
     let source_metadata = source.metadata()?;
-    let (hdu_count, axes, bitpix) = preflight(&mut source, path)?;
+    let (hdu_count, axes, bitpix, repairs) = preflight(&mut source, path)?;
     if hdu_count != 1 {
         return Ok(Err(Eligibility::MultiHdu(hdu_count)));
     }
@@ -79,7 +89,7 @@ pub fn read_image(
     }
     source.seek(SeekFrom::Start(0))?;
     let (file, source_sha256) = {
-        let mut reader = HashingReader::new(&mut source);
+        let mut reader = HashingReader::new(&mut source, repairs.clone());
         let file = FitsFile::from_reader(&mut reader)
             .with_context(|| format!("opening FITS {}", path.display()))?;
         (file, reader.finish())
@@ -108,7 +118,10 @@ pub fn read_image(
     }
     let declared_blank = hdu.header.get_int("BLANK");
     let existing_blank = declared_blank.filter(|value| integer_value_in_range(bitpix, *value));
-    let mut metadata_warnings = Vec::new();
+    let mut metadata_warnings = repairs
+        .iter()
+        .filter_map(|repair| repair.annotation.clone())
+        .collect::<Vec<_>>();
     if let Some(declared) = declared_blank.filter(|_| existing_blank.is_none()) {
         metadata_warnings.push(format!(
             "ignored out-of-range BLANK={} for BITPIX={bitpix}; pixel statistics use stored image values",
@@ -160,9 +173,21 @@ pub fn read_image(
         blank_value,
         metadata_warnings,
         crop_wcs_unsupported,
+        raw_header_cards: repairs,
         source_fits: file,
         source_sha256,
     }))
+}
+
+/// Read a generated single-HDU FITS snapshot while treating malformed
+/// non-structural header cards as same-width in-memory placeholders.
+pub fn read_fits_snapshot(path: &Path) -> anyhow::Result<FitsFile> {
+    let mut source =
+        File::open(path).with_context(|| format!("opening FITS {}", path.display()))?;
+    let (_, _, _, raw_cards) = preflight(&mut source, path)?;
+    source.seek(SeekFrom::Start(0))?;
+    let mut reader = HashingReader::new(&mut source, raw_cards);
+    FitsFile::from_reader(&mut reader).with_context(|| format!("parsing FITS {}", path.display()))
 }
 
 /// Hash bytes as fitskit reads them. Forward seeks are implemented by reading
@@ -170,13 +195,15 @@ pub fn read_image(
 struct HashingReader<'a> {
     inner: &'a mut File,
     hasher: Sha256,
+    repairs: Vec<RawHeaderCard>,
 }
 
 impl<'a> HashingReader<'a> {
-    fn new(inner: &'a mut File) -> Self {
+    fn new(inner: &'a mut File, repairs: Vec<RawHeaderCard>) -> Self {
         Self {
             inner,
             hasher: Sha256::new(),
+            repairs,
         }
     }
 
@@ -187,8 +214,25 @@ impl<'a> HashingReader<'a> {
 
 impl Read for HashingReader<'_> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let start = self.inner.stream_position()?;
         let read = self.inner.read(output)?;
         self.hasher.update(&output[..read]);
+        let end = start.saturating_add(read as u64);
+        for repair in &self.repairs {
+            let repair_end = repair
+                .offset
+                .saturating_add(repair.replacement.len() as u64);
+            let overlap_start = start.max(repair.offset);
+            let overlap_end = end.min(repair_end);
+            if overlap_start < overlap_end {
+                let output_start = usize::try_from(overlap_start - start).unwrap();
+                let replacement_start = usize::try_from(overlap_start - repair.offset).unwrap();
+                let overlap_len = usize::try_from(overlap_end - overlap_start).unwrap();
+                output[output_start..output_start + overlap_len].copy_from_slice(
+                    &repair.replacement[replacement_start..replacement_start + overlap_len],
+                );
+            }
+        }
         Ok(read)
     }
 }
@@ -273,12 +317,16 @@ pub fn is_gzip_compressed(path: &Path) -> anyhow::Result<bool> {
     Ok(count == signature.len() && signature == [0x1f, 0x8b])
 }
 
-fn preflight(file: &mut File, path: &Path) -> anyhow::Result<(usize, Vec<usize>, i64)> {
+fn preflight(
+    file: &mut File,
+    path: &Path,
+) -> anyhow::Result<(usize, Vec<usize>, i64, Vec<RawHeaderCard>)> {
     file.seek(SeekFrom::Start(0))?;
     let file_len = file.metadata()?.len();
     let mut count = 0usize;
     let mut first_axes = Vec::new();
     let mut first_bitpix = 0i64;
+    let mut repairs = Vec::new();
     loop {
         let position = file.stream_position()?;
         if position == file_len {
@@ -287,7 +335,7 @@ fn preflight(file: &mut File, path: &Path) -> anyhow::Result<(usize, Vec<usize>,
         if position > file_len {
             bail!("FITS HDU exceeds file length");
         }
-        let header = Header::read_from(file)
+        let header = read_header_ignoring_nonstructural_card_errors(file, path, &mut repairs)
             .with_context(|| format!("reading FITS header in {}", path.display()))?;
         if count == 0 {
             first_bitpix = header.require_int("BITPIX")?;
@@ -321,7 +369,109 @@ fn preflight(file: &mut File, path: &Path) -> anyhow::Result<(usize, Vec<usize>,
         bail!("FITS file contains no HDUs");
     }
     file.seek(SeekFrom::Start(0))?;
-    Ok((count, first_axes, first_bitpix))
+    Ok((count, first_axes, first_bitpix, repairs))
+}
+
+/// Parse every header card while replacing malformed non-layout cards with
+/// COMMENT cards of the same width. The primary image dimensions and payload
+/// layout still have to be valid so pixel bytes can be located safely.
+fn read_header_ignoring_nonstructural_card_errors(
+    file: &mut File,
+    path: &Path,
+    repairs: &mut Vec<RawHeaderCard>,
+) -> anyhow::Result<Header> {
+    const BLOCK_BYTES: usize = 2880;
+    const CARD_BYTES: usize = 80;
+
+    let header_start = file.stream_position()?;
+    let mut bytes = Vec::new();
+    let mut found_end = false;
+    while !found_end {
+        let mut block = [0u8; BLOCK_BYTES];
+        file.read_exact(&mut block)
+            .with_context(|| format!("reading FITS header block in {}", path.display()))?;
+        for card in block.chunks_exact(CARD_BYTES) {
+            if card[..3] == *b"END" && card[3..8].iter().all(|&byte| byte == b' ') {
+                found_end = true;
+                break;
+            }
+        }
+        bytes.extend_from_slice(&block);
+        if bytes.len() > 64 * 1024 * 1024 {
+            bail!("FITS header exceeds the 64 MiB safety limit");
+        }
+    }
+
+    for index in 0..bytes.len() / CARD_BYTES {
+        let card = &bytes[index * CARD_BYTES..(index + 1) * CARD_BYTES];
+        if card[..3] == *b"END" && card[3..8].iter().all(|&byte| byte == b' ') {
+            break;
+        }
+        let record: [u8; CARD_BYTES] = card.try_into().expect("fixed-size FITS card");
+        let is_hierarch = record.starts_with(b"HIERARCH ");
+        let parse_result = Keyword::parse(&record);
+        if parse_result.is_ok() && !is_hierarch {
+            continue;
+        }
+        let parse_error = match parse_result {
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        let key = if is_hierarch {
+            record[9..]
+                .split(|&byte| byte == b'=')
+                .next()
+                .map(|bytes| String::from_utf8_lossy(bytes).trim().to_owned())
+                .unwrap_or_else(|| "HIERARCH".to_owned())
+        } else {
+            std::str::from_utf8(&record[..8])
+                .unwrap_or("")
+                .trim()
+                .to_ascii_uppercase()
+        };
+        if !is_hierarch && is_layout_keyword(&key) {
+            bail!(
+                "malformed structural FITS card {key:?}: {}",
+                parse_error.as_deref().unwrap_or("invalid card")
+            );
+        }
+        let offset = header_start + (index * CARD_BYTES) as u64;
+        let replacement = raw_card_marker(offset);
+        bytes[index * CARD_BYTES..(index + 1) * CARD_BYTES].copy_from_slice(&replacement);
+        let annotation = if is_hierarch {
+            None
+        } else {
+            Some(format!(
+                "ignored malformed non-structural FITS header card at byte {offset} ({key}): {}; original header card preserved unchanged",
+                parse_error.as_deref().unwrap_or("invalid card")
+            ))
+        };
+        repairs.push(RawHeaderCard {
+            offset,
+            replacement,
+            original: record,
+            annotation,
+        });
+    }
+
+    let mut cursor = Cursor::new(bytes);
+    Header::read_from(&mut cursor).map_err(Into::into)
+}
+
+fn raw_card_marker(offset: u64) -> [u8; 80] {
+    let marker = format!("COMMENT RUST_FITS_RAW_CARD_{offset:016X}");
+    let mut card = [b' '; 80];
+    card[..marker.len()].copy_from_slice(marker.as_bytes());
+    card
+}
+
+fn is_layout_keyword(key: &str) -> bool {
+    matches!(
+        key,
+        "SIMPLE" | "XTENSION" | "BITPIX" | "NAXIS" | "PCOUNT" | "GCOUNT"
+    ) || key.strip_prefix("NAXIS").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn integer_value_in_range(bitpix: i64, value: i64) -> bool {

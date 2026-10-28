@@ -1,6 +1,5 @@
 use fitskit::{FitsFile, Hdu, HduData, HeaderValue, ImageData, PixelData};
 use flate2::{Compression, write::GzEncoder};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Write,
@@ -42,10 +41,6 @@ fn summary_path(output: &Path) -> PathBuf {
     run_dir(output).join("summary.json")
 }
 
-fn file_sha256(path: &Path) -> String {
-    format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
-}
-
 fn create_fits(path: &Path, bitpix: i64, width: usize, height: usize, data: &[f64]) {
     let pixels = match bitpix {
         8 => PixelData::U8(data.iter().map(|v| *v as u8).collect()),
@@ -82,7 +77,7 @@ fn config(dir: &Path) {
     .unwrap();
     fs::write(
         dir.join("heuristics.toml"),
-        "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\nmaximum_crop_sacrifice_fraction=0.25\n\n[heuristics.crop_sacrifice_fraction_by_border_component_count]\none=0.25\ntwo=0.30\nthree=0.35\nfour_or_more=0.41\n",
+        "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\nmaximum_crop_sacrifice_fraction=0.35\n\n[heuristics.crop_sacrifice_fraction_by_border_component_count]\none=0.35\ntwo=0.35\nthree=0.35\nfour_or_more=0.47\n",
     )
     .unwrap();
 }
@@ -177,21 +172,11 @@ fn transient_mask_trees_are_removed_and_not_listed_as_run_products() {
 
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
-    assert_eq!(summary["schema_version"], 8);
+    assert_eq!(summary["schema_version"], 9);
     assert_eq!(summary["output_images"], summary["total"]);
     assert!(summary["files"][0]["output_reason_mask"].is_null());
-    let manifest_path = run_dir(&output)
-        .join("manifests")
-        .join("reason.fits.complete.json");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
-    assert!(
-        manifest["products"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|product| { product["kind"] != "mask" && product["kind"] != "reason_mask" })
-    );
+    assert!(!run_dir(&output).join("manifests").exists());
+    assert!(!run_dir(&output).join("previews").exists());
 }
 
 #[test]
@@ -265,24 +250,8 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
             .file_type()
             .is_symlink()
     );
-    let clean_manifest: serde_json::Value = serde_json::from_slice(
-        &fs::read(
-            summary_path(&output)
-                .parent()
-                .unwrap()
-                .join("manifests/clean.fits.complete.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(clean_manifest["complete"], true);
-    assert_eq!(clean_manifest["manifest_version"], 3);
-    assert_eq!(clean_manifest["input_sha256"].as_str().unwrap().len(), 64);
-    assert_eq!(clean_manifest["products"][0]["symlink"], true);
-    assert_eq!(
-        clean_manifest["products"][0]["sha256"],
-        file_sha256(&product_path(&output, "images", "clean.fits"))
-    );
+    assert!(!run_dir(&output).join("manifests").exists());
+    assert!(!run_dir(&output).join("previews").exists());
     let report = summary_path(&output);
     let v: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     let float_result = v["files"]
@@ -818,10 +787,10 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
     let heuristic_path = input.join("heuristics.toml");
     let heuristic_text = fs::read_to_string(&heuristic_path)
         .unwrap()
-        .replace("one=0.25", "one=1.0")
-        .replace("two=0.30", "two=1.0")
+        .replace("one=0.35", "one=1.0")
+        .replace("two=0.35", "two=1.0")
         .replace("three=0.35", "three=1.0")
-        .replace("four_or_more=0.41", "four_or_more=1.0");
+        .replace("four_or_more=0.47", "four_or_more=1.0");
     fs::write(&heuristic_path, heuristic_text).unwrap();
 
     let (width, height) = (128, 128);
@@ -931,6 +900,8 @@ fn crop_accounting_reports_preexisting_undefined_geometry_overlap() {
         .status()
         .unwrap();
     assert!(status.success());
+    assert!(!run_dir(&output).join("previews").exists());
+    assert!(!run_dir(&output).join("manifests").exists());
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     let image = &summary["files"][0];
@@ -984,15 +955,7 @@ fn crop_mode_keeps_source_when_valid_pixel_loss_dominates() {
     let report = summary_path(&output);
     let result: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(result["kept"], 1);
-    let manifest_path = summary_path(&output)
-        .parent()
-        .unwrap()
-        .join("manifests/four-corners.fits.complete.json");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
-    assert_eq!(manifest["complete"], true);
-    assert_eq!(manifest["products"][0]["kind"], "science_image");
-    assert_eq!(manifest["products"][0]["symlink"], true);
+    assert!(!run_dir(&output).join("manifests").exists());
     assert!(
         result["files"][0]["unmasked_pixels_sacrificed"]
             .as_u64()
@@ -1025,7 +988,7 @@ fn crop_mode_keeps_source_when_geometry_sacrifices_too_much_clean_area() {
     let heuristic_path = input.join("heuristics.toml");
     let heuristic_text = fs::read_to_string(&heuristic_path)
         .unwrap()
-        .replace("one=0.25", "one=0.10");
+        .replace("one=0.35", "one=0.10");
     fs::write(&heuristic_path, heuristic_text).unwrap();
 
     let source = input.join("four-corners.fits");
@@ -1229,7 +1192,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 8);
+    assert_eq!(summary["schema_version"], 9);
     assert_eq!(
         summary["output_images"], 0,
         "dry-run writes no image products"
@@ -1243,7 +1206,9 @@ fn dry_run_writes_reports_and_log_without_products() {
     assert_eq!(summary["files"][0]["masked_pixels"], 0);
     assert_eq!(summary["files"][0]["reason_code"], "dry_run_proposal");
     assert_eq!(summary["files"][0]["applied_artifact_pixels"], 0);
-    assert!(summary["files"][0]["output_manifest"].is_null());
+    assert!(summary["files"][0].get("output_manifest").is_none());
+    assert!(!run_dir(&output).join("manifests").exists());
+    assert!(!run_dir(&output).join("previews").exists());
     assert!(
         summary["files"][0]["proposed_mask_pixels"]
             .as_u64()
@@ -1251,6 +1216,69 @@ fn dry_run_writes_reports_and_log_without_products() {
             > 0
     );
     assert_eq!(summary["files"][0]["status"], "proposed");
+}
+
+#[test]
+fn malformed_nonstructural_header_card_is_annotated_and_image_is_processed() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+
+    let source = input.join("bad-metadata.fits");
+    create_fits(&source, -32, 96, 96, &artifact());
+    let mut bytes = fs::read(&source).unwrap();
+    let card_index = bytes
+        .chunks_exact(80)
+        .position(|card| &card[..8] == b"OBJECT  ")
+        .expect("test FITS has an OBJECT card");
+    let card = &mut bytes[card_index * 80..(card_index + 1) * 80];
+    let opening_quote = card.iter().position(|&byte| byte == b'\'').unwrap();
+    let closing_quote = card.iter().rposition(|&byte| byte == b'\'').unwrap();
+    assert!(closing_quote > opening_quote);
+    card[closing_quote] = b' ';
+    let original_bad_card: [u8; 80] = card.try_into().unwrap();
+    let history_index = bytes
+        .chunks_exact(80)
+        .position(|card| &card[..8] == b"HISTORY ")
+        .expect("test FITS has a HISTORY card");
+    let mut hierarch_card = [b' '; 80];
+    let hierarch_text = b"HIERARCH CAHA INS APERT NAME = 'test'";
+    hierarch_card[..hierarch_text.len()].copy_from_slice(hierarch_text);
+    bytes[history_index * 80..(history_index + 1) * 80].copy_from_slice(&hierarch_card);
+    fs::write(&source, bytes).unwrap();
+
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let result: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(result["total"], 1);
+    assert_eq!(result["errors"], 0);
+    assert_eq!(result["clipped"], 1);
+    assert_eq!(result["files"][0]["status"], "clipped");
+    let reason = result["files"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("ignored malformed non-structural FITS header card"));
+    assert!(reason.contains("OBJECT"));
+    assert!(reason.contains("unterminated string value"));
+
+    let output_path = product_path(&output, "images", "bad-metadata.fits");
+    assert!(
+        !fs::symlink_metadata(&output_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let output_bytes = fs::read(&output_path).unwrap();
+    assert!(
+        output_bytes
+            .chunks_exact(80)
+            .any(|card| card == original_bad_card)
+    );
+    assert!(
+        output_bytes
+            .chunks_exact(80)
+            .any(|card| card == hierarch_card)
+    );
 }
 
 #[test]
@@ -1290,12 +1318,7 @@ fn corrupt_candidate_returns_batch_error_status_and_is_reported() {
             .unwrap()
             .contains("source preserved unchanged by symlink")
     );
-    let manifest_path = run_dir(&output).join("manifests/broken.fits.complete.json");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
-    assert_eq!(manifest["complete"], true);
-    assert_eq!(manifest["status"], "error");
-    assert_eq!(manifest["products"][0]["symlink"], true);
+    assert!(!run_dir(&output).join("manifests").exists());
 }
 
 #[test]
@@ -1403,14 +1426,6 @@ fn compressed_and_multi_hdu_fits_are_ignored() {
             fs::canonicalize(&source).unwrap()
         );
         assert_eq!(fs::read(&preserved).unwrap(), fs::read(&source).unwrap());
-        let manifest_path = run_dir(&output)
-            .join("manifests")
-            .join(format!("{name}.complete.json"));
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
-        assert_eq!(manifest["complete"], true);
-        assert_eq!(manifest["status"], "ignored");
-        assert_eq!(manifest["products"][0]["symlink"], true);
     }
 }
 

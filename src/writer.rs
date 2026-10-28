@@ -1,5 +1,5 @@
 //! FITS products written with the pure-Rust fitskit crate.
-use crate::fits_image::{Image, unused_integer_value};
+use crate::fits_image::{Image, RawHeaderCard, read_fits_snapshot, unused_integer_value};
 use crate::{crop::CropRect, durability::sync_parent};
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
@@ -10,14 +10,14 @@ use tempfile::{NamedTempFile, TempDir};
 mod reason_mask_writer;
 pub use reason_mask_writer::write_reason_mask;
 
-/// Create a uint8 mask image with WCS and non-structural source cards.
-pub fn write_mask(
+fn write_mask_with_raw_header_cards(
     source_header: &Header,
     path: &Path,
     width: usize,
     height: usize,
     mask: &[bool],
     history: &str,
+    raw_header_cards: &[RawHeaderCard],
 ) -> anyhow::Result<()> {
     if mask.len() != width.saturating_mul(height) {
         bail!("mask dimensions do not match its data");
@@ -37,7 +37,7 @@ pub fn write_mask(
         &mut output.primary_mut().header,
         &format!("rust_fits_auto_cropping: {history}"),
     );
-    publish_fits(&output, path)?;
+    publish_fits_with_raw_header_cards(&output, path, raw_header_cards)?;
     verify_mask_file(path, width, height, mask)
 }
 
@@ -48,6 +48,7 @@ pub fn write_masked_image(
     mask: &[bool],
     bitpix: i64,
     blank_value: Option<i64>,
+    raw_header_cards: &[RawHeaderCard],
 ) -> anyhow::Result<()> {
     let mut output = source.clone();
     if output.len() != 1 {
@@ -125,7 +126,7 @@ pub fn write_masked_image(
         &mut hdu.header,
         "rust_fits_auto_cropping: border pixels marked undefined",
     );
-    publish_fits(&output, destination)?;
+    publish_fits_with_raw_header_cards(&output, destination, raw_header_cards)?;
     verify_masked_file(source, destination, mask, bitpix, blank_value)
 }
 
@@ -154,16 +155,18 @@ pub fn write_products(
                 data_mask,
                 image.bitpix,
                 blank_value,
+                &image.raw_header_cards,
             )
         },
         |staged_mask| {
-            write_mask(
+            write_mask_with_raw_header_cards(
                 &image.source_fits.primary().header,
                 staged_mask,
                 image.width,
                 image.height,
                 data_mask,
                 "companion mask; 1 marks newly rejected pixels",
+                &image.raw_header_cards,
             )
         },
     )
@@ -182,13 +185,14 @@ pub fn write_cropped_products(
         mask_path,
         |staged_image| write_cropped_image(staged_image, image, region),
         |staged_mask| {
-            write_mask(
+            write_mask_with_raw_header_cards(
                 &image.source_fits.primary().header,
                 staged_mask,
                 image.width,
                 image.height,
                 excluded_mask,
                 "crop exclusion mask; 1 marks pixels excluded from retained geometry",
+                &image.raw_header_cards,
             )
         },
     )
@@ -346,7 +350,7 @@ pub fn write_cropped_image(
         &mut hdu.header,
         "rust_fits_auto_cropping: selected maximum-area clean axis-aligned rectangle",
     );
-    publish_fits(&output, destination)?;
+    publish_fits_with_raw_header_cards(&output, destination, &image_info.raw_header_cards)?;
     verify_cropped_file(&image_info.source_fits, destination, &before, width, region)
 }
 
@@ -514,7 +518,7 @@ fn verify_cropped_file(
     region: CropRect,
 ) -> anyhow::Result<()> {
     let rect = region.bounds();
-    let check = FitsFile::from_file(destination)?;
+    let check = read_fits_snapshot(destination)?;
     if check.len() != 1 {
         bail!("cropped output does not contain exactly one HDU");
     }
@@ -563,15 +567,22 @@ fn verify_cropped_file(
 }
 
 pub(super) fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
+    publish_fits_with_raw_header_cards(file, destination, &[])
+}
+
+fn publish_fits_with_raw_header_cards(
+    file: &FitsFile,
+    destination: &Path,
+    raw_header_cards: &[RawHeaderCard],
+) -> anyhow::Result<()> {
     let parent = destination
         .parent()
         .context("FITS destination has no parent")?;
     let temp = NamedTempFile::new_in(parent)?;
-    let bytes = bytes_with_valid_checksum(file)?;
+    let bytes = bytes_with_valid_checksum_and_raw_cards(file, raw_header_cards)?;
     fs::write(temp.path(), bytes)?;
     temp.as_file().sync_all()?;
-    FitsFile::from_file(temp.path())
-        .context("reopening generated FITS")?
+    read_fits_snapshot(temp.path())?
         .primary()
         .verify_datasum()?;
     temp.persist(destination)
@@ -579,6 +590,46 @@ pub(super) fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Resul
         .with_context(|| format!("publishing FITS {}", destination.display()))?;
     sync_parent(destination)?;
     Ok(())
+}
+
+fn bytes_with_valid_checksum_and_raw_cards(
+    file: &FitsFile,
+    raw_header_cards: &[RawHeaderCard],
+) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = bytes_with_valid_checksum(file)?;
+    if raw_header_cards.is_empty() {
+        return Ok(bytes);
+    }
+
+    let mut cursor = Cursor::new(bytes.as_slice());
+    let _header = Header::read_from(&mut cursor)?;
+    let header_len = usize::try_from(cursor.position())?;
+    let check_card = bytes[..header_len]
+        .chunks_exact(80)
+        .position(|card| card.get(..8).is_some_and(|key| key == b"CHECKSUM"))
+        .map(|index| index * 80)
+        .context("serialized FITS has no CHECKSUM card")?;
+
+    for raw_card in raw_header_cards {
+        let marker_position = bytes[..header_len]
+            .chunks_exact(80)
+            .position(|card| card == raw_card.replacement)
+            .map(|index| index * 80)
+            .context("serialized FITS lost a raw source-header card marker")?;
+        bytes[marker_position..marker_position + 80].copy_from_slice(&raw_card.original);
+    }
+
+    // Pixel bytes are unchanged, so DATASUM is valid. Restore the CHECKSUM
+    // value over the final header that retains the exact original cards.
+    bytes[check_card + 11..check_card + 27].fill(b'0');
+    let sum = fitskit::checksum::checksum(&bytes);
+    let encoded = fitskit::checksum::encode_checksum(sum, true);
+    bytes[check_card + 11..check_card + 27].copy_from_slice(encoded.as_bytes());
+    let verified = fitskit::checksum::checksum(&bytes);
+    if verified != 0xffff_ffff && verified != 0 {
+        bail!("raw-header FITS CHECKSUM invariant failed: {verified:#010x}");
+    }
+    Ok(bytes)
 }
 
 /// Stamp checksums over the exact serialized HDU bytes, then verify the FITS
@@ -696,7 +747,7 @@ fn verify_mask_file(
     height: usize,
     expected: &[bool],
 ) -> anyhow::Result<()> {
-    let check = FitsFile::from_file(path)?;
+    let check = read_fits_snapshot(path)?;
     if check.len() != 1 {
         bail!("written mask does not contain exactly one HDU");
     }
@@ -723,7 +774,7 @@ fn verify_masked_file(
     expected_bitpix: i64,
     blank_value: Option<i64>,
 ) -> anyhow::Result<()> {
-    let check = FitsFile::from_file(path)?;
+    let check = read_fits_snapshot(path)?;
     if check.len() != 1 {
         bail!("written science output does not contain exactly one HDU");
     }

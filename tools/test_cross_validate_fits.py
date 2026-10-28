@@ -8,10 +8,12 @@ import tempfile
 from unittest.mock import patch
 
 import numpy as np
+from astropy.io import fits
 from astropy.io.fits import Header
 
 from tools.cross_validate_fits import (
     verify_crop_samples,
+    normalize_header_for_crosscheck,
     verify_preserved_header,
     verify_passthrough_symlink,
     verify_reason_codes,
@@ -50,6 +52,47 @@ def celestial_header() -> Header:
 
 
 class VerifyWcsTests(unittest.TestCase):
+    def test_crosscheck_repairs_malformed_source_card_without_touching_original(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "malformed.fits"
+            hdu = fits.PrimaryHDU(data=np.arange(64, dtype=np.int16).reshape(8, 8))
+            hdu.header["OBJECT"] = "test-field"
+            hdu.writeto(source)
+            original = bytearray(source.read_bytes())
+            card_index = next(
+                index
+                for index, card in enumerate(
+                    original[position : position + 80]
+                    for position in range(0, len(original), 80)
+                )
+                if card[:8] == b"OBJECT  "
+            )
+            offset = card_index * 80
+            card = original[offset : offset + 80]
+            quote_positions = [index for index, byte in enumerate(card) if byte == ord("'")]
+            self.assertGreater(len(quote_positions), 1)
+            original[offset + quote_positions[-1]] = ord(" ")
+            source.write_bytes(original)
+            source_bytes = source.read_bytes()
+            reason = (
+                f"ignored malformed non-structural FITS header card at byte {offset} "
+                "(OBJECT): unterminated string value"
+            )
+
+            scratch = root / "scratch"
+            scratch.mkdir()
+            malformed_card = bytes(source_bytes[offset : offset + 80])
+            normalized = normalize_header_for_crosscheck(
+                source, scratch, malformed_cards={malformed_card}
+            )
+            self.assertEqual(source.read_bytes(), source_bytes)
+            self.assertNotEqual(normalized, source)
+            with fits.open(normalized, memmap=False) as parsed:
+                np.testing.assert_array_equal(parsed[0].data, np.arange(64).reshape(8, 8))
+                self.assertTrue(any("OBJECT" in str(value) for value in parsed[0].header["COMMENT"]))
+            self.assertEqual(source.read_bytes()[offset : offset + 80], malformed_card)
+
     def test_primary_and_alternate_wcs_match_after_crop(self) -> None:
         source = celestial_header()
         output = source.copy()

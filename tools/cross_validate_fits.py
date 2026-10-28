@@ -11,7 +11,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import warnings
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -87,6 +89,62 @@ def open_one(path: Path) -> fits.HDUList:
     return hdus
 
 
+def read_primary_header_cards(path: Path) -> list[tuple[int, bytes]]:
+    cards: list[tuple[int, bytes]] = []
+    with path.open("rb") as stream:
+        offset = 0
+        while True:
+            block = stream.read(2880)
+            if len(block) != 2880:
+                raise AssertionError(f"{path}: truncated FITS header while validating")
+            for index in range(36):
+                start = index * 80
+                card = block[start : start + 80]
+                cards.append((offset + start, card))
+                if card[:3] == b"END" and card[3:8] == b"     ":
+                    return cards
+            offset += 2880
+
+
+def normalize_header_for_crosscheck(
+    path: Path,
+    temporary_directory: Path,
+    malformed_offsets: set[int] = frozenset(),
+    malformed_cards: set[bytes] = frozenset(),
+) -> Path:
+    """Normalize a disposable copy for Astropy; the science FITS stays untouched."""
+    cards = read_primary_header_cards(path)
+    repairs = [
+        (offset, card)
+        for offset, card in cards
+        if offset in malformed_offsets
+        or card.startswith(b"HIERARCH ")
+        or card in malformed_cards
+    ]
+    if not repairs:
+        return path
+
+    identity = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:12]
+    normalized = temporary_directory / f"{identity}-{path.name}"
+    shutil.copyfile(path, normalized)
+    with normalized.open("r+b") as stream:
+        for offset, original in repairs:
+            text = "".join(chr(byte) if 32 <= byte <= 126 else "?" for byte in original).rstrip()
+            replacement = (f"COMMENT {text}".encode("ascii")[:80]).ljust(80, b" ")
+            stream.seek(offset)
+            stream.write(replacement)
+    return normalized
+
+
+def card_at_offset(path: Path, offset: int) -> bytes:
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        card = stream.read(80)
+    if len(card) != 80:
+        raise AssertionError(f"{path}: malformed-card offset is outside the header")
+    return card
+
+
 def verify_checksums(path: Path, hdus: fits.HDUList, required: bool = True) -> None:
     hdu = hdus[0]
     if "CHECKSUM" not in hdu.header or "DATASUM" not in hdu.header:
@@ -95,6 +153,34 @@ def verify_checksums(path: Path, hdus: fits.HDUList, required: bool = True) -> N
         return
     if hdu.verify_checksum() != 1 or hdu.verify_datasum() != 1:
         raise AssertionError(f"{path}: Astropy checksum verification failed")
+
+
+def ones_complement_sum(data: bytes) -> int:
+    total = 0
+    for offset in range(0, len(data), 4):
+        total += int.from_bytes(data[offset : offset + 4].ljust(4, b"\0"), "big")
+        total = (total & 0xFFFFFFFF) + (total >> 32)
+    while total >> 32:
+        total = (total & 0xFFFFFFFF) + (total >> 32)
+    return total
+
+
+def verify_raw_checksums(path: Path, header: fits.Header) -> None:
+    """Verify checksums against original product bytes, including preserved raw cards."""
+    data = path.read_bytes()
+    if len(data) % 2880:
+        raise AssertionError(f"{path}: FITS file length is not a multiple of 2880 bytes")
+    if ones_complement_sum(data) != 0xFFFFFFFF:
+        raise AssertionError(f"{path}: raw FITS CHECKSUM does not sum to all ones")
+    end_offset = next(
+        (offset for offset, card in read_primary_header_cards(path) if card == b"END".ljust(80)),
+        None,
+    )
+    if end_offset is None:
+        raise AssertionError(f"{path}: FITS END card is missing")
+    data_offset = ((end_offset + 80 + 2879) // 2880) * 2880
+    if "DATASUM" not in header or ones_complement_sum(data[data_offset:]) != int(header["DATASUM"]):
+        raise AssertionError(f"{path}: raw FITS DATASUM does not match its data unit")
 
 
 def verify_crop_samples(original: np.ndarray, actual: np.ndarray, x0: int, y0: int, path: Path) -> None:
@@ -215,6 +301,11 @@ def verify_wcs(
         if re.fullmatch(r"CRPIX[12][A-Z]?", key):
             if not np.isclose(output[key], expected, rtol=0, atol=1e-12):
                 raise AssertionError(f"{path}: WCS card {key} changed or disappeared")
+        elif isinstance(expected, (int, float, np.number)) and isinstance(
+            output[key], (int, float, np.number)
+        ):
+            if not np.isclose(output[key], expected, rtol=1e-12, atol=1e-15):
+                raise AssertionError(f"{path}: WCS card {key} changed or disappeared")
         elif output[key] != expected:
             raise AssertionError(f"{path}: WCS card {key} changed or disappeared")
     if not check_coordinates or not keys:
@@ -323,6 +414,7 @@ def verify_tree(
             f"one-to-one image count failed: {summary['total']} inputs, {len(images)} outputs"
         )
     checked_images = checked_masks = checked_reason_masks = passthrough_count = 0
+    source_repair_temporaries: list[tempfile.TemporaryDirectory[str]] = []
     for output_path in images:
         record = records.get(os.path.normpath(str(output_path.absolute())))
         if record is None:
@@ -338,7 +430,30 @@ def verify_tree(
             checked_images += 1
             continue
         mask_path = output_dir / "masks" / relative
-        with open_one(source_path) as source, open_one(output_path) as output:
+        reason = record.get("reason", "")
+        temporary = tempfile.TemporaryDirectory(prefix="fits-header-crosscheck-")
+        source_repair_temporaries.append(temporary)
+        malformed_cards: set[bytes] = set()
+        malformed_match = re.search(
+            r"ignored malformed non-structural FITS header card at byte (\d+)", reason
+        )
+        if malformed_match:
+            malformed_cards.add(card_at_offset(source_path, int(malformed_match.group(1))))
+        validation_dir = Path(temporary.name)
+        source_check_path = normalize_header_for_crosscheck(
+            source_path, validation_dir, malformed_cards=malformed_cards
+        )
+        output_check_path = normalize_header_for_crosscheck(
+            output_path, validation_dir, malformed_cards=malformed_cards
+        )
+        mask_check_path = normalize_header_for_crosscheck(
+            mask_path, validation_dir, malformed_cards=malformed_cards
+        ) if mask_path.exists() else mask_path
+        reason_path = output_dir / "reason_masks" / relative
+        reason_check_path = normalize_header_for_crosscheck(
+            reason_path, validation_dir, malformed_cards=malformed_cards
+        ) if reason_path.exists() else reason_path
+        with open_one(source_check_path) as source, open_one(output_check_path) as output:
             if output_path.is_symlink():
                 if output_path.resolve() != source_path.resolve():
                     raise AssertionError(f"{output_path}: kept-image symlink does not target its input")
@@ -376,9 +491,9 @@ def verify_tree(
             elif original.shape != actual.shape:
                 raise AssertionError(f"{output_path}: dimensions changed without crop provenance")
             if mask_path.exists():
-                verify_checksums(output_path, output)
-                with open_one(mask_path) as mask_hdus:
-                    verify_checksums(mask_path, mask_hdus)
+                verify_raw_checksums(output_path, output[0].header)
+                with open_one(mask_check_path) as mask_hdus:
+                    verify_raw_checksums(mask_path, mask_hdus[0].header)
                     verify_provenance(mask_path, mask_hdus[0].header)
                     verify_preserved_header(
                         source[0].header,
@@ -412,10 +527,9 @@ def verify_tree(
                             raise AssertionError(f"{output_path}: retained integer values changed")
                     verify_wcs(source[0].header, mask_hdus[0].header, mask_path, 0, 0, False)
                 checked_masks += 1
-                reason_path = output_dir / "reason_masks" / relative
                 if reason_path.exists():
-                    with open_one(reason_path) as reason_hdus:
-                        verify_checksums(reason_path, reason_hdus)
+                    with open_one(reason_check_path) as reason_hdus:
+                        verify_raw_checksums(reason_path, reason_hdus[0].header)
                         verify_provenance(reason_path, reason_hdus[0].header)
                         verify_preserved_header(
                             source[0].header,
@@ -450,7 +564,8 @@ def verify_tree(
             else:
                 if (output_dir / "reason_masks" / relative).exists():
                     raise AssertionError(f"{output_path}: reason plane exists without a binary mask")
-                verify_checksums(output_path, output, required=False)
+                if not output_path.is_symlink():
+                    verify_raw_checksums(output_path, output[0].header)
                 if is_crop:
                     verify_crop_samples(original, actual, x0, y0, output_path)
                 elif not np.array_equal(actual, original, equal_nan=True):
@@ -458,9 +573,9 @@ def verify_tree(
         if fitsverify:
             reason_path = output_dir / "reason_masks" / relative
             for path in (
-                output_path,
-                *((mask_path,) if mask_path.exists() else ()),
-                *((reason_path,) if reason_path.exists() else ()),
+                output_check_path,
+                *((mask_check_path,) if mask_path.exists() else ()),
+                *((reason_check_path,) if reason_path.exists() else ()),
             ):
                 result = subprocess.run([fitsverify, str(path)], capture_output=True, text=True, check=False)
                 transcript = result.stdout + result.stderr
