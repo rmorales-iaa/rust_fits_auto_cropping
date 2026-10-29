@@ -106,8 +106,9 @@ pub enum UncertainPolicy {
 pub struct V2Rules {
     pub mesh_size_px: usize,
     /// Minimum samples a mesh keeps when its statistics use a strided
-    /// lattice (plan R6): stride floor(sqrt(mesh area / value)); 0 (default)
-    /// disables. A numerical change, opt-in until its harness evaluation passes.
+    /// lattice (plan R6): stride floor(sqrt(mesh area / value)); 0 disables.
+    /// Default 1024 (stride 2 on 64-px meshes), adopted after the 512/1024-px
+    /// null false-alarm and injection evaluation (validation.md).
     pub mesh_min_samples: usize,
     pub clip_kappa: f64,
     pub clip_iterations: usize,
@@ -144,7 +145,7 @@ impl Default for V2Rules {
     fn default() -> Self {
         Self {
             mesh_size_px: 64,
-            mesh_min_samples: 0,
+            mesh_min_samples: 1024,
             clip_kappa: 3.0,
             clip_iterations: 5,
             trusted_valid_fraction: 0.5,

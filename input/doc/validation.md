@@ -543,3 +543,35 @@ At the user's request, products keep the source header as it was. The only excep
 - **Calibration frames.** `tools/apply_crop.py` (byte-level copy, canonical checksum encoding identical to Astropy's in 2,000/2,000 random values) reproduced 59/59 held-out crops exactly, and all 59 outputs pass fitsverify.
 - **Write time.** Products no longer clone and re-serialize the image. Crop-mode write on the 37.8-Mpx frame fell from about 2.0 s to 0.9 s.
 
+## Speed, memory and multiscale round (2026-10-29)
+
+**Exact changes (decisions unchanged).** Each is verified by the decisions-only digest, identical run summaries over 12 corpus/mode runs, and dedicated bit-identity tests.
+
+| Change | 37.8-Mpx effect |
+| --- | --- |
+| tile_v1 multiscale scales evaluated concurrently; lazy lag-one correlation | multiscale detection 1.25–1.4 → 0.54–0.56 s; single-scale 0.35 → 0.17 s |
+| Parallel crop families (order-preserving merge); parallel summed-area tables | crop geometry 0.77–1.0 → 0.45 s |
+| Product data unit encoded directly (no clone or re-serialization) | crop write about 2.0 → 0.9 s |
+| v2 border-flood tile evaluation | clean frame 0.82 → 0.58 s; `candidate_tiles`/`score` now cover evaluated tiles |
+| BLANK presence table for 8/16-bit images | int16 v2 mask peak 1,077 → 660 MiB |
+
+**Weighted memory admission.** Peak model fitted to measured release peaks: f32/int16 × v2/v1 × mask/crop/crop_masked, plus previews. Six 37.8-Mpx frames, 4 workers:
+
+| `memory_budget_mib` | Peak RSS | Concurrency |
+| ---: | ---: | --- |
+| 2,500 | 1,430 MiB | two at a time |
+| 8,192 | 2,718 MiB | four at a time |
+
+**Strided mesh statistics (numerical change, adopted as default).** The harness was run with the change off and on (`FAR_SIZE` 512 with 1,000 null frames per family, and 1,024 with 300; injection n = 250 and 75):
+
+| Check | Off | On (`mesh_min_samples = 1024`) |
+| --- | --- | --- |
+| v2 null false alarms, 7 families × 2 sizes | 0 in every cell | 0 in every cell |
+| 512 px strip / raw stop / flat-divided stop / corner, detected | 250 / 250 / 240 / 27 of 250 | identical |
+| 512 px recall | 1.0000 / 1.0000 / 0.9377 / 0.1984 | 1.0000 / 1.0000 / 0.9376 / 0.1984 |
+| 512 px valid pixels removed, totals | 9,194 / 2,521 / 1,804 / 43 | 9,380 / 2,542 / 1,763 / 46 |
+| 1,024 px detected (strip / raw / calibrated) | 75 / 74 / 75 of 75 | identical |
+| 1,024 px valid pixels removed | 5,735 / 1,406 / 1,175 | 5,836 / 1,412 / 1,149 |
+
+Valid-loss differences are at most about 0.0003 percentage points of frame area, far below the plan's 0.1-point practical threshold, and their sign is mixed. Detection on 37.8 Mpx (median of 4, idle machine): clean frame 580 → 427 ms (−26%); strip frame 1,215 → about 1,100 ms (−9%). Frames whose meshes are smaller than 64 px, including all development and held-out corpora and the 256-px null gate, are unaffected (stride 1).
+
