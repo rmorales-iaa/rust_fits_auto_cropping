@@ -168,6 +168,12 @@ class VerifyReasonCodeTests(unittest.TestCase):
         codes = np.array([[1, 2], [3, 1]], dtype=np.uint8)
         verify_reason_codes(original, header, exclusion, codes, True, Path("crop-reasons.fits"))
 
+    def test_crop_mode_allows_detector_flags_inside_retained_rectangle(self) -> None:
+        original = np.array([[10.0, 11.0], [12.0, 13.0]])
+        exclusion = np.array([[0, 0], [1, 0]], dtype=np.uint8)
+        codes = np.array([[0, 4], [2, 0]], dtype=np.uint8)
+        verify_reason_codes(original, Header(), exclusion, codes, True, Path("residual-reasons.fits"))
+
     def test_reason_check_rejects_a_undefined_pixel_marked_as_crop_loss(self) -> None:
         original = np.array([[10, -99]], dtype=np.int16)
         header = Header()

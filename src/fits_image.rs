@@ -9,6 +9,8 @@ use std::{
     path::Path,
 };
 
+const ESTIMATED_WORKSPACE_BYTES_PER_PIXEL: usize = 40;
+
 #[derive(Debug)]
 pub struct NoUnusedIntegerCode {
     pub bitpix: i64,
@@ -81,7 +83,8 @@ pub fn read_image(
     let n = width
         .checked_mul(height)
         .ok_or_else(|| anyhow::anyhow!("image dimensions overflow"))?;
-    let max_pixels = maximum_image_mib.saturating_mul(1024 * 1024) / 32;
+    let max_pixels =
+        maximum_image_mib.saturating_mul(1024 * 1024) / ESTIMATED_WORKSPACE_BYTES_PER_PIXEL;
     if n > max_pixels {
         bail!(
             "image has {n} pixels; estimated workspace exceeds configured maximum_image_mib={maximum_image_mib}"

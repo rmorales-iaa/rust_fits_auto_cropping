@@ -172,7 +172,7 @@ fn transient_mask_trees_are_removed_and_not_listed_as_run_products() {
 
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
-    assert_eq!(summary["schema_version"], 9);
+    assert_eq!(summary["schema_version"], 11);
     assert_eq!(summary["output_images"], summary["total"]);
     assert!(summary["files"][0]["output_reason_mask"].is_null());
     assert!(!run_dir(&output).join("manifests").exists());
@@ -1192,13 +1192,16 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 9);
+    assert_eq!(summary["schema_version"], 11);
     assert_eq!(
         summary["output_images"], 0,
         "dry-run writes no image products"
     );
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
-    assert_eq!(summary["policy_version"], "heuristics-v1");
+    assert_eq!(
+        summary["policy_version"],
+        "heuristics-v3-residual-tolerant-rectangle"
+    );
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(summary["source_config_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(summary["clipped"], 0);

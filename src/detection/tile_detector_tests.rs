@@ -14,6 +14,7 @@ fn config() -> HeuristicRules {
         maximum_evidence_ratio: 5.0,
         valid_pixel_loss_cost: 1.5,
         minimum_net_utility: 0.001,
+        maximum_residual_artifact_fraction: 0.05,
         maximum_crop_sacrifice_fraction: 0.25,
         crop_sacrifice_fraction_by_border_component_count: None,
     }

@@ -2,7 +2,7 @@
 use crate::{
     cli::Args,
     config::{Config, HeuristicsConfig, ProcessingMode},
-    crop::largest_clean_region,
+    crop::{CropPolicy, largest_clean_region, residual_tolerant_rectangle},
     detection::detect_border,
     durability::sync_parent,
     fits_image::{NoUnusedIntegerCode, is_gzip_compressed, read_image},
@@ -386,7 +386,7 @@ fn process_one(
                     .zip(&image.values)
                     .filter(|(candidate, value)| **candidate && !value.is_finite())
                     .count();
-                let crop = if matches!(config.processing.mode, ProcessingMode::Crop)
+                let crop_search = if matches!(config.processing.mode, ProcessingMode::Crop)
                     && image.crop_wcs_unsupported.is_none()
                 {
                     let crop_exclusions: Vec<bool> = detection
@@ -395,13 +395,46 @@ fn process_one(
                         .zip(&image.values)
                         .map(|(&candidate, value)| candidate || !value.is_finite())
                         .collect();
-                    largest_clean_region(&crop_exclusions, image.width, image.height)
+                    let undefined: Vec<bool> =
+                        image.values.iter().map(|v| !v.is_finite()).collect();
+                    largest_clean_region(&crop_exclusions, image.width, image.height).and_then(
+                        |anchor| {
+                            residual_tolerant_rectangle(
+                                &detection.mask,
+                                &undefined,
+                                image.width,
+                                image.height,
+                                anchor,
+                                CropPolicy {
+                                    maximum_residual_artifact_fraction: heuristics
+                                        .heuristics
+                                        .maximum_residual_artifact_fraction,
+                                    maximum_unmasked_sacrifice_fraction: heuristics
+                                        .heuristics
+                                        .crop_sacrifice_limit(detection.accepted_components),
+                                    evidence_ratio: detection.evidence_ratio,
+                                    valid_pixel_loss_cost: heuristics
+                                        .heuristics
+                                        .valid_pixel_loss_cost,
+                                    minimum_net_utility: heuristics.heuristics.minimum_net_utility,
+                                },
+                            )
+                        },
+                    )
                 } else {
                     None
                 };
+                let selected_crop =
+                    crop_search.map(|search| search.accepted.unwrap_or(search.proposed));
+                let crop = selected_crop.map(|candidate| candidate.rect);
                 let crop_wcs_mask_fallback = matches!(config.processing.mode, ProcessingMode::Crop)
                     && image.crop_wcs_unsupported.is_some();
-                let mut crop_accepted = false;
+                let crop_accepted = crop_search.is_some_and(|search| search.accepted.is_some());
+                if let (Some(search), Some(candidate)) = (crop_search, selected_crop) {
+                    outcome.crop_search_candidates = search.candidates_examined;
+                    outcome.crop_search_step_px = search.pixel_step;
+                    outcome.crop_residual_artifact_fraction = candidate.residual_artifact_fraction;
+                }
                 if matches!(config.processing.mode, ProcessingMode::Crop) && crop.is_none() {
                     if crop_wcs_mask_fallback {
                         outcome.reason_code = "crop_wcs_mask_fallback";
@@ -422,7 +455,6 @@ fn process_one(
                 }
                 if let Some(rect) = crop {
                     let total = image.width * image.height;
-                    let defined = total - outcome.original_undefined_pixels;
                     let bounds = rect.bounds();
                     let excluded: Vec<bool> = (0..total)
                         .map(|i| !rect.retains(i % image.width, i / image.width))
@@ -460,27 +492,19 @@ fn process_one(
                         .mask
                         .iter()
                         .zip(&excluded)
-                        .filter(|(artifact, excluded)| **artifact && !**excluded)
+                        .zip(&image.values)
+                        .filter(|((artifact, excluded), value)| {
+                            **artifact && !**excluded && value.is_finite()
+                        })
                         .count();
-                    let artifact_fraction =
-                        outcome.artifact_pixels_removed as f64 / defined.max(1) as f64;
-                    let valid_loss_fraction =
-                        outcome.unmasked_pixels_sacrificed as f64 / defined.max(1) as f64;
-                    outcome.artifact_benefit = artifact_fraction * detection.evidence_ratio;
-                    outcome.valid_pixel_loss = heuristics.heuristics.valid_pixel_loss_cost
-                        * valid_loss_fraction
-                        / (1.0 - valid_loss_fraction).max(f64::EPSILON);
-                    outcome.net_utility = outcome.artifact_benefit - outcome.valid_pixel_loss;
-                    let remaining_defined = defined
-                        .saturating_sub(outcome.artifact_pixels_removed)
-                        .max(1);
-                    let crop_sacrifice_fraction =
-                        outcome.unmasked_pixels_sacrificed as f64 / remaining_defined as f64;
+                    let chosen = selected_crop.expect("crop rectangle came from a search result");
+                    outcome.artifact_benefit = chosen.artifact_benefit;
+                    outcome.valid_pixel_loss = chosen.valid_pixel_loss;
+                    outcome.net_utility = chosen.net_utility;
+                    let crop_sacrifice_fraction = chosen.sacrifice_fraction;
                     let crop_sacrifice_limit = heuristics
                         .heuristics
                         .crop_sacrifice_limit(detection.accepted_components);
-                    crop_accepted = crop_sacrifice_fraction <= crop_sacrifice_limit
-                        && outcome.net_utility >= heuristics.heuristics.minimum_net_utility;
                     if !crop_accepted {
                         outcome.status = OutcomeKind::Kept;
                         outcome.reason_code = if crop_sacrifice_fraction > crop_sacrifice_limit {
@@ -490,13 +514,17 @@ fn process_one(
                         };
                     }
                     outcome.reason.push_str(&format!(
-                        "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels and sacrifices {} unmasked pixels ({:.1}% of remaining defined area; limit {:.1}% for {} accepted border-connected area(s)); crop utility {:.4} (benefit {:.4} - loss {:.4}) {}",
+                        "; proposed {} crop origin ({}, {}), bounds {}x{}, retained {} pixels; removes {} artifact pixels, retains {} flagged pixels ({:.2}% of crop; limit {:.2}%), and sacrifices {} unmasked pixels ({:.1}% of remaining defined area; limit {:.1}% for {} accepted border-connected area(s)); utility {:.4} (benefit {:.4} - loss {:.4}); residual search evaluated {} rectangles at {} px step {}",
                         rect.shape_name(), bounds.x, bounds.y, bounds.width, bounds.height, rect.retained_pixels(),
-                        outcome.artifact_pixels_removed, outcome.unmasked_pixels_sacrificed,
+                        outcome.artifact_pixels_removed, outcome.crop_artifact_pixels_retained,
+                        100.0 * outcome.crop_residual_artifact_fraction,
+                        100.0 * heuristics.heuristics.maximum_residual_artifact_fraction,
+                        outcome.unmasked_pixels_sacrificed,
                         100.0 * crop_sacrifice_fraction,
                         100.0 * crop_sacrifice_limit,
                         detection.accepted_components,
                         outcome.net_utility, outcome.artifact_benefit, outcome.valid_pixel_loss,
+                        outcome.crop_search_candidates, outcome.crop_search_step_px,
                         if crop_accepted { "accepted" } else { "rejected; source retained" }
                     ));
                 }

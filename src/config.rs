@@ -86,6 +86,9 @@ pub struct HeuristicRules {
     pub maximum_evidence_ratio: f64,
     pub valid_pixel_loss_cost: f64,
     pub minimum_net_utility: f64,
+    #[serde(default = "default_maximum_residual_artifact_fraction")]
+    /// Maximum fraction of defined pixels in a crop that may retain detector flags.
+    pub maximum_residual_artifact_fraction: f64,
     #[serde(default = "default_maximum_crop_sacrifice_fraction")]
     /// Legacy/fallback limit used by heuristic files without a component-count table.
     pub maximum_crop_sacrifice_fraction: f64,
@@ -120,6 +123,11 @@ impl HeuristicRules {
 
 fn default_maximum_crop_sacrifice_fraction() -> f64 {
     0.35
+}
+
+fn default_maximum_residual_artifact_fraction() -> f64 {
+    // Older custom heuristic files retain the pre-feature strict crop rule.
+    0.0
 }
 
 impl Config {
@@ -199,6 +207,11 @@ impl HeuristicsConfig {
         {
             bail!("heuristics.maximum_crop_sacrifice_fraction must be in [0, 1]");
         }
+        if !h.maximum_residual_artifact_fraction.is_finite()
+            || !(0.0..=1.0).contains(&h.maximum_residual_artifact_fraction)
+        {
+            bail!("heuristics.maximum_residual_artifact_fraction must be in [0, 1]");
+        }
         if let Some(limits) = h.crop_sacrifice_fraction_by_border_component_count {
             let values = [limits.one, limits.two, limits.three, limits.four_or_more];
             if values
@@ -253,6 +266,7 @@ minimum_evidence_ratio = 1.25
 maximum_evidence_ratio = 5.0
 valid_pixel_loss_cost = 1.5
 minimum_net_utility = 0.001
+maximum_residual_artifact_fraction = 0.05
 maximum_crop_sacrifice_fraction = 0.35
 
 [heuristics.crop_sacrifice_fraction_by_border_component_count]
@@ -290,6 +304,23 @@ mod tests {
         );
         let config: HeuristicsConfig = toml::from_str(&text).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn residual_artifact_fraction_is_bounded_and_shipped_default_is_explicit() {
+        for value in ["-0.01", "1.01", "nan"] {
+            let text = DEFAULT_HEURISTICS.replace(
+                "maximum_residual_artifact_fraction = 0.05",
+                &format!("maximum_residual_artifact_fraction = {value}"),
+            );
+            let config: HeuristicsConfig = toml::from_str(&text).unwrap();
+            assert!(
+                config.validate().is_err(),
+                "accepted residual fraction {value}"
+            );
+        }
+        let config: HeuristicsConfig = toml::from_str(DEFAULT_HEURISTICS).unwrap();
+        assert_eq!(config.heuristics.maximum_residual_artifact_fraction, 0.05);
     }
 
     #[test]

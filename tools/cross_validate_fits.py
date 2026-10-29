@@ -212,8 +212,8 @@ def verify_reason_codes(
 ) -> None:
     if original.shape != reason_codes.shape or exclusion_mask.shape != reason_codes.shape:
         raise AssertionError(f"{path}: reason-plane dimensions do not match source/mask")
-    if reason_codes.dtype != np.dtype("uint8") or not np.isin(reason_codes, (0, 1, 2, 3)).all():
-        raise AssertionError(f"{path}: reason plane must be uint8 with codes 0..3")
+    if reason_codes.dtype != np.dtype("uint8") or not np.isin(reason_codes, (0, 1, 2, 3, 4)).all():
+        raise AssertionError(f"{path}: reason plane must be uint8 with codes 0..4")
 
     undefined = ~np.isfinite(original)
     if not np.issubdtype(original.dtype, np.floating) and "BLANK" in source_header:
@@ -227,8 +227,11 @@ def verify_reason_codes(
         raise AssertionError(f"{path}: reason exclusions disagree with the binary action mask")
     if not is_crop and not np.array_equal(reason_codes == 1, defined_excluded):
         raise AssertionError(f"{path}: mask-mode artifact reason codes are inconsistent")
-    if not np.array_equal(reason_codes == 0, ~undefined & (exclusion_mask == 0)):
+    retained_defined = ~undefined & (exclusion_mask == 0)
+    if not np.array_equal((reason_codes == 0) | (reason_codes == 4), retained_defined):
         raise AssertionError(f"{path}: retained-pixel reason codes are inconsistent")
+    if not is_crop and (reason_codes == 4).any():
+        raise AssertionError(f"{path}: mask-mode cannot retain detector-flagged pixels")
 
 
 def verify_preserved_header(
@@ -538,7 +541,7 @@ def verify_tree(
                             "reason",
                         )
                         reason = reason_hdus[0]
-                        if reason.header.get("RSCHEME") != "PIXACT1":
+                        if reason.header.get("RSCHEME") != "PIXACT2":
                             raise AssertionError(f"{reason_path}: unknown reason-code scheme")
                         if "BUNIT" in reason.header:
                             raise AssertionError(f"{reason_path}: reason plane must be dimensionless")

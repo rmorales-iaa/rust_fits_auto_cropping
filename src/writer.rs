@@ -908,7 +908,7 @@ mod tests {
             HeaderValue::String(history.into()),
             None,
         ));
-        write_reason_mask(&fits.primary().header, &reason, 2, 2, &[0, 1, 2, 3]).unwrap();
+        write_reason_mask(&fits.primary().header, &reason, 5, 1, &[0, 1, 2, 3, 4]).unwrap();
 
         let bytes = fs::read(&reason).unwrap();
         assert!(!bytes.windows(8).any(|window| window == b"CONTINUE"));

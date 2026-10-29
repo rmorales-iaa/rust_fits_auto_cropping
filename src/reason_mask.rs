@@ -3,8 +3,9 @@
 /// Build a full-frame reason plane from original sample validity, detector
 /// evidence, and pixels excluded by the selected action.
 ///
-/// Codes are 0 retained, 1 detector-selected artifact exclusion, 2 crop-only
-/// sacrifice of a defined pixel, and 3 pre-existing undefined input sample.
+/// Codes are 0 retained unflagged sample, 1 detector-selected artifact
+/// exclusion, 2 crop-only sacrifice of a defined pixel, 3 pre-existing
+/// undefined input sample, and 4 detector-flagged sample retained by the crop.
 pub fn build(
     values: &[f64],
     detector_mask: &[bool],
@@ -24,6 +25,8 @@ pub fn build(
                 1
             } else if *excluded {
                 2
+            } else if *detected {
+                4
             } else {
                 0
             }
@@ -42,13 +45,13 @@ mod tests {
         let excluded = [true, true, false, true, false];
         assert_eq!(
             build(&values, &detector, &excluded).unwrap(),
-            [1, 2, 0, 3, 0]
+            [1, 2, 4, 3, 4]
         );
     }
 
     #[test]
     fn detector_evidence_is_not_reported_as_removed_when_action_keeps_it() {
-        assert_eq!(build(&[1.0], &[true], &[false]).unwrap(), [0]);
+        assert_eq!(build(&[1.0], &[true], &[false]).unwrap(), [4]);
     }
 
     #[test]

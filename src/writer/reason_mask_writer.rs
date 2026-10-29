@@ -15,7 +15,7 @@ pub fn write_reason_mask(
     height: usize,
     codes: &[u8],
 ) -> anyhow::Result<()> {
-    if codes.len() != width.saturating_mul(height) || codes.iter().any(|code| *code > 3) {
+    if codes.len() != width.saturating_mul(height) || codes.iter().any(|code| *code > 4) {
         bail!("reason-plane dimensions or codes are invalid");
     }
     let mut output = FitsFile::with_primary_image(ImageData::new(
@@ -31,7 +31,7 @@ pub fn write_reason_mask(
     stamp_processing_metadata(&mut output.primary_mut().header);
     output.primary_mut().header.set(
         "RSCHEME",
-        HeaderValue::String("PIXACT1".into()),
+        HeaderValue::String("PIXACT2".into()),
         Some("pixel action reason codes; not science validity"),
     );
     for definition in [
@@ -39,6 +39,7 @@ pub fn write_reason_mask(
         "Reason code 1: excluded by accepted detector artifact mask",
         "Reason code 2: defined pixel sacrificed by crop geometry only",
         "Reason code 3: input sample already undefined before processing",
+        "Reason code 4: detector flagged but retained inside residual-tolerant crop",
     ] {
         push_history(
             &mut output.primary_mut().header,
@@ -60,7 +61,7 @@ fn verify_reason_mask_file(
         bail!("written reason plane does not contain exactly one HDU");
     }
     check.primary().verify_datasum()?;
-    if check.primary().header.get_string("RSCHEME") != Some("PIXACT1") {
+    if check.primary().header.get_string("RSCHEME") != Some("PIXACT2") {
         bail!("written reason plane has no recognized code scheme");
     }
     let actual = match &check.primary().data {
