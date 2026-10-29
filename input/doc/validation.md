@@ -388,3 +388,21 @@ v2 removes 0 valid pixels on the A20 edge source and A03 vignetting nulls (v1: 2
 
 ### Test totals
 98 unit + 33 end-to-end + 4 version tests (plus 6 ignored manual harnesses), strict Clippy and rustfmt clean; 25 Python tests (19 checker, 6 evaluation tools).
+
+### Yearly batch script review (2026-10-29)
+
+`scripts/process_cropped_years.sh` was rewritten after review. Fixes:
+- **Orphaned crop processes.** Background jobs of a non-interactive bash ignore SIGINT, so Ctrl-C used to leave the crop process writing into an already sanitized directory. A signal trap and a wrapper that forwards TERM to the crop process fix this.
+- **Path guards** before `--sanitize-output`: absolute, non-root, non-nested roots and no symlinked output directories.
+- **Exclusive lock** per output root.
+- **Exit-status classification** separates input errors from failures.
+- **Per-year report:** summary counts, parity check and elapsed time.
+- **Final progress line** is now rendered even when a short run finishes before its log is polled.
+- **New options:** multi-year selection, `--mode`, `--heuristics`, `--no-png` and the read-only `--plan`.
+
+Evidence:
+- ShellCheck 0.11 is clean.
+- `scripts/test_process_cropped_years.sh` passes 42 mock-based checks, including TERM and job-control SIGINT runs; both verify the crop process is gone.
+- A real release-binary run on two synthetic years (9 FITS inputs each) gave 9/9 outputs per year with bias/flat links and the missing dark reported.
+- The independent FITS checker, extended to the `--flat-output` layout it previously could not read, verified all 18 entries.
+- The preview checker verified the 3 previews in each year.

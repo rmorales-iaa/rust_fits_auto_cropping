@@ -25,7 +25,21 @@ Pass `--help` for options, examples, crop semantics and exit codes. `--version` 
 
 ## Yearly calibrated-image workflow
 
-[`scripts/process_cropped_years.sh`](scripts/process_cropped_years.sh) creates `/mnt/uxmal_groups/image_storage/cropped/<year>/`, links the `bias/`, `dark/`, and `flat/` directories from `rust_om_cal`, and processes `science_calibrated/` recursively in crop mode with PNG previews enabled. It shows a per-year progress bar driven by completed FITS files. Before each year run, `--sanitize-output` clears the contents of only its dedicated `science_calibrated/` destination. FITS products and reports go directly under that path; previews remain in its `previews/` directory, with no `images/` or `runs/<run-id>/` layer for current products. Test one year with `scripts/process_cropped_years.sh --year 2002`; with no arguments it processes years 2002 through 2026. Existing non-symlink calibration destinations and links that point elsewhere are left untouched and reported as errors.
+[`scripts/process_cropped_years.sh`](scripts/process_cropped_years.sh) creates `/mnt/uxmal_groups/image_storage/cropped/<year>/`, links the `bias/`, `dark/`, and `flat/` directories from `rust_om_cal`, and processes `science_calibrated/` recursively in crop mode with PNG previews enabled. It shows a per-year progress bar driven by completed FITS files. Before each year run, `--sanitize-output` clears the contents of only its dedicated `science_calibrated/` destination. FITS products and reports go directly under that path; previews remain in its `previews/` directory, with no `images/` or `runs/<run-id>/` layer for current products. Test one year with `scripts/process_cropped_years.sh --year 2002`; with no arguments it processes years 2002 through 2026. Other selections:
+- repeat `--year`;
+- `--years 2009,2011,2017` for a list;
+- `--from 2009 --to 2012` for a range.
+
+`--mode crop|crop_masked|mask` and `--heuristics PATH` (for example a rule copy selecting the v2 detector) are passed through; `--no-png` disables previews. `--plan` validates paths and prints FITS counts and sanitation targets without writing or deleting anything.
+
+Safety:
+- The script refuses relative, filesystem-root, identical or nested source/output roots and symlinked output directories.
+- An exclusive lock (`OUTPUT_ROOT/.process_cropped_years.lock`) prevents two batches from sanitizing the same storage.
+- Ctrl-C or TERM stops the crop process itself; earlier versions left it running.
+
+After each year it prints input/output counts, clipped/kept/ignored/error totals, the parity check and the elapsed time, and finally a per-year status. Exit status: 1 marks years that failed, were incomplete, or completed with preserved malformed inputs.
+
+Existing non-symlink calibration destinations and links that point elsewhere are left untouched and reported as errors. Run `bash scripts/test_process_cropped_years.sh` for its mock-based regression tests (42 checks).
 
 ## Products and configuration
 

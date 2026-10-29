@@ -459,8 +459,20 @@ def verify_wcs(
 def verify_tree(
     input_dir: Path, output_dir: Path, fitsverify: str | None
 ) -> tuple[int, int, int, int]:
-    images = sorted((output_dir / "images").rglob("*"))
-    images = [path for path in images if path.is_file()]
+    # Default layout keeps images under images/; --flat-output places FITS
+    # entries directly in the run root beside previews/ and reports.
+    image_root = output_dir / "images"
+    if image_root.is_dir():
+        images = [path for path in sorted(image_root.rglob("*")) if path.is_file()]
+    else:
+        fits_suffixes = (".fits", ".fit", ".fts", ".fz", ".gz")
+        images = [
+            path
+            for path in sorted(output_dir.rglob("*"))
+            if path.is_file()
+            and path.name.lower().endswith(fits_suffixes)
+            and "previews" not in path.relative_to(output_dir).parts
+        ]
     summary = json.loads((output_dir / "summary.json").read_text())
     records = {
         os.path.normpath(record["output_image"]): record
