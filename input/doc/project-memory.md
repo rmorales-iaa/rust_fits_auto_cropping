@@ -1,6 +1,13 @@
 # Project memory
 
-Updated: 2026-10-29, after Revision 3 (v2 default, crop policy, plan review) and the Revision 2 implementation (R0, R1 tools/harness, R2-R4, partial R6), plan Revision 2, large-image remediation and the disputed crop-geometry review.
+Updated: 2026-10-29, after the documentation/branch round, the verbatim-header/MO_ and speed/memory rounds, Revision 3 (v2 default, crop policy, plan review) and the Revision 2 implementation (R0, R1 tools/harness, R2-R4, partial R6), plan Revision 2, large-image remediation and the disputed crop-geometry review.
+
+## Documentation and branch round (2026-10-29, user request)
+
+- The user asked to update documentation, skills, memory, CLI help and README, then merge existing branches, commit and push.
+- CLI `--help` now describes the shipped crop policy (crop residual 0, `crop_masked` 5%, cap 10%, exchange rate 0.5, `bbox_mask` fallback, full-frame rectangle as mask), verbatim headers with MO_ keywords, `tools/apply_crop.py` and weighted memory admission.
+- Reference digests after this round: DECISIONS `017ca3d2ddacff150ba70351ec8bdc9812ed9adc06f4d49893568f09eb0ac2cf` (unchanged by the exact speedups and the strided mesh adoption on the harness corpus); the full EQUIVALENCE digest changed once with the border flood, because it hashes diagnostics the flood redefines.
+- Branches: only `main` (71ec091) exists besides `claude/eager-galileo-khb8fs`, and it is already an ancestor, so no merge was needed. Pushes go only to `claude/eager-galileo-khb8fs`.
 
 ## Speed, memory and multiscale (2026-10-29, user request)
 
@@ -33,7 +40,7 @@ Updated: 2026-10-29, after Revision 3 (v2 default, crop policy, plan review) and
   - `tools/shadow_compare.py` (R5.0) and `tools/drift_monitor.py` (R5.2).
   - Exact R6 speedups: decision-identical; wall time about 2.5x faster on 37.8 Mpx; peak RSS 18-47% lower.
 - The user then asked mid-task that only actually cropped images get crop metadata in the FITS header, with a clear "cropped" marker, so calibration frames can be matched and cropped the same way. Implemented:
-  - cards CROPPED, CROPSEC, ORIGNAX1/2, LTV1/2, CROPUNDF, ORIGSHA, ORIGFILE;
+  - cards CROPPED, CROPSEC, ORIGNAX1/2, LTV1/2, CROPUNDF, ORIGSHA, ORIGFILE (superseded the same day by the MO_ cards above);
   - full-frame rectangles become masks;
   - `tools/apply_crop.py` applies the crop to calibration frames;
   - DATASEC/TRIMSEC/BIASSEC/CCDSEC are copied unchanged and still refer to original coordinates.
@@ -82,9 +89,9 @@ Updated: 2026-10-29, after Revision 3 (v2 default, crop policy, plan review) and
 - Classification depends on pixel statistics and geometry only. Structural/scaling/null metadata is necessary for decoding; WCS metadata is necessary for output preservation. Descriptive header values do not steer the detector. Evaluation groups may use instrument/night metadata without making it a classifier feature.
 - Process eligible single-HDU 2D images; compressed/multi-HDU inputs are not classified, but normal runs preserve every discovered FITS path as exactly one `images/` entry. Malformed non-structural cards use same-width placeholders only in the parser's temporary view, are annotated, then restored byte-for-byte in generated headers while processing pixels. Unreadable structural layout cards remain errors because FITS payload offsets cannot then be determined safely. Unsupported/unreadable inputs are passed through as canonical-source symlinks. No resampling or source intensity modification beyond explicit exclusion. Preserve raw retained samples and original observations.
 - Maximize valid science retained and true artifact area removed under a declared valid-loss and source-preservation budget. A larger mask is not inherently better. Candidate artifacts, original undefined samples, uncertain boundaries and geometric sacrifice are different quantities.
-- Mask mode remains the default. Crop mode starts from the exact global maximum-area axis-aligned rectangle over the combined detector-exclusion and originally undefined-pixel mask, then may enlarge it within the bounded residual-tolerant search (5% shipped flagged fraction; undefined samples never retained). There is no circular geometry constraint. Products contain no excluded or originally undefined pixels, `NAXIS1/2` match output dimensions, and supported CRPIX cards shift by crop origin. Crop mode also has a configurable hard cap on unmasked geometric sacrifice as a fraction of defined non-artifact pixels, selected by accepted border-touching component count (35/35/35/47% for one/two/three/four-or-more areas); beyond it the source is kept unchanged. This is a conservative provisional safeguard, not a calibrated science-loss model.
+- Mask mode remains the default. Crop mode starts from the exact global maximum-area axis-aligned rectangle over the combined detector-exclusion and originally undefined-pixel mask, then may enlarge it within the bounded residual-tolerant search (shipped residual 0 in crop mode and 5% in `crop_masked`, where retained flags are written undefined; undefined samples are never retained). There is no circular geometry constraint. `NAXIS1/2` match output dimensions, CRPIX cards (all WCS letters) and existing LTV1/2 shift by the crop origin, and cropped products carry `MO_CROP = T`, `MO_SEC`, `MO_ONAX1/2` and `MO_X0/Y0` on the original frame. The shipped valid-pixel sacrifice cap is a flat 10% with exchange rate 0.5; when no rectangle passes, the `bbox_mask` fallback applies, and a full-frame rectangle is written as a mask. The older component-count tier table (35/35/35/47%) is optional and no longer shipped. These limits are synthetic-corpus choices, not a calibrated science-loss model.
 - Regression for `science#2007_01_11T20_57_04...`: current rectangle at `(336,144)`, `1040×1296` / 1,347,840 pixels, versus the superseded circle-constrained `1085×1085` / 1,177,225 pixels; output keeps 170,615 additional pixels. Release `0.1.64` passed Rust/Clippy/format checks and Astropy/fitsverify plus all 16 preview checks on the 25-file development set. See [validation evidence](validation.md). This does not close the independent science-label gate.
-- Kept eligible images and unsupported/malformed pass-throughs are canonical source symlinks. Generated products carry version/time provenance and checksums. Preserve source headers through kept links.
+- Kept eligible images and unsupported/malformed pass-throughs are canonical source symlinks. Generated products carry MO_ provenance keywords (program/version, UTC time, action, algorithm, source SHA-256) and checksums. Preserve source headers through kept links.
 - Each invocation uses `<output>/runs/<run-id>/` for images, masks, previews, reports and ISO activity logging. Validate output paths and overlap; preserve prior runs and unrelated files. Build state is ignored under `output/.state/`.
 - Keep bounded concurrency, separate runtime/science TOML, small modules and coherent local commits. Do not claim actual memory bounds or scientific accuracy from estimates or passing unit tests alone.
 
@@ -168,6 +175,8 @@ A review found that lookup-table/distortion WCS metadata caused crop mode to sym
 Implementation and validation: release `0.1.98` adds `crop_wcs_mask_fallback`; the synthetic CPDIS end-to-end test confirms a decoded frame is written with the accepted artifact pixels marked undefined and a summary warning. The 25-input run `20261028T100255.644897914Z` remained 25/25 with 5 crops, 15 kept and 5 malformed-source errors; this corpus had no lookup-distortion cases, so the fallback was exercised by the synthetic regression. Both sidecar directories were removed, all 5 previews passed Astropy sample checks, and Astropy/fitsverify passed all image entries. Rust (55 unit, 27 end-to-end, 4 version), Python (15) tests, Clippy and formatting pass.
 
 ## Crop sacrifice cap tiers introduced — 2026-10-28
+
+_Historical: superseded by Revision 3 (flat 10% cap, exchange rate 0.5, `bbox_mask` fallback)._
 
 The configurable `crop_sacrifice_fraction_by_border_component_count` table is 35%, 35%, 35% and 47% for one, two, three and four-or-more accepted border-touching areas. A connected area touching multiple image sides counts once. The thresholds remain provisional, not calibrated science-loss boundaries. Malformed non-structural header cards are represented by same-width placeholders only during parsing and restored byte-for-byte before writing generated products; the original card is reported in the per-image reason. `malformed_nonstructural_header_card_is_annotated_and_image_is_processed` checks both pixel processing and byte-preserved malformed cards. Structural cards required to locate and decode pixels still must parse.
 

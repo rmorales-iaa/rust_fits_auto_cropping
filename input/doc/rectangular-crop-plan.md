@@ -1,6 +1,6 @@
 # Rectangular FITS crop contract
 
-Status: implemented and verified on 2026-10-28. The exact rectangle maximizes retained area under the detector-plus-undefined mask; independent science-label evaluation remains open.
+Status: implemented and verified on 2026-10-28. Historical card names: `CLIPSHAP`/`CLIPX0`... were later replaced; cropped products now carry `MO_CROP`, `MO_SEC`, `MO_ONAX1/2` and `MO_X0/Y0` (see README "Product headers"). The exact rectangle maximizes retained area under the detector-plus-undefined mask; independent science-label evaluation remains open.
 
 ## Requirement and interpretation
 

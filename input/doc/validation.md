@@ -520,7 +520,7 @@ The two builds' ranges do not overlap. In mask mode, the product write stage fel
 
 ### Crop provenance and calibration cropping
 
-- **Cards.** Cropped products carry `CROPPED`, `CROPSEC`, `ORIGNAX1/2`, `LTV1/2`, `CROPUNDF`, `ORIGSHA` and `ORIGFILE`. The writer verifies them on the on-disk snapshot, and the independent checker verifies them against the source file, including its SHA-256. Uncropped products carry none.
+- **Cards** (superseded the same day by the `MO_` keywords; see "Verbatim product headers" below). Cropped products carried `CROPPED`, `CROPSEC`, `ORIGNAX1/2`, `LTV1/2`, `CROPUNDF`, `ORIGSHA` and `ORIGFILE`. The writer verifies them on the on-disk snapshot, and the independent checker verifies them against the source file, including its SHA-256. Uncropped products carry none.
 - **Full-frame rectangles.** A full-frame `crop_masked` rectangle is now written as a mask (`crop_full_frame_mask`).
 - **Calibration tool.** `tools/apply_crop.py` was tested on unsigned int16 bias data (BZERO 32768 preserved; raw samples identical) and on its refusals (size mismatch, uncropped reference, already cropped frame, existing output). Unit tests caught and fixed two defects before release: Astropy dropping BZERO/BSCALE from new HDUs, and an eager underflow in section parsing.
 - **Alignment check.** Applying each held-out crop product's section to its own source frame reproduced the product exactly in 59/59 cases: same section and LTV, and identical samples outside the `CROPUNDF` undefined pixels.
