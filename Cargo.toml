@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Conservative border artifact detection and cropping for single-HDU FITS images"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0"
