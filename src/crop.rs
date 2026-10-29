@@ -9,6 +9,11 @@ pub struct CropPolicy {
     pub evidence_ratio: f64,
     pub valid_pixel_loss_cost: f64,
     pub minimum_net_utility: f64,
+    /// Optional lambda: sacrificed unflagged pixels <= lambda * flags removed.
+    pub exchange_rate: Option<f64>,
+    /// True when retained flags will be set undefined in the product
+    /// (`crop_masked`), so they count as removed artifacts.
+    pub mask_retained_flags: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,6 +73,9 @@ pub fn residual_tolerant_rectangle(
         || policy.valid_pixel_loss_cost < 0.0
         || !policy.minimum_net_utility.is_finite()
         || policy.minimum_net_utility < 0.0
+        || policy
+            .exchange_rate
+            .is_some_and(|rate| !rate.is_finite() || rate < 0.0)
         || clean_anchor.width == 0
         || clean_anchor.height == 0
         || clean_anchor.x.checked_add(clean_anchor.width)? > width
@@ -126,13 +134,18 @@ pub fn residual_tolerant_rectangle(
                     if residual_artifact_fraction > policy.maximum_residual_artifact_fraction {
                         continue;
                     }
-                    let removed_artifact_pixels = total_artifacts - retained_artifact_pixels;
+                    let excluded_artifact_pixels = total_artifacts - retained_artifact_pixels;
                     // Every sample inside the crop occupies area, including
                     // tolerated flags; remove those and excluded flags to get
                     // the number of defined unflagged samples sacrificed.
                     let sacrificed_valid_pixels = defined_pixels
                         .saturating_sub(area)
-                        .saturating_sub(removed_artifact_pixels);
+                        .saturating_sub(excluded_artifact_pixels);
+                    let removed_artifact_pixels = if policy.mask_retained_flags {
+                        total_artifacts
+                    } else {
+                        excluded_artifact_pixels
+                    };
                     let sacrifice_denominator = defined_pixels
                         .saturating_sub(removed_artifact_pixels)
                         .max(1);
@@ -159,8 +172,12 @@ pub fn residual_tolerant_rectangle(
                     if best_residual.is_none_or(|best| candidate_is_better(candidate, best)) {
                         best_residual = Some(candidate);
                     }
+                    let exchange_ok = policy.exchange_rate.is_none_or(|rate| {
+                        sacrificed_valid_pixels as f64 <= rate * removed_artifact_pixels as f64
+                    });
                     if sacrifice_fraction <= policy.maximum_unmasked_sacrifice_fraction
                         && candidate.net_utility >= policy.minimum_net_utility
+                        && exchange_ok
                         && best_accepted.is_none_or(|best| candidate_is_better(candidate, best))
                     {
                         best_accepted = Some(candidate);
@@ -266,10 +283,6 @@ impl CropRect {
 
     pub fn bounds(self) -> CropRect {
         self
-    }
-
-    pub fn retained_pixels(self) -> usize {
-        self.area()
     }
 
     pub fn shape_name(self) -> &'static str {
@@ -443,7 +456,56 @@ mod tests {
             evidence_ratio: 2.0,
             valid_pixel_loss_cost: 0.0,
             minimum_net_utility: utility,
+            exchange_rate: None,
+            mask_retained_flags: false,
         }
+    }
+
+    #[test]
+    fn exchange_rate_rejects_crops_that_sacrifice_too_many_valid_pixels() {
+        // One flagged corner pixel; any rectangle excluding it sacrifices
+        // at least one valid pixel per flag removed.
+        let artifacts = [true, false, false, false];
+        let anchor = CropRect {
+            x: 1,
+            y: 0,
+            width: 1,
+            height: 2,
+        };
+        let mut strict = policy(0.0, 1.0, 0.0);
+        strict.exchange_rate = Some(0.5);
+        let rejected =
+            residual_tolerant_rectangle(&artifacts, &[false; 4], 2, 2, anchor, strict).unwrap();
+        assert!(rejected.accepted.is_none());
+        strict.exchange_rate = Some(1.0);
+        let accepted =
+            residual_tolerant_rectangle(&artifacts, &[false; 4], 2, 2, anchor, strict).unwrap();
+        assert_eq!(accepted.accepted.unwrap().sacrificed_valid_pixels, 1);
+    }
+
+    #[test]
+    fn masked_retained_flags_count_as_removed_without_changing_sacrifice() {
+        let width = 5;
+        let mut artifacts = vec![false; 10];
+        artifacts[0] = true;
+        artifacts[5] = true;
+        let anchor = CropRect {
+            x: 1,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+        let mut masked = policy(0.25, 1.0, 0.0);
+        masked.mask_retained_flags = true;
+        let result =
+            residual_tolerant_rectangle(&artifacts, &[false; 10], width, 2, anchor, masked)
+                .unwrap()
+                .accepted
+                .unwrap();
+        assert_eq!(result.rect.area(), 10);
+        assert_eq!(result.retained_artifact_pixels, 2);
+        assert_eq!(result.removed_artifact_pixels, 2);
+        assert_eq!(result.sacrificed_valid_pixels, 0);
     }
 
     #[test]

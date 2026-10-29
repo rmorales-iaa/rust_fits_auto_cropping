@@ -142,6 +142,11 @@ def main() -> int:
                     raise AssertionError(
                         f"{png_path}: crop panel mismatch at source ({global_x},{global_y})"
                     )
+            elif tuple(png[right_y, right_x]) != (0, 0, 0):
+                # Undefined product samples (including crop_masked interiors) render black.
+                raise AssertionError(
+                    f"{png_path}: undefined crop sample at ({global_x},{global_y}) is not black"
+                )
         count += 1
     print(f"Astropy ZScale and PNG geometry verified for {count} preview(s)")
     return 0

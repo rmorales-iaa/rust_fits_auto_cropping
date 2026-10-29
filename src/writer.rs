@@ -141,8 +141,108 @@ pub fn write_cropped_product(
     region: CropRect,
 ) -> anyhow::Result<()> {
     publish_single_product(image_path, |staged_image| {
-        write_cropped_image(staged_image, image, region)
+        write_cropped_image(staged_image, image, region, None)
     })
+}
+
+/// Publish a rectangular crop whose samples flagged in the full-frame
+/// `interior_mask` are set undefined (BLANK or NaN). Used by `crop_masked`
+/// (decision D2) and the `bbox_mask` fallback (decision D1). Falls back to a
+/// plain crop when no flagged sample lies inside `region`.
+pub fn write_cropped_masked_product(
+    image_path: &Path,
+    image: &Image,
+    region: CropRect,
+    interior_mask: &[bool],
+) -> anyhow::Result<()> {
+    if interior_mask.len() != image.width.saturating_mul(image.height) {
+        bail!("interior mask dimensions do not match the image");
+    }
+    let rect = region.bounds();
+    let inside_flagged = (rect.y..rect.y + rect.height)
+        .any(|y| (rect.x..rect.x + rect.width).any(|x| interior_mask[y * image.width + x]));
+    if !inside_flagged {
+        return write_cropped_product(image_path, image, region);
+    }
+    let blank_value = if image.bitpix > 0 {
+        Some(match image.blank_value {
+            Some(blank) => blank,
+            None => {
+                // A new code must be absent from every retained stored sample.
+                let excluded: Vec<bool> = (0..interior_mask.len())
+                    .map(|i| !region.retains(i % image.width, i / image.width) || interior_mask[i])
+                    .collect();
+                choose_mask_blank(&image.source_fits, image.bitpix, &excluded)?
+            }
+        })
+    } else {
+        None
+    };
+    publish_single_product(image_path, |staged_image| {
+        write_cropped_image(
+            staged_image,
+            image,
+            region,
+            Some(CropInterior {
+                mask: interior_mask,
+                blank: blank_value,
+            }),
+        )
+    })
+}
+
+/// Samples inside a crop to be marked undefined, with the integer sentinel.
+#[derive(Clone, Copy)]
+pub struct CropInterior<'a> {
+    pub mask: &'a [bool],
+    pub blank: Option<i64>,
+}
+
+/// Mark cropped samples undefined where the full-frame mask is set.
+fn apply_crop_interior(
+    pixels: &mut PixelData,
+    source_width: usize,
+    rect: CropRect,
+    interior: CropInterior<'_>,
+) -> anyhow::Result<usize> {
+    let mut count = 0usize;
+    macro_rules! mark {
+        ($values:expr, $replacement:expr) => {{
+            for cy in 0..rect.height {
+                for cx in 0..rect.width {
+                    if interior.mask[(rect.y + cy) * source_width + rect.x + cx] {
+                        $values[cy * rect.width + cx] = $replacement;
+                        count += 1;
+                    }
+                }
+            }
+        }};
+    }
+    let blank = interior.blank;
+    match pixels {
+        PixelData::U8(v) => {
+            let b =
+                u8::try_from(blank.context("missing BLANK")?).context("BLANK exceeds BITPIX=8")?;
+            mark!(v, b)
+        }
+        PixelData::I16(v) => {
+            let b = i16::try_from(blank.context("missing BLANK")?)
+                .context("BLANK exceeds BITPIX=16")?;
+            mark!(v, b)
+        }
+        PixelData::I32(v) => {
+            let b = i32::try_from(blank.context("missing BLANK")?)
+                .context("BLANK exceeds BITPIX=32")?;
+            mark!(v, b)
+        }
+        PixelData::I64(v) => {
+            let b = blank.context("missing BLANK")?;
+            mark!(v, b)
+        }
+        PixelData::F32(v) => mark!(v, f32::NAN),
+        PixelData::F64(v) => mark!(v, f64::NAN),
+    }
+    Ok(count)
 }
 
 /// Write and verify a product in a sibling staging directory, then atomically
@@ -181,6 +281,7 @@ pub fn write_cropped_image(
     destination: &Path,
     image_info: &Image,
     region: CropRect,
+    interior: Option<CropInterior<'_>>,
 ) -> anyhow::Result<()> {
     let mut output = image_info.source_fits.clone();
     if output.len() != 1 {
@@ -206,6 +307,16 @@ pub fn write_cropped_image(
     let before = image.pixels.clone();
     image.pixels = crop_pixel_data(&image.pixels, width, rect);
     image.axes = vec![rect.width, rect.height];
+    let interior_count = match interior {
+        Some(interior) => {
+            if interior.mask.len() != before.len() {
+                bail!("interior mask dimensions do not match the source");
+            }
+            apply_crop_interior(&mut image.pixels, width, rect, interior)?
+        }
+        None => 0,
+    };
+    let expected_pixels = image.pixels.clone();
     for axis in 1..=2 {
         let prefix = format!("CRPIX{axis}");
         let offset = if axis == 1 { rect.x } else { rect.y } as f64;
@@ -231,6 +342,16 @@ pub fn write_cropped_image(
     {
         hdu.header.keywords.retain(|card| card.name != "BLANK");
     }
+    let interior_blank = interior.and_then(|interior| interior.blank);
+    if interior_count > 0
+        && let Some(blank) = interior_blank
+    {
+        hdu.header.set(
+            "BLANK",
+            HeaderValue::Integer(blank),
+            Some("undefined pixel value"),
+        );
+    }
     remove_data_extrema(&mut hdu.header);
     hdu.header.set(
         "CLIPX0",
@@ -248,12 +369,22 @@ pub fn write_cropped_image(
         Some("pixel-derived crop geometry"),
     );
     stamp_processing_metadata(&mut hdu.header);
-    push_history(
-        &mut hdu.header,
-        "rust_fits_auto_cropping: selected maximum-area clean axis-aligned rectangle",
-    );
+    let history = if interior_count > 0 {
+        format!(
+            "rust_fits_auto_cropping: selected axis-aligned rectangle; {interior_count} detector-flagged samples inside it set undefined"
+        )
+    } else {
+        "rust_fits_auto_cropping: selected axis-aligned rectangle".to_owned()
+    };
+    push_history(&mut hdu.header, &history);
     publish_fits_with_raw_header_cards(&output, destination, &image_info.raw_header_cards)?;
-    verify_cropped_file(&image_info.source_fits, destination, &before, width, region)
+    verify_cropped_file(
+        &image_info.source_fits,
+        destination,
+        &expected_pixels,
+        region,
+        (interior_count > 0).then_some(interior_blank).flatten(),
+    )
 }
 
 pub(super) fn stamp_processing_metadata(header: &mut Header) {
@@ -415,9 +546,9 @@ fn integer_value_in_range(bitpix: i64, value: i64) -> bool {
 fn verify_cropped_file(
     original: &FitsFile,
     destination: &Path,
-    before: &PixelData,
-    source_width: usize,
+    expected: &PixelData,
     region: CropRect,
+    interior_blank: Option<i64>,
 ) -> anyhow::Result<()> {
     let rect = region.bounds();
     let check = read_fits_snapshot(destination)?;
@@ -429,10 +560,13 @@ fn verify_cropped_file(
         HduData::Image(image) => image,
         _ => bail!("cropped output primary HDU is not an image"),
     };
-    if image.axes != [rect.width, rect.height]
-        || image.pixels.to_bytes() != crop_pixel_data(before, source_width, rect).to_bytes()
-    {
+    if image.axes != [rect.width, rect.height] || image.pixels.to_bytes() != expected.to_bytes() {
         bail!("cropped FITS shape or raw samples changed during writing");
+    }
+    if let Some(blank) = interior_blank
+        && check.primary().header.get_int("BLANK") != Some(blank)
+    {
+        bail!("cropped FITS BLANK card does not match the interior sentinel");
     }
     let header = &check.primary().header;
     if header.get_string("CLIPSHAP") != Some("RECTANGLE")

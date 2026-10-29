@@ -27,6 +27,29 @@ pub enum ProcessingMode {
     #[default]
     Mask,
     Crop,
+    /// Tolerant rectangle whose retained detector-flagged samples are set
+    /// undefined (decision D2); internal BLANK/NaN samples are allowed.
+    CropMasked,
+}
+
+impl ProcessingMode {
+    /// True for modes that select a rectangular product geometry.
+    pub fn is_crop(self) -> bool {
+        matches!(self, Self::Crop | Self::CropMasked)
+    }
+}
+
+/// Action when no crop rectangle passes the sacrifice/utility gates
+/// (decision D1). `bbox_mask` crops to the tight bounding box of retained,
+/// defined, unflagged samples and marks remaining flagged samples undefined.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CropFallback {
+    /// Legacy behaviour for rule files without the key: keep the source.
+    #[default]
+    Keep,
+    Mask,
+    BboxMask,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -94,6 +117,13 @@ pub struct HeuristicRules {
     pub maximum_crop_sacrifice_fraction: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop_sacrifice_fraction_by_border_component_count: Option<CropSacrificeLimits>,
+    /// Crop-mode action when no rectangle is accepted (decision D1).
+    #[serde(default)]
+    pub crop_fallback: CropFallback,
+    /// Optional exchange rate lambda (plan R4.1): accept a crop only if
+    /// sacrificed unflagged defined pixels <= lambda * flagged pixels removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop_exchange_rate: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -154,9 +184,9 @@ impl Config {
         }
         if !matches!(
             self.processing.mode,
-            ProcessingMode::Mask | ProcessingMode::Crop
+            ProcessingMode::Mask | ProcessingMode::Crop | ProcessingMode::CropMasked
         ) {
-            bail!("processing.mode must be 'mask' or 'crop'");
+            bail!("processing.mode must be 'mask', 'crop' or 'crop_masked'");
         }
         Ok(())
     }
@@ -211,6 +241,11 @@ impl HeuristicsConfig {
             || !(0.0..=1.0).contains(&h.maximum_residual_artifact_fraction)
         {
             bail!("heuristics.maximum_residual_artifact_fraction must be in [0, 1]");
+        }
+        if let Some(rate) = h.crop_exchange_rate
+            && (!rate.is_finite() || rate < 0.0)
+        {
+            bail!("heuristics.crop_exchange_rate must be finite and non-negative");
         }
         if let Some(limits) = h.crop_sacrifice_fraction_by_border_component_count {
             let values = [limits.one, limits.two, limits.three, limits.four_or_more];
@@ -268,6 +303,7 @@ valid_pixel_loss_cost = 1.5
 minimum_net_utility = 0.001
 maximum_residual_artifact_fraction = 0.05
 maximum_crop_sacrifice_fraction = 0.35
+crop_fallback = "bbox_mask"
 
 [heuristics.crop_sacrifice_fraction_by_border_component_count]
 one = 0.35
@@ -331,6 +367,26 @@ mod tests {
         assert_eq!(config.heuristics.crop_sacrifice_limit(3), 0.35);
         assert_eq!(config.heuristics.crop_sacrifice_limit(4), 0.47);
         assert_eq!(config.heuristics.crop_sacrifice_limit(8), 0.47);
+    }
+
+    #[test]
+    fn crop_fallback_defaults_to_keep_for_legacy_files_and_ships_bbox_mask() {
+        let shipped: HeuristicsConfig = toml::from_str(DEFAULT_HEURISTICS).unwrap();
+        assert_eq!(shipped.heuristics.crop_fallback, CropFallback::BboxMask);
+        let legacy = DEFAULT_HEURISTICS.replace("crop_fallback = \"bbox_mask\"\n", "");
+        let legacy: HeuristicsConfig = toml::from_str(&legacy).unwrap();
+        assert_eq!(legacy.heuristics.crop_fallback, CropFallback::Keep);
+        assert!(legacy.heuristics.crop_exchange_rate.is_none());
+    }
+
+    #[test]
+    fn rejects_negative_exchange_rate() {
+        let text = DEFAULT_HEURISTICS.replace(
+            "crop_fallback = \"bbox_mask\"",
+            "crop_fallback = \"bbox_mask\"\ncrop_exchange_rate = -1.0",
+        );
+        let config: HeuristicsConfig = toml::from_str(&text).unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]

@@ -13,6 +13,7 @@ from astropy.io.fits import Header
 
 from tools.cross_validate_fits import (
     verify_crop_samples,
+    verify_masked_samples,
     normalize_header_for_crosscheck,
     verify_preserved_header,
     verify_passthrough_symlink,
@@ -193,6 +194,35 @@ class VerifyCropSamplesTests(unittest.TestCase):
         crop[0, 0] += 1
         with self.assertRaisesRegex(AssertionError, "crop samples differ"):
             verify_crop_samples(source, crop, 2, 1, Path("bad-crop.fits"))
+
+    def test_masked_crop_interior_requires_reported_count_and_blank(self) -> None:
+        source = np.arange(1, 31, dtype=np.int16).reshape(5, 6)
+        crop = source[1:4, 2:5].copy()
+        crop[0, 0] = -1
+        header = Header()
+        header["BLANK"] = -1
+        verify_crop_samples(source, crop, 2, 1, Path("cm.fits"), Header(), header, 1)
+        with self.assertRaisesRegex(AssertionError, "newly undefined"):
+            verify_crop_samples(source, crop, 2, 1, Path("cm.fits"), Header(), header, 2)
+        changed = crop.copy()
+        changed[1, 1] += 5
+        with self.assertRaisesRegex(AssertionError, "retained samples differ"):
+            verify_crop_samples(source, changed, 2, 1, Path("cm.fits"), Header(), header, 1)
+
+
+class VerifyMaskedSamplesTests(unittest.TestCase):
+    def test_float_mask_product_counts_new_nans_and_keeps_original_nans(self) -> None:
+        source = np.ones((4, 4), dtype=np.float32)
+        source[0, 0] = np.nan
+        product = source.copy()
+        product[3, :] = np.nan
+        verify_masked_samples(source, Header(), product, Header(), 4, Path("m.fits"))
+        with self.assertRaisesRegex(AssertionError, "report says 3"):
+            verify_masked_samples(source, Header(), product, Header(), 3, Path("m.fits"))
+        revived = product.copy()
+        revived[0, 0] = 1.0
+        with self.assertRaisesRegex(AssertionError, "became defined"):
+            verify_masked_samples(source, Header(), revived, Header(), 3, Path("m.fits"))
 
 
 class VerifyHeaderPolicyTests(unittest.TestCase):

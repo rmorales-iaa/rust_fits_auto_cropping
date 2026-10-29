@@ -18,6 +18,13 @@ minimum_net_utility = 0.001
 # Provisional crop-only ceiling: flagged defined pixels retained / defined pixels in crop.
 maximum_residual_artifact_fraction = 0.05
 maximum_crop_sacrifice_fraction = 0.35 # fallback for older files without the area-count table.
+# Crop-mode action when no rectangle passes the gates (user decision D1):
+# "keep" (legacy default when omitted), "mask", or "bbox_mask" = crop to the
+# tight bounding box of retained unflagged samples and mark flags undefined.
+crop_fallback = "bbox_mask"
+# Optional exchange rate (plan R4.1, opt-in): accept a crop only if sacrificed
+# unflagged pixels <= rate * flagged pixels removed. Omitted = not applied.
+# crop_exchange_rate = 1.0
 
 [heuristics.crop_sacrifice_fraction_by_border_component_count]
 one = 0.35

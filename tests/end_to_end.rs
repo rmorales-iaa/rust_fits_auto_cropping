@@ -172,7 +172,7 @@ fn transient_mask_trees_are_removed_and_not_listed_as_run_products() {
 
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
-    assert_eq!(summary["schema_version"], 11);
+    assert_eq!(summary["schema_version"], 12);
     assert_eq!(summary["output_images"], summary["total"]);
     assert!(summary["files"][0]["output_reason_mask"].is_null());
     assert!(!run_dir(&output).join("manifests").exists());
@@ -1036,7 +1036,7 @@ fn png_flag_requires_effective_crop_mode() {
         .output()
         .unwrap();
     assert_eq!(result.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("--png requires crop mode"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--png requires a crop mode"));
     assert!(!output.exists());
 }
 
@@ -1192,7 +1192,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(summary["dry_run"], true);
-    assert_eq!(summary["schema_version"], 11);
+    assert_eq!(summary["schema_version"], 12);
     assert_eq!(
         summary["output_images"], 0,
         "dry-run writes no image products"
@@ -1200,7 +1200,7 @@ fn dry_run_writes_reports_and_log_without_products() {
     assert_eq!(summary["algorithm_version"], "tile-detector-v1");
     assert_eq!(
         summary["policy_version"],
-        "heuristics-v3-residual-tolerant-rectangle"
+        "heuristics-v4-crop-fallback-actions"
     );
     assert_eq!(summary["executable_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(summary["source_config_sha256"].as_str().unwrap().len(), 64);
@@ -1509,4 +1509,192 @@ fn recursive_flag_discovers_nested_fits() {
     create_fits(&nested.join("candidate.fits"), -32, 96, 96, &artifact());
     assert!(invoke_recursive(&input, &output, &input.join("config.toml")).success());
     assert!(product_path(&output, "images", "night1/candidate.fits").exists());
+}
+
+fn crop_config(input: &Path, extra_heuristics: &str, mode: &str) -> PathBuf {
+    config(input);
+    let config_path = input.join("config.toml");
+    let text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("mode=\"mask\"", &format!("mode=\"{mode}\""));
+    fs::write(&config_path, text).unwrap();
+    let heuristic_path = input.join("heuristics.toml");
+    let text = fs::read_to_string(&heuristic_path).unwrap().replace(
+        "maximum_crop_sacrifice_fraction=0.35\n",
+        &format!("maximum_crop_sacrifice_fraction=0.35\n{extra_heuristics}"),
+    );
+    fs::write(&heuristic_path, text).unwrap();
+    config_path
+}
+
+/// Left strip (16 columns) plus a top-right 16x16 corner on a 96x96 frame.
+fn strip_and_corner() -> Vec<f64> {
+    let mut pixels = vec![100.0; 96 * 96];
+    for y in 0..96 {
+        for x in 0..96 {
+            if x < 16 || (x >= 80 && y >= 80) {
+                pixels[y * 96 + x] = 0.0;
+            }
+        }
+    }
+    pixels
+}
+
+#[test]
+fn bbox_fallback_crops_to_retained_support_and_masks_remaining_flags() {
+    for bitpix in [-32_i64, 16] {
+        let t = tempdir().unwrap();
+        let input = t.path().join("in");
+        let output = t.path().join("out");
+        fs::create_dir(&input).unwrap();
+        let config_path = crop_config(&input, "crop_fallback=\"bbox_mask\"\n", "crop");
+        // Force rejection of every rectangle by the sacrifice cap.
+        let heuristic_path = input.join("heuristics.toml");
+        let text = fs::read_to_string(&heuristic_path)
+            .unwrap()
+            .replace("one=0.35", "one=0.05")
+            .replace("two=0.35", "two=0.05")
+            .replace("three=0.35", "three=0.05")
+            .replace("four_or_more=0.47", "four_or_more=0.05");
+        fs::write(&heuristic_path, text).unwrap();
+        let source_pixels = strip_and_corner();
+        create_fits(&input.join("frame.fits"), bitpix, 96, 96, &source_pixels);
+        assert!(invoke(&input, &output, &config_path).success());
+
+        let summary: serde_json::Value =
+            serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+        let record = &summary["files"][0];
+        assert_eq!(record["action"], "bbox_mask", "{record}");
+        assert_eq!(record["reason_code"], "crop_fallback_bbox_mask");
+        assert_eq!(record["status"], "clipped");
+        assert_eq!(record["unmasked_pixels_sacrificed"], 0);
+        assert_eq!(record["crop_artifact_pixels_retained"], 0);
+        assert_eq!(record["crop_origin_x"], 16);
+        assert_eq!(record["crop_width"], 80);
+        assert_eq!(record["crop_height"], 96);
+        assert_eq!(record["crop_interior_masked_pixels"], 256);
+        assert_eq!(
+            record["artifact_pixels_removed"], record["proposed_mask_pixels"],
+            "every accepted flag is removed"
+        );
+
+        let path = product_path(&output, "images", "frame.fits");
+        assert!(path.to_string_lossy().ends_with("frame_cropped.fits"));
+        assert!(
+            !fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let product = FitsFile::from_file(&path).unwrap();
+        let header = &product.primary().header;
+        assert_eq!(header.require_int("NAXIS1").unwrap(), 80);
+        assert_eq!(header.require_int("NAXIS2").unwrap(), 96);
+        assert_eq!(header.get_int("CLIPX0"), Some(16));
+        assert_eq!(header.get_float("CRPIX1"), Some(48.5 - 16.0));
+        product.primary().verify_datasum().unwrap();
+        let HduData::Image(data) = &product.primary().data else {
+            panic!()
+        };
+        let blank = header.get_int("BLANK");
+        for y in 0..96 {
+            for x in 0..80 {
+                let source = source_pixels[y * 96 + x + 16];
+                let flagged = x + 16 >= 80 && y >= 80;
+                match &data.pixels {
+                    PixelData::F32(v) => {
+                        let got = v[y * 80 + x];
+                        assert!(if flagged {
+                            got.is_nan()
+                        } else {
+                            got == source as f32
+                        });
+                    }
+                    PixelData::I16(v) => {
+                        let got = i64::from(v[y * 80 + x]);
+                        if flagged {
+                            assert_eq!(Some(got), blank);
+                        } else {
+                            assert_eq!(got, source as i64);
+                            assert_ne!(Some(got), blank);
+                        }
+                    }
+                    other => panic!("unexpected storage {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn crop_masked_mode_keeps_larger_rectangle_with_flags_undefined() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    let config_path = crop_config(
+        &input,
+        "maximum_residual_artifact_fraction=0.05\ncrop_fallback=\"bbox_mask\"\n",
+        "crop_masked",
+    );
+    let (width, height) = (192, 96);
+    let mut pixels = vec![100.0; width * height];
+    for y in 0..height {
+        for x in 0..8 {
+            pixels[y * width + x] = 0.0;
+        }
+    }
+    create_fits(&input.join("strip.fits"), -32, width, height, &pixels);
+    assert!(invoke(&input, &output, &config_path).success());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    let record = &summary["files"][0];
+    assert_eq!(record["action"], "crop_masked", "{record}");
+    assert_eq!(record["reason_code"], "crop_masked_applied");
+    assert_eq!(record["crop_width"], 192);
+    assert_eq!(record["crop_interior_masked_pixels"], 768);
+    assert_eq!(record["crop_artifact_pixels_retained"], 0);
+    assert_eq!(record["unmasked_pixels_sacrificed"], 0);
+    let product = FitsFile::from_file(product_path(&output, "images", "strip.fits")).unwrap();
+    let HduData::Image(data) = &product.primary().data else {
+        panic!()
+    };
+    let PixelData::F32(values) = &data.pixels else {
+        panic!()
+    };
+    for y in 0..height {
+        for x in 0..width {
+            let got = values[y * width + x];
+            assert!(if x < 8 { got.is_nan() } else { got == 100.0 });
+        }
+    }
+}
+
+#[test]
+fn legacy_rules_without_fallback_still_keep_rejected_crops() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    let config_path = crop_config(&input, "", "crop");
+    let heuristic_path = input.join("heuristics.toml");
+    let text = fs::read_to_string(&heuristic_path)
+        .unwrap()
+        .replace("one=0.35", "one=0.05")
+        .replace("two=0.35", "two=0.05")
+        .replace("three=0.35", "three=0.05")
+        .replace("four_or_more=0.47", "four_or_more=0.05");
+    fs::write(&heuristic_path, text).unwrap();
+    create_fits(&input.join("frame.fits"), -32, 96, 96, &strip_and_corner());
+    assert!(invoke(&input, &output, &config_path).success());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(summary["files"][0]["action"], "keep");
+    assert_eq!(summary["files"][0]["reason_code"], "crop_sacrifice_limit");
+    assert!(
+        fs::symlink_metadata(product_path(&output, "images", "frame.fits"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }

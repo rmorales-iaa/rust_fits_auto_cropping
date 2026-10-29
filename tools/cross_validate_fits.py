@@ -183,9 +183,68 @@ def verify_raw_checksums(path: Path, header: fits.Header) -> None:
         raise AssertionError(f"{path}: raw FITS DATASUM does not match its data unit")
 
 
-def verify_crop_samples(original: np.ndarray, actual: np.ndarray, x0: int, y0: int, path: Path) -> None:
-    """Check crop pixels against their input region without mask sidecars."""
+def undefined_samples(data: np.ndarray, header: fits.Header) -> np.ndarray:
+    """Undefined samples: NaN/inf for floats, BLANK for integer storage."""
+    if np.issubdtype(data.dtype, np.floating):
+        return ~np.isfinite(data)
+    if "BLANK" in header:
+        return data == header["BLANK"]
+    return np.zeros(data.shape, dtype=bool)
+
+
+def verify_masked_samples(
+    expected: np.ndarray,
+    expected_header: fits.Header,
+    actual: np.ndarray,
+    actual_header: fits.Header,
+    newly_undefined: int,
+    path: Path,
+) -> None:
+    """Check retained samples are identical and only report-counted samples became undefined.
+
+    Without mask sidecars, the per-image report supplies the expected number of
+    defined source samples that the product marks undefined. Every other sample
+    must equal the source; originally undefined samples must stay undefined.
+    """
+    if expected.shape != actual.shape:
+        raise AssertionError(f"{path}: product samples do not match the source region shape")
+    source_undefined = undefined_samples(expected, expected_header)
+    product_undefined = undefined_samples(actual, actual_header)
+    if (source_undefined & ~product_undefined).any():
+        raise AssertionError(f"{path}: an originally undefined sample became defined")
+    marked = product_undefined & ~source_undefined
+    if int(marked.sum()) != int(newly_undefined):
+        raise AssertionError(
+            f"{path}: {int(marked.sum())} samples newly undefined, report says {newly_undefined}"
+        )
+    retained = ~product_undefined
+    if not np.array_equal(actual[retained], expected[retained]):
+        raise AssertionError(f"{path}: retained samples differ from the source")
+
+
+def verify_crop_samples(
+    original: np.ndarray,
+    actual: np.ndarray,
+    x0: int,
+    y0: int,
+    path: Path,
+    source_header: fits.Header | None = None,
+    output_header: fits.Header | None = None,
+    interior_masked: int = 0,
+) -> None:
+    """Check crop pixels against their input region without mask sidecars.
+
+    `interior_masked` is the reported number of defined source samples set
+    undefined inside the crop (crop_masked / bbox_mask actions); zero for a
+    plain crop, which must equal its source region exactly.
+    """
     expected = original[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]]
+    if interior_masked:
+        verify_masked_samples(
+            expected, source_header or fits.Header(), actual, output_header or fits.Header(),
+            interior_masked, path,
+        )
+        return
     equal_nan = np.issubdtype(np.result_type(expected.dtype, actual.dtype), np.floating)
     if expected.shape != actual.shape or not np.array_equal(
         actual, expected, equal_nan=equal_nan
@@ -490,7 +549,11 @@ def verify_tree(
                     or int(header.get("NAXIS2", -1)) != actual.shape[0]
                 ):
                     raise AssertionError(f"{output_path}: NAXIS cards disagree with crop dimensions")
-                verify_crop_samples(original, actual, x0, y0, output_path)
+                verify_crop_samples(
+                    original, actual, x0, y0, output_path,
+                    source[0].header, output[0].header,
+                    int(record.get("crop_interior_masked_pixels", 0) or 0),
+                )
             elif original.shape != actual.shape:
                 raise AssertionError(f"{output_path}: dimensions changed without crop provenance")
             if mask_path.exists():
@@ -570,9 +633,17 @@ def verify_tree(
                 if not output_path.is_symlink():
                     verify_raw_checksums(output_path, output[0].header)
                 if is_crop:
-                    verify_crop_samples(original, actual, x0, y0, output_path)
-                elif not np.array_equal(actual, original, equal_nan=True):
-                    raise AssertionError(f"{output_path}: kept image differs from its input")
+                    pass  # samples verified above against the reported interior count
+                elif output_path.is_symlink():
+                    if not np.array_equal(actual, original, equal_nan=True):
+                        raise AssertionError(f"{output_path}: kept image differs from its input")
+                else:
+                    # Dimension-preserving mask product: masked samples are
+                    # undefined, all others identical (no sidecar needed).
+                    verify_masked_samples(
+                        original, source[0].header, actual, output[0].header,
+                        int(record.get("masked_pixels", 0) or 0), output_path,
+                    )
         if fitsverify:
             reason_path = output_dir / "reason_masks" / relative
             for path in (

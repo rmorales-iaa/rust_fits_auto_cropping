@@ -17,6 +17,8 @@ pub struct FileOutcome {
     pub input: PathBuf,
     pub status: OutcomeKind,
     pub reason_code: &'static str,
+    /// Selected product action: keep, mask, crop, crop_masked or bbox_mask.
+    pub action: &'static str,
     pub reason: String,
     pub width: Option<usize>,
     pub height: Option<usize>,
@@ -32,6 +34,8 @@ pub struct FileOutcome {
     pub crop_excluded_undefined_pixels: usize,
     pub crop_applied_undefined_pixels: usize,
     pub crop_artifact_pixels_retained: usize,
+    /// Defined flagged samples set undefined inside a crop_masked/bbox_mask product.
+    pub crop_interior_masked_pixels: usize,
     pub crop_residual_artifact_fraction: f64,
     pub crop_search_candidates: usize,
     pub crop_search_step_px: usize,
@@ -81,6 +85,7 @@ impl FileOutcome {
             input,
             status,
             reason_code: "processing",
+            action: "none",
             reason: reason.into(),
             width: None,
             height: None,
@@ -96,6 +101,7 @@ impl FileOutcome {
             crop_excluded_undefined_pixels: 0,
             crop_applied_undefined_pixels: 0,
             crop_artifact_pixels_retained: 0,
+            crop_interior_masked_pixels: 0,
             crop_residual_artifact_fraction: 0.0,
             crop_search_candidates: 0,
             crop_search_step_px: 0,

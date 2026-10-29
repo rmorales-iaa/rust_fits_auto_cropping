@@ -15,6 +15,7 @@ pub fn write_crop_preview(
     source_width: usize,
     source_height: usize,
     region: CropRect,
+    interior_undefined: Option<&[bool]>,
 ) -> anyhow::Result<()> {
     if source_width.checked_mul(source_height) != Some(values.len()) {
         bail!("preview source dimensions do not match the pixel array");
@@ -33,12 +34,24 @@ pub fn write_crop_preview(
     {
         bail!("preview crop bounds exceed the source image");
     }
+    if interior_undefined.is_some_and(|mask| mask.len() != values.len()) {
+        bail!("preview interior mask dimensions do not match the pixel array");
+    }
+    // Samples set undefined in the crop product render as undefined (black)
+    // and are excluded from the crop ZScale, matching the FITS product.
+    let product_value = |index: usize| {
+        if interior_undefined.is_some_and(|mask| mask[index]) {
+            f64::NAN
+        } else {
+            values[index]
+        }
+    };
     let source_scale =
         ZScale::from_values(values).context("source has no finite pixels for ZScale")?;
     let crop_scale = ZScale::from_iter_factory(|| {
         (bounds.y..bounds.y + bounds.height).flat_map(|y| {
             let start = y * source_width + bounds.x;
-            values[start..start + bounds.width].iter().copied()
+            (start..start + bounds.width).map(product_value)
         })
     })
     .context("final crop has no finite pixels for ZScale")?;
@@ -86,7 +99,7 @@ pub fn write_crop_preview(
                 / (2 * display_crop_width as u128)) as usize;
             let source_x = bounds.x + crop_x;
             let source_y = bounds.y + crop_y;
-            let value = values[source_y * source_width + source_x];
+            let value = product_value(source_y * source_width + source_x);
             if value.is_finite() {
                 canvas.put_pixel((source_width + display_x) as u32, png_y as u32, {
                     let pixel = crop_scale.to_u8(value);
@@ -217,7 +230,7 @@ mod tests {
             width: 12,
             height: 6,
         };
-        write_crop_preview(&output, &values, width, height, region).unwrap();
+        write_crop_preview(&output, &values, width, height, region, None).unwrap();
 
         let rendered = image::open(&output).unwrap().to_rgb8();
         assert_eq!(rendered.dimensions(), (48, 30));
@@ -258,7 +271,7 @@ mod tests {
                 values[y * width + x] = 10.0 + (y * 10 + x - 10) as f64;
             }
         }
-        write_crop_preview(&output, &values, width, height, region).unwrap();
+        write_crop_preview(&output, &values, width, height, region, None).unwrap();
         let rendered = image::open(&output).unwrap().to_rgb8();
         let source_scale = ZScale::from_values(&values).unwrap();
         let mut crop_samples = Vec::new();

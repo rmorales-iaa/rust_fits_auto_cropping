@@ -4,4 +4,4 @@ mod multiscale;
 mod reference;
 mod robust;
 mod tile_detector;
-pub use tile_detector::detect_border;
+pub use tile_detector::{Detection, detect_border};

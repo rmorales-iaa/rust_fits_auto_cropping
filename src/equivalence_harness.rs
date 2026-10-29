@@ -122,6 +122,8 @@ pub fn decision_digest(cfg_text: &str) -> (String, f64) {
                             evidence_ratio: det.evidence_ratio,
                             valid_pixel_loss_cost: cfg.valid_pixel_loss_cost,
                             minimum_net_utility: cfg.minimum_net_utility,
+                            exchange_rate: None,
+                            mask_retained_flags: false,
                         },
                     );
                     if let Some(r) = r {

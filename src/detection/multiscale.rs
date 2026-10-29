@@ -171,6 +171,8 @@ mod tests {
             maximum_residual_artifact_fraction: 0.05,
             maximum_crop_sacrifice_fraction: 0.25,
             crop_sacrifice_fraction_by_border_component_count: None,
+            crop_fallback: crate::config::CropFallback::Keep,
+            crop_exchange_rate: None,
         }
     }
 

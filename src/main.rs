@@ -1,4 +1,5 @@
 //! Command-line entry point for FITS border artifact masking.
+mod action;
 mod cli;
 mod config;
 mod crop;
