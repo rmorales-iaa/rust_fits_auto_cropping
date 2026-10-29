@@ -34,7 +34,7 @@ Processing:
   --mode MODE          crop (default), crop_masked or mask.
   --no-png             Do not write PNG previews (default writes them).
   --heuristics PATH    Science rule file (default input/heuristics.toml), e.g.
-                       a copy selecting detector = "background_v2_experimental".
+                       a copy selecting the legacy detector = "tile_v1".
   --plan               Validate paths and print what would run (FITS counts,
                        sanitation targets); write and delete nothing.
   -h, --help           Show this help.

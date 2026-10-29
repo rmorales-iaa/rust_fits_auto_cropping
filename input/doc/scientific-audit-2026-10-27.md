@@ -102,11 +102,11 @@ Additional inspection findings: A21 (dominated keep fallback after a failed crop
 ### Revision 2 implementation follow-up (2026-10-29)
 
 Responses to A18–A31, implemented after user decisions D1–D4 (details in the plan's §4A status table and in [validation](validation.md#revision-2-implementation-evidence-2026-10-29)):
-- **A18–A20, A03 (observed probes):** resolved in the opt-in v2 detector. It uses a source-masked mesh background, two-sided second-difference dispersion with a D4 minimum-effect test, source protection and a boundary change-point test. All probe fixtures are permanent unit tests. The default `tile_v1` is unchanged and still exhibits these failures; this is why v2 exists.
+- **A18–A20, A03 (observed probes):** resolved in the v2 detector (default since decision D5). It uses a source-masked mesh background, two-sided second-difference dispersion with a D4 minimum-effect test, source protection and a boundary change-point test. All probe fixtures are permanent unit tests. The default `tile_v1` is unchanged and still exhibits these failures; this is why v2 exists.
 - **A01:** v2's native-resolution, D4-anchored refinement detects the 20/28-px strips exactly.
-- **A21/A22:** `crop_fallback = bbox_mask` (shipped) and `--mode crop_masked`.
+- **A21/A22:** `crop_fallback = bbox_mask` (shipped) and `--mode crop_masked`. Revision 3 closes A22 for crop mode: the shipped crop residual ceiling is 0, and only `crop_masked` (which writes retained flags undefined) tolerates 5%.
 - **A23:** global row-pair/column-sweep tolerant-rectangle family, exhaustive-oracle tested.
-- **A24:** optional `crop_exchange_rate`; the component tiers remain in the shipped rules pending labelled data.
+- **A24:** Revision 3 ships `crop_exchange_rate = 0.5` with a flat 10% sacrifice cap and no component tiers, chosen on a synthetic policy grid and confirmed on a held-out synthetic corpus. The utility index stays dimensionless; calibration on labelled data remains open.
 - **A25:** v2 support-based abstention.
 - **A26/A31:** exact selection, parallel tile rows and in-memory mask verification, all bit-identical.
 - **A27:** documentation updated.

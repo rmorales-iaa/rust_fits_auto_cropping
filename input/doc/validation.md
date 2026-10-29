@@ -406,3 +406,62 @@ Evidence:
 - A real release-binary run on two synthetic years (9 FITS inputs each) gave 9/9 outputs per year with bias/flat links and the missing dark reported.
 - The independent FITS checker, extended to the `--flat-output` layout it previously could not read, verified all 18 entries.
 - The preview checker verified the 3 previews in each year.
+
+## Revision 3 evidence (2026-10-29)
+
+Environment: cloud container, 4 logical CPUs, release build, Astropy 8.0.2; no `fitsverify`. All data are synthetic. These numbers support decision D5 and the crop policy (plan §0R); they are not a real-data (G4) validation.
+
+### Crop-policy grid (development corpus)
+
+`tools/make_synthetic_corpus.py --seeds 8 --group-dirs` (seeds 0–7, 72 frames in 8 groups) with the v2 detector, scored by `tools/evaluate_masks.py` from products only. The grid crossed residual {0, 0.05} × λ {none, 0.25, 0.5, 1.0} × cap {0.05, 0.10, 0.20, 0.35} × mode {crop, crop_masked}: 64 runs. Selected rows:
+
+| Policy | Mode | Recall | Precision | Valid loss | Worst image |
+| --- | --- | ---: | ---: | ---: | ---: |
+| previous (r 0.05, tiers 35–47%, no λ) | crop | 0.8445 | 0.8473 | 0.0254 | 0.2130 |
+| r 0, λ 0.5, cap 0.10 (shipped) | crop | 0.9927 | 0.9900 | 0.0017 | 0.0124 |
+| r 0.05, λ 0.5, cap 0.10 (shipped) | crop_masked | 0.9927 | 0.9987 | 0.0002 | 0.0021 |
+| r 0.05, λ 0.5, cap 0.10 | crop | 0.8975 | 0.9998 | 0.0000 | 0.0007 |
+| r 0, no λ, cap 0.35 | crop | 0.9928 | 0.9236 | 0.0137 | 0.3003 |
+
+Twelve of the sixteen r = 0 crop cells match the shipped crop row exactly; the chosen cell is inside that plateau. The full table is in the plan (§0R.2).
+
+### Held-out confirmation
+
+Fresh corpora with disjoint seeds and truth stored outside the input tree:
+
+- `--seeds 8 --seed-offset 5000` (float32, 72 frames);
+- `--seeds 4 --seed-offset 7000 --dtype int16` (36 frames).
+
+Each was evaluated once with the shipped rules. 95% intervals are group bootstrap (1,000 resamples).
+
+| Corpus / mode | Recall | Precision | Valid loss | Worst image |
+| --- | --- | --- | --- | ---: |
+| float32 mask | 0.9921 [0.9875, 0.9963] | 0.9984 [0.9977, 0.9989] | 0.0003 [0.0002, 0.0004] | 0.0025 |
+| float32 crop | 0.9921 | 0.9849 [0.9792, 0.9898] | 0.0027 [0.0018, 0.0039] | 0.0048 |
+| float32 crop_masked | 0.9921 | 0.9984 | 0.0003 | 0.0025 |
+| float32 crop, previous policy | 0.8495 [0.8354, 0.8630] | 0.8116 [0.7829, 0.8472] | 0.0350 [0.0271, 0.0420] | 0.0438 |
+| int16 mask | 0.9973 [0.9953, 0.9989] | 0.9980 | 0.0003 | 0.0026 |
+| int16 crop | 0.9973 | 0.9856 [0.9837, 0.9875] | 0.0022 [0.0019, 0.0026] | 0.0045 |
+| int16 crop_masked | 0.9973 | 0.9980 | 0.0003 | 0.0026 |
+| int16 crop, previous policy | 0.8279 | 0.8456 | 0.0231 | 0.0314 |
+
+The Astropy checker (`tools/cross_validate_fits.py`) verified all 72 and 36 products of every run. Crop actions on the float32 corpus were 24 crop, 16 bbox_mask, 8 mask and 24 keep (artifact-free frames).
+
+### Out-of-model nulls (R1.6)
+
+`tools/make_out_of_model_nulls.py OUT 30` writes five families absent from the corpus generator, 30 frames each (seeds from 9000). Output is byte-reproducible.
+
+| Family | v2 frames with removal | v1 frames with removal |
+| --- | ---: | ---: |
+| cosmic rays (incl. outer-pixel hits) | 0/30 | 0/30 |
+| satellite trail | 0/30 | 0/30 |
+| saturated edge star with bleed | 0/30 | 0/30 |
+| interior hot column | 0/30 | 0/30 |
+| crowded edge stars | 0/30 | 1/30 (384 px) |
+
+Zero in 30 bounds the per-family false-alarm rate at ≤ 9.5% (one-sided 95%); zero in 150 bounds the pooled rate at ≤ 2.0%. Parity with G3a needs 2,995 frames per family.
+
+### Test totals after Revision 3
+
+99 unit, 33 end-to-end and 4 version tests (7 ignored manual harnesses); strict Clippy and rustfmt clean. 26 Python tests (19 checker, 7 evaluation tools including one new test for `--seed-offset` and `--truth-dir`). The 42 yearly-script checks pass.
+

@@ -16,9 +16,11 @@ CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. Processing 
 
 ## Decision rules: `input/heuristics.toml`
 
+With the default v2 detector, only three of the shared tile keys below take part in decisions: `tile_size` (evidence tile width), and `minimum_border_tiles` with `minimum_mask_fraction` (per-component size gates). `maximum_evidence_ratio` and `valid_pixel_loss_cost` feed only the reported utility diagnostics. The other tile keys configure `tile_v1`. The crop keys apply to both detectors.
+
 | Key | Default | Meaning |
 | --- | ---: | --- |
-| `heuristics.detector` | `tile_v1` | Detector family. `tile_v1` is the default baseline described below. `background_v2_experimental` selects the opt-in v2 detector configured by `[heuristics.v2]` (plan R2/R3/R4.5); see [algorithm](algorithm.md). |
+| `heuristics.detector` | `background_v2` | Detector family (decision D5). `background_v2` is the default: source-masked background and noise model, two-sided evidence and illumination-anchored boundaries, configured by `[heuristics.v2]` (see [algorithm](algorithm.md)). `tile_v1` selects the legacy tile baseline that the tile keys below configure. The former name `background_v2_experimental` is still accepted. v2 thresholds are registered values validated on synthetic data only; observatory review (gate G4) is open. |
 | `heuristics.reference_model` | `central_tiles` | `central_tiles` is the current baseline. `robust_affine` is an experimental Huber-fit plane over finite interior tile medians; it is opt-in, has no source mask or uncertainty map, and is not calibrated. |
 | `heuristics.evidence_model` | `single_scale` | `single_scale` preserves the baseline. `multiscale_consensus` runs up to three bounded tile widths and requires every proposed pixel to be selected at two or more scales; it is experimental and adds detector work. |
 | `heuristics.tile_size` | 16 px | Tile width for robust median/MAD evidence. Smaller tiles can preserve boundary pixels but need adequate samples and cost more CPU. |
@@ -32,16 +34,14 @@ CLI overrides: `--threads`, `--memory-budget-mib` and `--recursive`. Processing 
 | `heuristics.maximum_evidence_ratio` | 5.0 | Cap on the diagnostic evidence ratio so a single extreme tile cannot dominate the decision. |
 | `heuristics.valid_pixel_loss_cost` | 1.5 | Penalty weight for potentially valid science pixels lost. |
 | `heuristics.minimum_net_utility` | 0.001 | Minimum benefit-minus-loss score required to clip. |
-| `heuristics.maximum_residual_artifact_fraction` | 0.05 in shipped file | Maximum fraction of defined pixels inside a crop that may be detector-flagged and retained. Zero requests a strict clean rectangle. Provisional and not calibrated. |
-| `heuristics.maximum_crop_sacrifice_fraction` | 0.35 | Legacy fallback for heuristic files without the component-count table. |
-| `heuristics.crop_sacrifice_fraction_by_border_component_count.one` | 0.35 | Crop sacrifice cap for one accepted contiguous artifact area touching an image border. |
-| `.two` | 0.35 | Cap for two accepted border-touching areas. |
-| `.three` | 0.35 | Cap for three accepted border-touching areas. |
-| `.four_or_more` | 0.47 | Cap for four or more accepted border-touching areas. |
+| `heuristics.maximum_residual_artifact_fraction` | 0.0 | Crop-mode ceiling on detector-flagged defined samples retained / defined samples inside the crop. Crop mode keeps retained flags as data, so the shipped zero means a crop never keeps a flagged sample. Must lie in [0, 1]. |
+| `heuristics.crop_masked_residual_fraction` | 0.05 in shipped file | `crop_masked` ceiling on the same ratio. Retained flags are written undefined, so a positive value enlarges the rectangle without keeping artifact data. Omitted: uses `maximum_residual_artifact_fraction`. |
+| `heuristics.maximum_crop_sacrifice_fraction` | 0.10 in shipped file; 0.35 when omitted | Cap on unflagged defined pixels discarded by the crop, as a fraction of unflagged defined pixels. Used for every border-component count unless the optional table below is present. |
+| `heuristics.crop_sacrifice_fraction_by_border_component_count` | not shipped | Optional table (`one`, `two`, `three`, `four_or_more`, non-decreasing, each in [0, 1]) that replaces the flat cap per number of accepted border-touching artifact areas. Kept for older rule files; the evaluated policy uses the flat cap plus the exchange rate. |
 | `heuristics.crop_fallback` | `keep` when omitted; `bbox_mask` in the shipped file | Crop-mode action when no rectangle passes the gates (decision D1): `keep` leaves the source unchanged (legacy), `mask` applies a dimension-preserving mask, `bbox_mask` crops to the tight bounding box of retained unflagged defined samples and marks the remaining flagged samples undefined. A full-frame box degrades to `mask`. |
-| `heuristics.crop_exchange_rate` | not set | Optional exchange rate lambda (plan R4.1): a crop is accepted only if sacrificed unflagged defined pixels <= lambda * detector-flagged pixels removed. Non-negative; omitted means no exchange-rate gate. |
+| `heuristics.crop_exchange_rate` | 0.5 in shipped file; not applied when omitted | Exchange rate lambda (plan R4.1): a crop is accepted only if sacrificed unflagged defined pixels <= lambda * detector-flagged pixels removed. 0.5 allows at most one valid pixel per two artifact pixels. Non-negative. |
 
-### v2 detector rules: `[heuristics.v2]` (used only with `detector = "background_v2_experimental"`)
+### v2 detector rules: `[heuristics.v2]` (used when `detector = "background_v2"`, the default)
 
 All keys are optional; defaults are registered starting values, not calibrated thresholds. Scores are in standard-error units under a Gaussian working model.
 
@@ -65,18 +65,17 @@ All keys are optional; defaults are registered starting values, not calibrated t
 | `hysteresis_low_fraction` | 0.6 | Low hysteresis threshold as a fraction of the high threshold. |
 | `uncertain_policy` | `retain_uncertain` | `retain_uncertain` keeps uncertain-band pixels in the product (valid retention first); `exclude_uncertain` removes them. |
 
+Shipped crop policy (plan Revision 3; chosen on a synthetic policy grid and confirmed on a held-out synthetic corpus, see [validation](validation.md)):
+
 ```toml
 [heuristics]
-# Fallback for older configurations without the tier table.
-maximum_crop_sacrifice_fraction = 0.35
-
-[heuristics.crop_sacrifice_fraction_by_border_component_count]
-one = 0.35
-two = 0.35
-three = 0.35
-four_or_more = 0.47
+maximum_residual_artifact_fraction = 0.0   # crop: never retain flagged samples
+crop_masked_residual_fraction = 0.05       # crop_masked: may enlarge over flags written undefined
+maximum_crop_sacrifice_fraction = 0.10
+crop_exchange_rate = 0.5
+crop_fallback = "bbox_mask"
 ```
 
-For candidate fraction `f` and capped evidence ratio `e`, the current detector computes artifact benefit `f*e`, valid-pixel loss `cost*f/(1-f)`, and net utility `benefit-loss`. Each disconnected border component must independently pass minimum tile count, minimum/maximum fraction, minimum evidence and minimum utility; aggregate gates also apply to accepted components together. The score is a decision index, **not a calibrated probability or scientific loss estimate**. Crop mode uses the exact largest clean rectangle as its anchor and evaluates a deterministic bounded family of rectangles expanded from it, plus a global family (plan R4.2) that sweeps columns exactly for every pair of row boundaries; the better feasible result is kept. The shipped residual ceiling is 5%; legacy custom heuristic files that omit the key default to zero residual, preserving strict behavior. Candidates must contain no original undefined sample and pass the configured component-count sacrifice and utility limits. The anchor family stops at 100,000 candidates. The global family is exact for the area objective under the residual and undefined-sample constraints when its row step is one (exhaustive 3-state oracle tests); larger frames use a coarser row grid within a fixed work budget plus local edge refinement, which is a bounded heuristic. Reports give the evaluation count, the anchor-family pixel step and the global row step. These thresholds are not calibrated against independent science labels; test on untouched held-out frames before production use.
+For candidate fraction `f` and capped evidence ratio `e`, the current detector computes artifact benefit `f*e`, valid-pixel loss `cost*f/(1-f)`, and net utility `benefit-loss`. Each disconnected border component must independently pass minimum tile count, minimum/maximum fraction, minimum evidence and minimum utility; aggregate gates also apply to accepted components together. The score is a decision index, **not a calibrated probability or scientific loss estimate**. Crop mode uses the exact largest clean rectangle as its anchor and evaluates a deterministic bounded family of rectangles expanded from it, plus a global family (plan R4.2) that sweeps columns exactly for every pair of row boundaries; the better feasible result is kept. The shipped crop-mode residual ceiling is zero and the crop_masked ceiling is 5%; heuristic files that omit `maximum_residual_artifact_fraction` also default to zero. Candidates must contain no original undefined sample and pass the sacrifice cap, the exchange rate and the utility limits. The anchor family stops at 100,000 candidates. The global family is exact for the area objective under the residual and undefined-sample constraints when its row step is one (exhaustive 3-state oracle tests); larger frames use a coarser row grid within a fixed work budget plus local edge refinement, which is a bounded heuristic. Reports give the evaluation count, the anchor-family pixel step and the global row step. These thresholds are not calibrated against independent science labels; test on untouched held-out frames before production use.
 
 Malformed non-structural source header cards are never repaired or normalized. Same-width placeholders exist only in the parser's temporary in-memory view; the original 80-byte cards are restored byte-for-byte in generated FITS headers and the issue is recorded in the per-image reason. Pixel processing continues. Valid structural layout values (`BITPIX`, `NAXIS*`, and related data-size fields) are still required to locate the image samples safely.

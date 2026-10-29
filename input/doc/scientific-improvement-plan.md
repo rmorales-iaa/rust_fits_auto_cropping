@@ -1,8 +1,133 @@
 # Scientific accuracy, area retention and performance plan
 
-Status: active implementation; **Revision 2 (2026-10-29)** was implemented the same day (see §4A implementation status; v2 detector opt-in; G4 open). Revision 2 adds a code-and-probe review, new findings A18–A31, a reordered R0–R6 roadmap and closing review passes 8–14 (§0, §4A, §8). Initial correctness/reporting fixes were applied after the 2026-10-27 audit; engineering follow-ups add conservative integer fallback, crop WCS abstention, independent component gates, stable correlation arithmetic, build/run provenance and an opt-in experimental robust-affine reference. Source-aware science-model and release gates remain open. The original audit baseline was source `626f53c`, release executable `0.0.29`, and 47 tests. See [the audit and implementation follow-up](scientific-audit-2026-10-27.md) and [validation record](validation.md).
+Status: active implementation. **Revision 3 (2026-10-29, §0R)** records decision D5 (v2 is the default before G4) and the evaluated crop policy. It adds a risk register with a pre-registered rollback trigger, an out-of-model corpus (R1.6), shadow comparison with weighted enriched labelling (R5.0), drift monitoring (R5.2) and action-specific G3 targets; review passes 15–19 close it. **Revision 2 (2026-10-29)** was implemented the same day (see §4A implementation status; G4 open). Revision 2 adds a code-and-probe review, new findings A18–A31, a reordered R0–R6 roadmap and closing review passes 8–14 (§0, §4A, §8). Initial correctness/reporting fixes were applied after the 2026-10-27 audit; engineering follow-ups add conservative integer fallback, crop WCS abstention, independent component gates, stable correlation arithmetic, build/run provenance and an opt-in experimental robust-affine reference. Source-aware science-model and release gates remain open. The original audit baseline was source `626f53c`, release executable `0.0.29`, and 47 tests. See [the audit and implementation follow-up](scientific-audit-2026-10-27.md) and [validation record](validation.md).
 
 This is the active implementation plan for scientific improvements. The [original implementation plan](implementation-plan.md) and completed crop/preview/layout plans remain historical records. Completion of the planning review does not mean the software meets the release gates below. No universal science-grade claim is possible without a declared observing domain, independent labels and downstream measurement evidence.
+
+## 0R. Revision 3 — v2 default, crop policy and plan review (2026-10-29)
+
+Revision 3 records two user decisions taken on synthetic evidence, the evidence behind them, the risks they create and the plan changes needed to control those risks. Nothing in this revision is a real-data validation claim; gate G4 is still open.
+
+### 0R.1 Decision D5: v2 is the default detector before G4
+
+The user decided to make `background_v2` the default. Until now R5 allowed promotion only after G1–G5 passed. D5 replaces that rule **for the default only**. The release claim is unchanged: v2 is not validated for scientific release until G4 passes in a declared domain. `detector = "tile_v1"` reproduces earlier runs, the old name `background_v2_experimental` still parses, and every report carries the algorithm ID `border-detector-v2-background`.
+
+Synthetic evidence at the time of promotion (details in [validation](validation.md#revision-3-evidence-2026-10-29)):
+
+- G3a null false alarms: 0/2,995 frames in each of seven null families at 256 px (one-sided 95% bound ≤ 1.0e-3 per family) and 0/1,000 at 512 px.
+- Injection recall: 1.000 on strips and raw circular stops; 0.963–0.966 on flat-divided stops.
+- Development corpus, mask mode: recall 0.9927, precision 0.9987, valid loss 0.0002.
+- Held-out corpus with disjoint seeds, mask mode: recall 0.9921/0.9973 (float32/int16) and precision 0.9984/0.9980.
+- Out-of-model nulls (R1.6, new): 0/150 frames for v2 versus 1/150 for v1.
+
+**Risk register.** Each risk has an owner item and an observable signal.
+
+| ID | Risk | Mitigation and signal |
+| --- | --- | --- |
+| K1 | The reference is wrong when affected meshes form the largest coherent cluster. Support abstention catches only part of this case. | Report the `reference_support_abstained` rate per year (R5.2). G4 includes a stratum of frames with a large affected fraction. |
+| K2 | Positive extended artifacts (amplifier glow, light leaks) are protected like sources and stay in the product. This retains valid pixels but leaves contamination. | R1.6 adds labelled positive-artifact families to measure this recall. Report border `protected_source_pixels` per year. |
+| K3 | Corners smaller than `minimum_mask_fraction` are kept. | This is a policy gate, not an evidence failure. G4 reports the small-corner stratum separately before any threshold change. |
+| K4 | v2 detection is slower than v1 on large frames (37.8 Mpx: about 2–2.6 s versus 0.35 s with 4 workers). | Accepted as an explicit scientific trade-off under the G5 clause. R6 v2 work (border-band meshes, strided mesh subsampling) moves ahead of the other R6 items. |
+| K5 | The synthetic evidence is in-model: the same author wrote the generator and the detector. Held-out seeds test sampling variation, not model misspecification. | R1.6 out-of-model corpus; real-data G4. The out-of-model bound is still weak (30 frames per family). |
+| K6 | Yearly products already published with v1 differ from v2 products. | R5.0 shadow comparison before any yearly re-run; the algorithm ID in each report separates the two generations. |
+
+**Rollback trigger**, registered before G4 data are seen. The shipped default returns to `tile_v1` if any of the following holds:
+
+- On the G4 probability sample (R5.0), the one-sided 95% upper bound of v2's pooled valid loss exceeds v1's point estimate.
+- On flat-certified null frames, v2's group-bootstrap 95% upper FAR bound exceeds 1e-2 per frame.
+- A G1 integrity failure is traced to v2.
+
+A rollback is a configuration change; the code stays.
+
+### 0R.2 Crop-policy decision (R4.1 for the synthetic domain)
+
+The user asked to fix the crop limits. Policies were compared on a grid using the v2 detector on the development corpus (seeds 0–7, 72 frames in 8 groups, exact truth). The grid crossed residual ceiling {0, 0.05} × exchange rate λ {none, 0.25, 0.5, 1.0} × sacrifice cap {0.05, 0.10, 0.20, 0.35} × mode {crop, crop_masked}. The selected policy was then evaluated once on a held-out corpus whose seeds and truth were never used for selection.
+
+Development-corpus results (v2; pooled over 72 frames; "worst" is the largest per-image valid loss):
+
+| Policy | Mode | Recall | Precision | Valid loss | Worst image | Residual |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| previous: r 0.05, no λ, tiers 35–47% | crop | 0.8445 | 0.8473 | 0.0254 | 0.2130 | 0.0260 |
+| r 0.05, no λ, cap 0.35 | crop_masked | 0.9957 | 0.8666 | 0.0256 | 0.2132 | 0.0007 |
+| r 0.05, λ 0.5, cap 0.10 | crop | 0.8975 | 0.9998 | 0.0000 | 0.0007 | 0.0169 |
+| **r 0, λ 0.5, cap 0.10 (shipped crop)** | crop | 0.9927 | 0.9900 | 0.0017 | 0.0124 | 0.0012 |
+| **r 0.05, λ 0.5, cap 0.10 (shipped crop_masked)** | crop_masked | 0.9927 | 0.9987 | 0.0002 | 0.0021 | 0.0012 |
+| r 0, no λ, cap 0.35 | crop | 0.9928 | 0.9236 | 0.0137 | 0.3003 | 0.0012 |
+
+Robustness:
+
+- **Crop.** With r = 0, 12 of the 16 cells give the shipped result. The four that degrade are cap 0.20 without λ, and cap 0.35 without λ or with λ ≥ 0.5. The chosen cell is inside this plateau, not at its edge.
+- **crop_masked.** With r = 0.05, cap 0.05 with any λ, and cap 0.10 with λ ≤ 0.5, give the shipped result. Cap 0.10 with λ = 1.0 or without λ degrades, so λ = 0.5 is one grid step from the plateau edge.
+- **Crop with r = 0.05** keeps 10% of artifact pixels as data (recall 0.8975), which is why crop uses r = 0.
+- **Residual 0.0012 at r = 0** is detector misses, not policy. It equals the mask-mode residual.
+
+Shipped policy:
+
+- **Crop:** `maximum_residual_artifact_fraction = 0`.
+- **crop_masked:** `crop_masked_residual_fraction = 0.05`.
+- **Shared:** `maximum_crop_sacrifice_fraction = 0.10`, `crop_exchange_rate = 0.5`, `crop_fallback = "bbox_mask"`.
+- **Removed:** the component-count tier table is no longer shipped.
+
+Structural reasons, independent of the grid:
+
+1. **Crop residual must be zero.** Crop mode keeps retained flagged samples as data, so any positive residual ceiling contradicts "remove invalid areas" (A22). Zero is the only value consistent with the contract.
+2. **crop_masked can tolerate residual flags.** It writes retained flags undefined, so a positive ceiling enlarges the rectangle without keeping artifact data.
+3. **The exchange rate bounds precision by construction.** λ guarantees sacrificed valid pixels ≤ λ × flags removed, so per-image action-level removal precision is ≥ 1/(1+λ) = 2/3. The cap bounds per-image valid loss at 10%.
+4. **Large caps are no longer needed.** With the `bbox_mask` fallback, a rejected rectangle no longer means "keep everything". The large tiered caps (35–47%) existed to avoid that outcome, and they caused most of the old policy's valid loss.
+
+Held-out confirmation (seeds 5000–5007 float32, 7000–7003 int16; truth outside the input tree):
+
+| Corpus | Mode | Recall [95% group-bootstrap] | Precision | Valid loss | Worst image | Actions |
+| --- | --- | --- | --- | --- | ---: | --- |
+| float32, 72 frames | mask | 0.9921 [0.9875, 0.9963] | 0.9984 [0.9977, 0.9989] | 0.0003 [0.0002, 0.0004] | 0.0025 | 48 mask, 24 keep |
+| float32 | crop (shipped) | 0.9921 | 0.9849 [0.9792, 0.9898] | 0.0027 [0.0018, 0.0039] | 0.0048 | 24 crop, 16 bbox_mask, 8 mask, 24 keep |
+| float32 | crop_masked (shipped) | 0.9921 | 0.9984 | 0.0003 | 0.0025 | 26 crop_masked, 16 bbox_mask, 6 mask, 24 keep |
+| float32 | crop (previous policy) | 0.8495 [0.8354, 0.8630] | 0.8116 [0.7829, 0.8472] | 0.0350 [0.0271, 0.0420] | 0.0438 | 46 crop, 2 mask, 24 keep |
+| int16, 36 frames | mask | 0.9973 [0.9953, 0.9989] | 0.9980 | 0.0003 | 0.0026 | 23 mask, 13 keep |
+| int16 | crop (shipped) | 0.9973 | 0.9856 [0.9837, 0.9875] | 0.0022 [0.0019, 0.0026] | 0.0045 | 12 crop, 8 bbox_mask, 3 mask, 13 keep |
+| int16 | crop_masked (shipped) | 0.9973 | 0.9980 | 0.0003 | 0.0026 | 12 crop_masked, 8 bbox_mask, 3 mask, 13 keep |
+| int16 | crop (previous policy) | 0.8279 | 0.8456 | 0.0231 | 0.0314 | 23 crop, 13 keep |
+
+The held-out results agree with development within the bootstrap intervals, so there is no sign of selection overfit. The independent Astropy checker verified every product. In crop mode, `bbox_mask` handles 22% of frames; those products contain undefined samples by design (decision D1).
+
+### 0R.3 Plan changes
+
+- **R1.6 out-of-model null and stress corpus (new).** `tools/make_out_of_model_nulls.py` generates cosmic rays (including hits on the outer pixels), satellite trails, saturated edge stars with bleed columns, interior hot columns and crowded edge-star fields. Scale each family to 2,995 frames for parity with G3a. Then add labelled positive-artifact families (corner glow, light leak) as *invalid* truth to measure K2.
+- **R5.0 shadow comparison and enriched labelling (new; before G4 and before any yearly re-run).**
+  - Run both detectors on a simple random sample of frames from each year (reports only).
+  - Stratify frames into agree-keep, agree-act and disagree.
+  - Label a simple random sample in each stratum with recorded inclusion probabilities π_h, oversampling the disagree stratum.
+  - Estimate population metrics with Horvitz–Thompson weights 1/π_h. Enrichment raises power for detector differences without biasing population estimates.
+  - Never report metrics from disagreement frames alone (selection bias).
+  - Split by night group as in §3.
+- **R5.2 production drift monitoring (new).** For each processed year, report the action distribution (keep, mask, crop, crop_masked, bbox_mask), the abstention rate, border protected-source pixels, uncertain-band fraction and median noise. Flag a year whose rate departs from the pooled rate by more than three binomial standard errors (Holm-adjusted across monitored quantities) for domain review. A flag is a review trigger, not an automatic change.
+- **G3 split by action type (amended).**
+  - The removal-precision target ≥ 99% applies to detector masks (mask and crop_masked modes).
+  - Rectangular crop products sacrifice valid pixels by geometry. For them, register: pooled valid loss ≤ 0.5%, per-image valid loss ≤ the cap (by construction), per-image precision ≥ 1/(1+λ) (by construction) and pooled precision ≥ 0.98.
+  - The held-out crop result (0.985/0.986, valid loss 0.0027/0.0022) meets these targets. Without the split, crop products could never meet the old single target, so the gate was ill-defined.
+- **G5 (amended).** D5's detection-time regression is recorded as an accepted scientific trade-off. Every other speed-only change still has to be bit-identical and must not regress.
+- **R5 (amended).** Promotion rules now govern the *release claim*, not the default; the rollback trigger above governs the default.
+- **§5 rules.** Implemented decision keys: `maximum_residual_artifact_fraction` (crop), `crop_masked_residual_fraction`, `maximum_crop_sacrifice_fraction`, optional component-count table, `crop_exchange_rate`, `crop_fallback`. Rule files without the new keys keep their earlier meaning.
+
+### 0R.4 Remaining open items, in dependency order
+
+1. **R5.0 shadow sample and G4.** Needs observatory data access and calibration provenance for `tools/flat_labels.py`. This blocks every release claim and the rollback decision.
+2. **R1.6 scale-up.** Grow to 2,995 frames per out-of-model family, then add the positive-artifact families (K2, K5).
+3. **R6 v2 performance (K4).** Border-band meshes and strided mesh subsampling first, then f32 analysis, weighted memory admission and the G5 benchmark.
+4. **Yearly re-runs with v2,** after R5.0. The 2011 tree is incomplete and has to be recovered before it is re-processed.
+5. **Small corners (K3)** after G4 strata are available. **PIXACT3** reason plane; **R3.3 morphology** only if G4 shows holes; **fitsverify** checks in an environment that provides it.
+
+### 0R.5 Review passes 15–19
+
+| Pass | Result |
+| --- | --- |
+| 15 — default-promotion safety | Material: D5 removed the only guard against shipping an unvalidated default. Added K1–K6 and a rollback trigger registered before G4 data are seen. |
+| 16 — statistical review | Material, three items. (a) Selecting the best of 64 grid cells inflates development performance (winner's curse), so the policy was confirmed on a held-out corpus evaluated once. (b) Held-out synthetic seeds are not independent of generator assumptions (K5), so R1.6 was added. (c) Enriching labels with disagreement frames biases estimates unless weighted, so R5.0 requires Horvitz–Thompson weights. |
+| 17 — gates and full coverage | Material, two items. G3's single precision target is unattainable by construction for rectangular crops; split by action type. No production signal would detect domain drift after the default changed; R5.2 added. Re-checked A01–A31, D1–D5, the R-table and G1–G5. |
+| 18 — full coverage after integration | Re-read §0R, §4A, §6, the audit addendum, README, configuration, user guide, algorithm, AGENTS, skills and memory against the shipped heuristics and code defaults. They agree, and no validation claim was introduced. No new material omission. |
+| 19 — order and failure handling | Checked dependencies: R5.0 precedes G4 and yearly re-runs; R1.6 has no data dependency; the rollback trigger is fixed before data. Checked that each new risk has a signal and an owner item. No new material omission. |
+
+**Revision-3 closure.** Passes 18 and 19 are two consecutive full passes without a material finding, which meets the §7 stop rule. Planning reopens on R5.0 or G4 results, a rollback-trigger event, a new failure, or a new observing domain. Further desk review is not expected to change safety, estimands, data requirements, method family, gates or order. Real data are the binding constraint.
 
 ## 0. Revision 2 — deep review of 2026-10-29
 
@@ -54,6 +179,8 @@ These change product contracts or label semantics, so they are not taken unilate
 - **D2 — internal undefined samples in crop products.** Allow an opt-in `crop_masked` product: a tolerant rectangle whose retained flagged samples are set to BLANK/NaN. Recommended: yes, as an opt-in mode. The current `crop` stays fully defined.
 - **D3 — master flats.** Use them as independent evaluation labels only (recommended), or also as an opt-in detector prior (a contract change: pixel evidence from a second image).
 - **D4 — label rule for partial illumination.** Recommended: `I` where relative illumination < 0.20; `V` where ≥ 0.50; `Q` (uncertain) between. Freeze the values per science use before tuning.
+
+Answered 2026-10-29: D1 `bbox_mask`, D2 yes, D3 evaluation labels only, D4 as recommended. Revision 3 adds **D5** (user decision): v2 is the default detector before G4 (§0R.1).
 
 
 ## 1. Objective, scope and non-negotiable contracts
@@ -277,7 +404,7 @@ Positive-excess tiles that are source-dominated cannot seed components (R2.3). S
 
 ### R5 — calibration, held-out evaluation and promotion (P7)
 
-Freeze R2–R4 thresholds on development groups using R1.2 (FAR) and R1.4 (power, boundary, source loss). Verify on calibration groups. Evaluate once on untouched groups with flat labels (R1.3) and the human-labelled subset. Promote v2 to default only if G1–G5 and the additional gates in §6 pass in the declared domain. Otherwise it stays opt-in and research-only.
+Freeze R2–R4 thresholds on development groups using R1.2 (FAR) and R1.4 (power, boundary, source loss). Verify on calibration groups. Evaluate once on untouched groups with flat labels (R1.3) and the human-labelled subset. Claim a scientific release of v2 only if G1–G5 and the additional gates in §6 pass in the declared domain. (Revision 3: decision D5 already made v2 the default; this rule now governs the release claim, and the §0R.1 rollback trigger governs the default.)
 
 ### R6 — performance hardening (P6, after R2–R4 stabilise)
 
@@ -309,7 +436,7 @@ The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = mas
 | R1.3 flat-derived labels | tool done | `tools/flat_labels.py` with unit tests. Running it on the yearly tree needs the calibration provenance list and data access (not available in the review container). |
 | R1.4 injection-recovery | done (synthetic) | Rust harness families: strips, corners, raw and flat-divided circular stops. Python corpus with exact truth. |
 | R1.5 metrics and splits | done | `tools/evaluate_masks.py` reconstructs M from products only; Q excluded with best/worst bounds; pooled and macro values; group-bootstrap intervals. |
-| R2.1 background/noise | done (opt-in v2) | Meshes, trusted coherent cluster, Huber surface with blocked-CV degree, extrapolation limit, structure scatter, noise grids, detrended AR(1), support abstention. |
+| R2.1 background/noise | done (v2) | Meshes, trusted coherent cluster, Huber surface with blocked-CV degree, extrapolation limit, structure scatter, noise grids, detrended AR(1), support abstention. |
 | R2.2 two-sided evidence | done, amended | Dispersion uses second-difference noise; minimum-effect test against the D4 boundary; noise-only rule added. |
 | R2.3 source mask/protection | done, amended | Pixel-derived FWHM and dilation; local-background seed validation; protected positive source tiles. A20 probe: 0 pixels removed; 0/300 edge-source false alarms after the amendment. |
 | R2.4 correlation demoted | done | v2 does not use correlation as evidence. Detrended correlation is used only in the AR(1) estimate. |
@@ -317,15 +444,15 @@ The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = mas
 | R3.2 hysteresis boundaries | done, amended | Exact banded signed distance. Pixel classes are anchored to D4 relative illumination (eta = 1 - r/r0 from the component core, or the noise ratio). A01 20/28-px strips and A18 are exact (0 FP, 0 FN). Raw circular-stop valid loss fell from 12.6% to 0.02%. |
 | R3.3 morphology | not implemented | Off by design; no evidence yet that hole filling is needed. |
 | R3.4 reasons / uncertain band | partial | `uncertain_boundary_pixels` and `uncertain_policy` implemented; the PIXACT3 reason plane is deferred (PIXACT2 still written). |
-| R4.1 exchange-rate policy | done (opt-in key) | `crop_exchange_rate`. Shipped rules keep the component tiers until labelled data justify a lambda. |
+| R4.1 exchange-rate policy | done; shipped (Revision 3) | `crop_exchange_rate = 0.5`, flat cap 0.10, crop residual 0, `crop_masked_residual_fraction = 0.05`; tiers no longer shipped. Chosen on the synthetic grid and confirmed on a held-out corpus (§0R.2). Real-data calibration is open. |
 | R4.2 global tolerant rectangle | done | Exhaustive 3-state oracle on 3,000 grids; never smaller than the anchor family. |
 | R4.3 crop fallback (D1) | done | `crop_fallback = bbox_mask` shipped; legacy files keep `keep`. |
 | R4.4 hybrid products (D2) | done | `--mode crop_masked`; the bounding-box product; independent checker verifies masked interiors. |
 | R4.5 support-based abstention | done (v2) | `reference_support_abstained`; v1 keeps its mask-fraction veto for compatibility. |
-| R5 calibration and promotion | open | Synthetic evidence: G3a met at 256 px (0/2,995 in all seven null families, bound <= 1e-3; 512 px in validation). G3 met for strips and raw stops (recall 1.000, precision >= 0.997), and for pooled valid loss <= 0.1% and per-image <= 1% on the corpus. Flat-divided stop recall is now 0.963-0.966 (>= 0.95) after source-seed validation. Not met: small corners below the minimum mask fraction (a policy gate). G4 needs flat labels and human labels on held-out night groups. v2 stays opt-in. |
-| R6 performance hardening | partial | v2 parallelised and band-limited (37.8 Mpx: 8.3 s to about 2-2.6 s). Border-band v1 evaluation, f32 analysis, weighted memory admission and the full G5 benchmark remain open. |
+| R5 calibration and promotion | open | Synthetic evidence: G3a met at 256 px (0/2,995 in all seven null families, bound <= 1e-3; 512 px in validation). G3 met for strips and raw stops (recall 1.000, precision >= 0.997), and for pooled valid loss <= 0.1% and per-image <= 1% on the corpus. Flat-divided stop recall is now 0.963-0.966 (>= 0.95) after source-seed validation. Not met: small corners below the minimum mask fraction (a policy gate). G4 needs flat labels and human labels on held-out night groups. v2 became the default by decision D5 (§0R.1); the release claim still waits for G4, and the rollback trigger governs the default. |
+| R6 performance hardening | partial | v2 parallelised and band-limited (37.8 Mpx: 8.3 s to about 2-2.6 s). With v2 as the default this is an accepted regression versus v1 (K4); v2 border-band meshes come first. Border-band v1 evaluation, f32 analysis, weighted memory admission and the full G5 benchmark remain open. |
 
-**Design amendments forced by calibration evidence** (all opt-in v2; each reproduced by the harness before and after the fix):
+**Design amendments forced by calibration evidence** (all v2, made while it was opt-in; each reproduced by the harness before and after the fix):
 1. **Second-difference dispersion instead of residual MAD.** Unmodelled vignetting ramps were counted as noise: 155/200 false alarms at 512 px.
 2. **One-sided minimum-effect test against the D4 boundary.** Significance alone flagged expected photon-noise changes in large tiles.
 3. **Polynomial extrapolation up to two mesh widths beyond trusted support.** Clamping at mesh centres created edge kinks, causing 154/200 gradient false alarms once rho was detrended.
@@ -416,6 +543,7 @@ Limit a development round to the registered candidate/parameter budget (initiall
 | 12 — evaluation-data review | Found an independent pixel truth source already in the production tree: matched master flats (A28). Defined V/I/Q from relative illumination (D3–D4) and listed the classes a flat cannot label. Added injection–recovery with pixel-derived mean–variance noise, including flat amplification, and frozen night-grouped splits. |
 | 13 — full coverage review | Rechecked every A01–A31 item for an action, gate and dependency. Checked units (stored-value units; dimensionless η, z, λ), coordinate conventions (zero-based internal, pixel-centre distance), failure and abstention codes, schema/identity changes (v2 opt-in IDs, PIXACT3, schema bump), contracts (header-free detection; flats used only as evaluation labels unless D3 says otherwise), and documentation drift (A27 fixed). One material item was added: R4.5 replaces the 0.5 mask-fraction veto, which otherwise contradicts the valid-retention objective for small fields. |
 | 14 — final consistency review | Re-read §0, §4A, §5–§7 and the audit addendum together with README, AGENTS, skills and memory. Confirmed that every new threshold is a registered starting value, that no claim of validation was introduced, that defaults are unchanged pending D1–D4, and that the order is consistent (R1 before any promotion). No new material omission. |
+| 15–19 — Revision 3 | D5 risk register and rollback trigger, out-of-model corpus, weighted enriched labelling, drift monitoring and action-specific G3 targets; passes 18–19 found no new material omission. See §0R.5. |
 
 **Revision-2 closure.** Passes 13 and 14 were consecutive full reviews; pass 14 found no new material omission. Pass 13 added one item, R4.5, so the stop rule (§7: two consecutive passes without a material finding) required pass 14 to be checked again after R4.5 was integrated. It was, with no further change. Further planning is therefore expected to change details or calibrated numbers only, not safety, estimands, data requirements, method family, gates or order. Planning reopens on new failure evidence, a new observing domain, the user's answers to D1–D4, or R1 measurements that contradict an assumption (for example, flats unusable as labels or FAR unattainable at useful power). The plan remains a design: no new algorithm is implemented, calibrated or validated by this revision.
 
