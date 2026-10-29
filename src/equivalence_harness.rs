@@ -60,6 +60,13 @@ pub fn fixtures() -> Vec<(String, usize, usize, Vec<f64>)> {
 }
 
 pub fn decision_digest(cfg_text: &str) -> (String, f64) {
+    decision_digest_with(cfg_text, false)
+}
+
+/// `decisions_only` hashes only product decisions (acceptance, masks,
+/// component counts, crop rectangles), not diagnostics such as the score,
+/// candidate counts or reason text.
+pub fn decision_digest_with(cfg_text: &str, decisions_only: bool) -> (String, f64) {
     let base = toml::from_str::<HeuristicsConfig>(cfg_text)
         .unwrap()
         .heuristics;
@@ -96,25 +103,36 @@ pub fn decision_digest(cfg_text: &str) -> (String, f64) {
             let det = detect_border(&data, w, h, &cfg);
             hasher.update(name.as_bytes());
             hasher.update([u8::from(det.accepted)]);
-            hasher.update(det.reason_code.as_bytes());
-            hasher.update(det.reason.as_bytes());
-            for v in [
-                det.score,
-                det.evidence_ratio,
-                det.net_utility,
-                det.candidate_fraction,
-            ] {
-                hasher.update(v.to_bits().to_le_bytes());
-            }
-            for n in [
-                det.candidate_mask_pixels,
-                det.candidate_tiles,
-                det.candidate_components,
-                det.accepted_components,
-                det.uncertain_boundary_pixels,
-                det.protected_source_pixels,
-            ] {
-                hasher.update(n.to_le_bytes());
+            if decisions_only {
+                for n in [
+                    det.accepted_components,
+                    det.uncertain_boundary_pixels,
+                    det.protected_source_pixels,
+                ] {
+                    hasher.update(n.to_le_bytes());
+                }
+                hasher.update(det.evidence_ratio.to_bits().to_le_bytes());
+            } else {
+                hasher.update(det.reason_code.as_bytes());
+                hasher.update(det.reason.as_bytes());
+                for v in [
+                    det.score,
+                    det.evidence_ratio,
+                    det.net_utility,
+                    det.candidate_fraction,
+                ] {
+                    hasher.update(v.to_bits().to_le_bytes());
+                }
+                for n in [
+                    det.candidate_mask_pixels,
+                    det.candidate_tiles,
+                    det.candidate_components,
+                    det.accepted_components,
+                    det.uncertain_boundary_pixels,
+                    det.protected_source_pixels,
+                ] {
+                    hasher.update(n.to_le_bytes());
+                }
             }
             hasher.update(det.mask.iter().map(|m| u8::from(*m)).collect::<Vec<_>>());
             if det.accepted {
@@ -167,6 +185,7 @@ fn equivalence_harness() {
         "EQUIVALENCE digest={digest} fixtures={} seconds={seconds:.3}",
         fixtures().len()
     );
+    println!("DECISIONS digest={}", decision_digest_with(&text, true).0);
     let (w, h) = (7100usize, 5325usize);
     let mut rng = Rng(1);
     let mut data: Vec<f64> = (0..w * h).map(|_| 1000.0 + 10.0 * rng.gauss()).collect();

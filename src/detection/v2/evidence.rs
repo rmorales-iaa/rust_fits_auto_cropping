@@ -35,6 +35,8 @@ pub struct TileEvidence {
     /// depend only on the data and the source bits inside the tile.
     pub diff_sigma: f64,
     pub diff_n: f64,
+    /// False for tiles the border flood never reached (see `evaluate_tiles`).
+    pub evaluated: bool,
 }
 
 /// Which registered rule made a tile a candidate.
@@ -100,14 +102,14 @@ pub fn evaluate_tiles(
         );
     }
     let eval = bg.pixel_eval();
-    // Tile rows are independent; ordered collection keeps results identical
-    // for any worker count.
-    let tile_row = |ty: usize| -> Vec<TileEvidence> {
+    // Evidence of one tile; a pure function of the data, background, source
+    // mask and (for the cached dispersion) the previous grid.
+    let eval_tile = |index: usize| -> TileEvidence {
+        let (tx, ty) = (index % cols, index / cols);
         let mut residuals = Vec::with_capacity(tile_size * tile_size);
         let mut diffs = Vec::with_capacity(2 * tile_size * tile_size);
         let mut scratch = Vec::with_capacity(2 * tile_size * tile_size);
-        let mut row = Vec::with_capacity(cols);
-        for tx in 0..cols {
+        {
             let (x0, x1, y0, y1) = (
                 tx * tile_size,
                 ((tx + 1) * tile_size).min(width),
@@ -144,6 +146,7 @@ pub fn evaluate_tiles(
                     source as f64 / finite as f64
                 },
                 constant: constant && !residuals.is_empty(),
+                evaluated: true,
                 ..TileEvidence::default()
             };
             if residuals.len() >= 16 {
@@ -164,7 +167,8 @@ pub fn evaluate_tiles(
                             .all(|x| sources.get(y * width + x) == old_sources.get(y * width + x))
                     });
                     let t = &old.tiles[ty * cols + tx];
-                    (unchanged && t.samples >= 16).then_some((t.diff_sigma, t.diff_n))
+                    (unchanged && t.evaluated && t.samples >= 16)
+                        .then_some((t.diff_sigma, t.diff_n))
                 });
                 let (tile_diff_sigma, tile_diff_n) = reused.unwrap_or_else(|| {
                     diffs.clear();
@@ -218,17 +222,48 @@ pub fn evaluate_tiles(
                     Rule::None
                 };
             }
-            row.push(tile);
+            tile
         }
-        row
     };
-    let tiles: Vec<TileEvidence> = (0..rows)
-        .into_par_iter()
-        .map(tile_row)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .flatten()
+    // Only candidate tiles 4-connected to the frame edge can form edge
+    // components, so evidence is computed by a flood from the border tiles
+    // that expands only through candidates. Components, rules and decisions
+    // are identical to evaluating every tile; unreached tiles stay
+    // `evaluated = false` with no rule. Each wave is evaluated in parallel.
+    let mut tiles = vec![TileEvidence::default(); cols * rows];
+    let mut queued = vec![false; cols * rows];
+    let mut wave: Vec<usize> = (0..cols * rows)
+        .filter(|&i| {
+            let (x, y) = (i % cols, i / cols);
+            x == 0 || y == 0 || x + 1 == cols || y + 1 == rows
+        })
         .collect();
+    for &i in &wave {
+        queued[i] = true;
+    }
+    while !wave.is_empty() {
+        let evaluated: Vec<TileEvidence> = wave.par_iter().map(|&i| eval_tile(i)).collect();
+        let mut next = Vec::new();
+        for (&i, tile) in wave.iter().zip(evaluated) {
+            if tile.rule != Rule::None {
+                let (x, y) = (i % cols, i / cols);
+                for (nx, ny) in [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ] {
+                    if nx < cols && ny < rows && !queued[ny * cols + nx] {
+                        queued[ny * cols + nx] = true;
+                        next.push(ny * cols + nx);
+                    }
+                }
+            }
+            tiles[i] = tile;
+        }
+        next.sort_unstable();
+        wave = next;
+    }
     TileGrid {
         size: tile_size,
         cols,
