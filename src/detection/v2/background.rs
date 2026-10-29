@@ -227,6 +227,16 @@ pub fn fit(
     }
     let cols = width.div_ceil(b);
     let rows = height.div_ceil(b);
+    // Strided lattice for mesh statistics (plan R6): keep at least
+    // `mesh_min_samples` samples per full mesh.
+    let step = if rules.mesh_min_samples == 0 {
+        1
+    } else {
+        (((b * b) as f64 / rules.mesh_min_samples as f64)
+            .sqrt()
+            .floor() as usize)
+            .max(1)
+    };
     // Mesh rows are independent; ordered collection keeps results identical
     // for any worker count.
     let mesh_row = |my: usize| -> Vec<Mesh> {
@@ -246,15 +256,15 @@ pub fn fit(
                     }
                 }
                 samples.clear();
-                for y in y0..y1 {
-                    for x in x0..x1 {
+                for y in (y0..y1).step_by(step) {
+                    for x in (x0..x1).step_by(step) {
                         let i = y * width + x;
                         if data[i].is_finite() && !excluded.get(i) {
                             samples.push(data[i]);
                         }
                     }
                 }
-                let area = (x1 - x0) * (y1 - y0);
+                let area = (x1 - x0).div_ceil(step) * (y1 - y0).div_ceil(step);
                 let count_raw = samples.len();
                 let (median, sigma) = if count_raw > 0 {
                     clipped_stats(
@@ -269,13 +279,14 @@ pub fn fit(
                 };
                 let valid_fraction = count_raw as f64 / area as f64;
                 let mut diffs = Vec::with_capacity(2 * b * b);
-                super::noise::second_differences(
+                super::noise::second_differences_strided(
                     data,
                     width,
                     x0,
                     x1,
                     y0,
                     y1,
+                    step,
                     |i| excluded.get(i),
                     &mut diffs,
                 );

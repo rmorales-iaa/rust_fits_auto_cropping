@@ -39,6 +39,47 @@ pub fn second_differences(
     }
 }
 
+/// As `second_differences`, using horizontal triplets only on rows and
+/// vertical triplets only on columns at multiples of `step` from the window
+/// origin (a deterministic strided subsample; `step = 1` is identical).
+#[allow(clippy::too_many_arguments)]
+pub fn second_differences_strided(
+    data: &[f64],
+    width: usize,
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+    step: usize,
+    skip: impl Fn(usize) -> bool,
+    out: &mut Vec<f64>,
+) {
+    if step <= 1 {
+        second_differences(data, width, x0, x1, y0, y1, skip, out);
+        return;
+    }
+    let usable = |i: usize| data[i].is_finite() && !skip(i);
+    for y in y0..y1 {
+        let row_sampled = (y - y0).is_multiple_of(step);
+        for x in x0..x1 {
+            let column_sampled = (x - x0).is_multiple_of(step);
+            if !row_sampled && !column_sampled {
+                continue;
+            }
+            let i = y * width + x;
+            if !usable(i) {
+                continue;
+            }
+            if row_sampled && x > x0 && x + 1 < x1 && usable(i - 1) && usable(i + 1) {
+                out.push(data[i - 1] - 2.0 * data[i] + data[i + 1]);
+            }
+            if column_sampled && y > y0 && y + 1 < y1 && usable(i - width) && usable(i + width) {
+                out.push(data[i - width] - 2.0 * data[i] + data[i + width]);
+            }
+        }
+    }
+}
+
 /// (sigma, effective sample size) from second differences; NaN sigma when
 /// fewer than 8 differences are available.
 ///
@@ -73,6 +114,33 @@ pub fn sigma_from_differences(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strided_differences_keep_sampled_rows_and_columns_only() {
+        let (w, h) = (9, 7);
+        let data: Vec<f64> = (0..w * h).map(|i| ((i * 37) % 11) as f64).collect();
+        let (mut full, mut one, mut two) = (Vec::new(), Vec::new(), Vec::new());
+        second_differences(&data, w, 0, w, 0, h, |_| false, &mut full);
+        second_differences_strided(&data, w, 0, w, 0, h, 1, |_| false, &mut one);
+        assert_eq!(full, one);
+        second_differences_strided(&data, w, 0, w, 0, h, 2, |_| false, &mut two);
+        // Horizontal triplets on rows 0,2,4,6 (4 rows x 7) and vertical
+        // triplets on columns 0,2,4,6,8 (5 columns x 5).
+        assert_eq!(two.len(), 4 * 7 + 5 * 5);
+        let mut expected = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if y % 2 == 0 && x > 0 && x + 1 < w {
+                    expected.push(data[i - 1] - 2.0 * data[i] + data[i + 1]);
+                }
+                if x % 2 == 0 && y > 0 && y + 1 < h {
+                    expected.push(data[i - w] - 2.0 * data[i] + data[i + w]);
+                }
+            }
+        }
+        assert_eq!(two, expected);
+    }
 
     #[test]
     fn linear_gradients_cancel_and_white_noise_scale_is_recovered() {

@@ -48,6 +48,7 @@ All keys are optional; defaults are registered starting values, not calibrated t
 | Key | Default | Meaning |
 | --- | ---: | --- |
 | `mesh_size_px` | 64 | Background mesh width; the effective mesh is `max(16, min(mesh_size_px, min(W,H)/8))`, giving at least 8x8 meshes. |
+| `mesh_min_samples` | 0 (off) | Opt-in strided mesh statistics: stride floor(sqrt(mesh area / value)), for example 1024 gives stride 2 on 64-px meshes. A numerical change under evaluation (plan R6); values 1-255 are rejected. |
 | `clip_kappa`, `clip_iterations` | 3.0, 5 | Iterative kappa-sigma clipping of mesh samples. |
 | `trusted_valid_fraction` | 0.5 | Minimum finite, non-excluded fraction for a trusted mesh (also needs >= 64 samples). |
 | `min_trusted_meshes` | 9 | Support requirement; trusted meshes must also span >= 2 mesh widths per axis, otherwise `reference_support_abstained`. |

@@ -105,6 +105,10 @@ pub enum UncertainPolicy {
 #[serde(deny_unknown_fields, default)]
 pub struct V2Rules {
     pub mesh_size_px: usize,
+    /// Minimum samples a mesh keeps when its statistics use a strided
+    /// lattice (plan R6): stride floor(sqrt(mesh area / value)); 0 (default)
+    /// disables. A numerical change, opt-in until its harness evaluation passes.
+    pub mesh_min_samples: usize,
     pub clip_kappa: f64,
     pub clip_iterations: usize,
     pub trusted_valid_fraction: f64,
@@ -140,6 +144,7 @@ impl Default for V2Rules {
     fn default() -> Self {
         Self {
             mesh_size_px: 64,
+            mesh_min_samples: 0,
             clip_kappa: 3.0,
             clip_iterations: 5,
             trusted_valid_fraction: 0.5,
@@ -176,6 +181,7 @@ impl V2Rules {
         ];
         if positive.iter().any(|v| !v.is_finite() || *v <= 0.0)
             || !(16..=4096).contains(&self.mesh_size_px)
+            || (self.mesh_min_samples != 0 && self.mesh_min_samples < 256)
             || !(1..=20).contains(&self.clip_iterations)
             || !(0.0..=1.0).contains(&self.trusted_valid_fraction)
             || !(self.eta_valid > 0.0 && self.eta_valid < 1.0)

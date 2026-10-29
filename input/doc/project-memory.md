@@ -2,6 +2,18 @@
 
 Updated: 2026-10-29, after Revision 3 (v2 default, crop policy, plan review) and the Revision 2 implementation (R0, R1 tools/harness, R2-R4, partial R6), plan Revision 2, large-image remediation and the disputed crop-geometry review.
 
+## Speed, memory and multiscale (2026-10-29, user request)
+
+- Exact speedups, decisions unchanged:
+  - tile_v1 multiscale scales run concurrently;
+  - correlation is lazy;
+  - crop families and summed-area tables are parallel;
+  - v2 tiles use the border flood;
+  - products encode their data unit directly.
+- Weighted memory admission (`src/memory.rs`) reserves a measured-model peak per image from `memory_budget_mib` before pixels are loaded; workers follow the CPU setting only. `maximum_image_mib` defaults to 2048.
+- The BLANK search uses a presence table for 8/16-bit images.
+- The equivalence harness also prints a decisions-only digest (DECISIONS), because the full digest hashes diagnostics that the border flood redefined.
+
 ## Product header rule (2026-10-29, user request)
 
 - The user asked that the FITS header be kept as it was, except the NAXIS adaptation, and that program cards use an `mo_` prefix. FITS keywords must be uppercase, so the prefix is `MO_`.
