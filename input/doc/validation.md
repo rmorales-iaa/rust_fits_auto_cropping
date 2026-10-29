@@ -344,13 +344,13 @@ Frame-level false acceptances with exact one-sided 95% Clopper-Pearson upper bou
 
 | Family | 256 px, n = 2,995 (final code): v1 | 256 px: v2 | 512 px, n = 1,000 (final code): v1 | 512 px: v2 |
 | --- | --- | --- | --- | --- |
-| flat | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_FLAT_V1 | G3A512_FLAT_V2 |
-| gradient (±40%) | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_GRADIENT_V1 | G3A512_GRADIENT_V2 |
-| illuminated vignetting (eta ≥ 0.6) | 12 (≤ 0.0065) | 0 (≤ 0.0010) | G3A512_VIGNETTING_V1 | G3A512_VIGNETTING_V2 |
-| bright edge sources | 2,966 (≤ 0.9931) | 0 (≤ 0.0010) | G3A512_EDGE_V1 | G3A512_EDGE_V2 |
-| nebulosity | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_NEBULA_V1 | G3A512_NEBULA_V2 |
-| correlated noise | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_CORR_V1 | G3A512_CORR_V2 |
-| quantized low counts | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_QUANT_V1 | G3A512_QUANT_V2 |
+| flat | 0 (≤ 0.0010) | 0 (≤ 0.0010) | 0 (≤ 0.0030) | 0 (≤ 0.0030) |
+| gradient (±40%) | 0 (≤ 0.0010) | 0 (≤ 0.0010) | 0 (≤ 0.0030) | 0 (≤ 0.0030) |
+| illuminated vignetting (eta ≥ 0.6) | 12 (≤ 0.0065) | 0 (≤ 0.0010) | 0 (≤ 0.0030) | 0 (≤ 0.0030) |
+| bright edge sources | 2,966 (≤ 0.9931) | 0 (≤ 0.0010) | 623 (≤ 0.6484) | 0 (≤ 0.0030) |
+| nebulosity | 0 (≤ 0.0010) | 0 (≤ 0.0010) | 0 (≤ 0.0030) | 0 (≤ 0.0030) |
+| correlated noise | 0 (≤ 0.0010) | 0 (≤ 0.0010) | 0 (≤ 0.0030) | 0 (≤ 0.0030) |
+| quantized low counts | 0 (≤ 0.0010) | 0 (≤ 0.0010) | 0 (≤ 0.0030) | 0 (≤ 0.0030) |
 
 The 256-px column was rerun on the final code (`9d60043`, including source-seed validation) with identical results: v2 had 0 false alarms in every family. An earlier run at `1c7b7ac` gave the same counts. The 512-px column was run on the final code with 1,000 frames per family, where zero failures bounds the rate at <= 0.0030; the full 2,995-frame G3a bound is established at 256 px.
 
