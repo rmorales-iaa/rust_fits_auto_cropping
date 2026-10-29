@@ -285,6 +285,9 @@ fn calibration_injection_recovery() {
         for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2Experimental] {
             let mut cfg = rules();
             cfg.detector = detector;
+            if std::env::var("FAR_EXCLUDE_UNCERTAIN").is_ok() {
+                cfg.v2.uncertain_policy = crate::config::UncertainPolicy::ExcludeUncertain;
+            }
             let (mut detected, mut tp, mut fp, mut fneg) = (0usize, 0usize, 0usize, 0usize);
             for seed in 0..n as u64 {
                 let (data, truth) = injected_frame(family, seed);
@@ -330,4 +333,65 @@ fn debug_null_frame() {
     cfg.detector = DetectorKind::BackgroundV2Experimental;
     let r = detect_border(&null_frame(&family, seed), size(), size(), &cfg);
     println!("DEBUG {}", r.reason);
+}
+
+#[test]
+#[ignore = "debug: where flat-divided stop false negatives lie"]
+fn debug_calibrated_false_negatives() {
+    let side = size();
+    let mut cfg = rules();
+    cfg.detector = DetectorKind::BackgroundV2Experimental;
+    let mut by_eta = [0usize; 4]; // eta bands for FN truth-I pixels: <0.05, <0.1, <0.15, <0.2
+    let mut by_edge = [0usize; 4]; // distance to frame edge: <4, <16, <48, >=48
+    let mut total_fn = 0usize;
+    for seed in 0..40u64 {
+        let (data, truth) = injected_frame("circular_stop_calibrated", seed);
+        let r = detect_border(&data, side, side, &cfg);
+        let mut frame_fn = 0usize;
+        let mut frame_i = 0usize;
+        for (i, (m, t)) in r.mask.iter().zip(&truth).enumerate() {
+            if *t != 1 {
+                continue;
+            }
+            frame_i += 1;
+            if *m {
+                continue;
+            }
+            frame_fn += 1;
+            total_fn += 1;
+            let (x, y) = (i % side, i / side);
+            let edge = x.min(y).min(side - 1 - x).min(side - 1 - y);
+            by_edge[if edge < 4 {
+                0
+            } else if edge < 16 {
+                1
+            } else if edge < 48 {
+                2
+            } else {
+                3
+            }] += 1;
+            // Raw illumination recovered from the injected ratio: noisy, so
+            // use the deterministic geometry by re-deriving it is not
+            // available here; approximate with |data - 1000| noise level.
+            let amp = (data[i] - 1000.0).abs();
+            by_eta[if amp > 600.0 {
+                0
+            } else if amp > 300.0 {
+                1
+            } else if amp > 150.0 {
+                2
+            } else {
+                3
+            }] += 1;
+        }
+        if frame_fn * 10 > frame_i {
+            println!(
+                "FRAME seed={seed} accepted={} fn={frame_fn}/{frame_i}: {}",
+                r.accepted, r.reason
+            );
+        }
+    }
+    println!(
+        "FN total={total_fn} by_edge(<4,<16,<48,>=48)={by_edge:?} by_abs_dev(>600,>300,>150,else)={by_eta:?}"
+    );
 }

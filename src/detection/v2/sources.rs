@@ -50,6 +50,39 @@ fn local_block_noise(data: &[f64], width: usize, height: usize, quantum: f64) ->
     (cols, out)
 }
 
+/// Local-background validation of a seed component: its peak residual must
+/// exceed `source_seed_snr` times the second-difference noise measured in a
+/// 6-px margin around the component's bounding box (seed pixels excluded).
+/// Genuine compact sources pass; clumps of excursions inside amplified-noise
+/// regions (where block noise straddles quiet and noisy areas) do not.
+fn locally_significant(
+    data: &[f64],
+    width: usize,
+    height: usize,
+    bg: &Background,
+    seed: &Bitset,
+    component: &[usize],
+    rules: &V2Rules,
+) -> bool {
+    const MARGIN: usize = 6;
+    let (mut x0, mut x1, mut y0, mut y1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+    let mut peak = f64::NEG_INFINITY;
+    for &i in component {
+        let (x, y) = (i % width, i / width);
+        x0 = x0.min(x);
+        x1 = x1.max(x);
+        y0 = y0.min(y);
+        y1 = y1.max(y);
+        peak = peak.max(data[i] - bg.level(x as f64, y as f64));
+    }
+    let (bx0, bx1) = (x0.saturating_sub(MARGIN), (x1 + MARGIN + 1).min(width));
+    let (by0, by1) = (y0.saturating_sub(MARGIN), (y1 + MARGIN + 1).min(height));
+    let mut diffs = Vec::new();
+    second_differences(data, width, bx0, bx1, by0, by1, |i| seed.get(i), &mut diffs);
+    let (ring_sigma, _) = sigma_from_differences(&diffs, bg.quantum, &mut Vec::new());
+    !ring_sigma.is_finite() || peak > rules.source_seed_snr * ring_sigma
+}
+
 pub fn detect(
     data: &[f64],
     width: usize,
@@ -116,7 +149,9 @@ pub fn detect(
                 }
             }
         }
-        if component.len() >= rules.source_min_pixels {
+        if component.len() >= rules.source_min_pixels
+            && locally_significant(data, width, height, bg, &seed, &component, rules)
+        {
             components.push(component);
         }
     }
