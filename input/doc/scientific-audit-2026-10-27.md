@@ -75,3 +75,26 @@ The P1 fixes and reporting changes are local implementation work; do not infer t
 This slice adds a typed no-unused-integer-code condition and keeps affected inputs as unchanged symlinks rather than failing or corrupting their undefined semantics. Integer value spans beyond the exact f64 range abstain from detection. Crop mode keeps files with recognized lookup-table/distortion WCS conventions. FITS summaries now use schema 2 and identify the algorithm/policy, Git revision/dirty state, executable hash and source/effective config and heuristic hashes. The correlation implementation removes allocated pair vectors and uses rescaled Welford moments; small exhaustive mask patterns independently check rectangle and circle geometry. Border-connected components now pass support/area/evidence/provisional utility gates independently, and report counts expose candidate and accepted components.
 
 Validation: 60 Rust tests passed; rustfmt and Clippy passed. Release `0.0.57` processed the recurring 25-frame development corpus (16 clipped, 4 kept, 5 malformed-header errors) in 4.37 s with 976,992 KiB peak RSS at four workers and PNG enabled. Astropy and fitsverify accepted all 20 science products and 16 masks. Three no-PNG crop runs measured 13.16 s median / 307,964 KiB median RSS at one worker and 3.80 s / 923,276 KiB at four workers. Astropy confirmed identical pixel arrays for all 36 outputs across all six trials. Fixed trial order, one machine/dataset, and no pre-change algorithm baseline limit inference; this establishes current workload repeatability and worker equivalence, not a measured algorithm speed gain or hard resource bound. The data have no independent artifact labels. P1 remains partial; A04 is partially mitigated at component gating; A01–A03, A05–A06 and other open findings are not cleared. See [the active plan](scientific-improvement-plan.md) and [validation](validation.md).
+
+## Revision-2 addendum (2026-10-29)
+
+Scope: a deep review of the current head (`71ec091`, package `0.1.0`; this container's build counter was `0.0.1`, while the user's host recorded `0.2.74` for the latest crop validation). It covered the README, skills, plan and memory, plus six deterministic detector probes and one large-frame timing observation. The 102 Rust tests, strict Clippy and formatting passed. No detector code, threshold or default was changed. The findings, design responses and roadmap are in [plan Revision 2](scientific-improvement-plan.md) §0, §4A and §8.
+
+### Portable probe recipes (shipped `input/heuristics.toml`, mask decision only)
+
+Call the crate-internal `detect_border(data, 256, 256, rules)` from a temporary `#[cfg(test)]` module. Use a fixed-seed LCG (`s = s·6364136223846793005 + 1442695040888963407`, uniform `((s>>11)+0.5)/2⁵³`) with Box–Muller for Gaussian noise. Sky is 1000 + N(0, 10²). A "star" adds `A·exp(−r²/2σ²)`. Truth is the stated strip; FP counts mask pixels outside truth. Observed outcomes:
+
+| Probe | Recipe | Outcome |
+| --- | --- | --- |
+| A19 quiet | columns x<40 replaced by 300 + N(0, 2²) | accepted; TP 8,192, FN 2,048 |
+| A19 amplified | columns x<40 replaced by 300 + N(0, 60²) | `no_border_candidate`; FN 10,240 |
+| A20 edge source | star A=3000, σ=14 px at (0,128); no artifact | accepted; FP 2,816 |
+| A03 vignetting | subtract `D·(1−e/48)²` for edge distance e<48; D=400 / 800; no artifact | accepted; FP 15,616 / 28,672 (same with or without an interior star) |
+| A18 step | columns x<48 replaced by 700 + N(0, 5²); with/without interior star A=20000, σ=8 px at (128,128) | without star: missed (FN 12,288); with star: accepted (TP 12,288) |
+| A01 strips | columns x<20 / x<28 set to 0 | FN 1,024 / FP 1,024 |
+
+Mechanisms, by code inspection: A18 follows from `typical_noise = max(interior tile σ)` in `tile_detector.rs` for `central_tiles`. A19 follows because the candidate rule accepts only `quiet` (σ below a fraction of reference), `correlated` or exact-uniform tiles. A20 and A03 follow because raw, undetrended lag-one correlation of a smooth profile exceeds 0.95 and is sufficient alongside contrast.
+
+Timing observation (release build, single run, 4-core container): synthetic 7100×5325 frame with a 300-column zero strip. `single_scale` took 1.68 s and `multiscale_consensus` 5.44 s. An O(n) selection median over all 147,852 16×16 tiles took 0.118 s. The mask covered 304 columns. This is a hint for R0, not a G5 benchmark.
+
+Additional inspection findings: A21 (dominated keep fallback after a failed crop cap), A22 (tolerant crop retains flagged samples as data), A23 (anchor-restricted residual search), A24 (dimensionless utility and component-count tiers), A25 (0.5 mask-fraction veto), A26 (sort/allocation cost), A27 (documentation drift, fixed in this revision), A28 (unused master-flat pixel truth), A29 (no null false-alarm control), A30 (undefined label rule for partial illumination) and A31 (transient mask FITS write + fsync + verify per processed image). The responses are mapped in the plan. User decisions D1–D4 are open.

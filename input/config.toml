@@ -3,5 +3,5 @@
 threads = 4 # 0 selects all available logical CPUs, bounded by the memory budget.
 recursive = false
 memory_budget_mib = 8192
-maximum_image_mib = 1536 # Covers 7100x5325 inputs at the current 32-byte/pixel workspace estimate.
-mode = "mask" # mask preserves dimensions; crop selects the larger clean rectangle/circle.
+maximum_image_mib = 1536 # Covers 7100x5325 inputs (~1,441 MiB) at the current 40-byte/pixel workspace estimate; not an RSS cap.
+mode = "mask" # mask preserves dimensions; crop selects an axis-aligned rectangle (see heuristics residual fraction).
