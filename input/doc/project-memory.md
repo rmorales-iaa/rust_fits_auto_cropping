@@ -1,12 +1,14 @@
 # Project memory
 
-Updated: 2026-10-28, after replacing circle-constrained crop geometry with a global maximum rectangle.
+Updated: 2026-10-29, after large-image remediation and disputed crop-geometry review.
 
 ## Operational remediation: large yearly FITS inputs (2026-10-29)
 
 - The yearly batch summaries for 2009, 2011, 2012, 2017, 2018, 2019, 2021, 2024 and 2026 showed workspace-cap failures: 2,747 valid images were passed through unchanged because the old 512 MiB estimate limit was too small. Largest observed image is 7100×5325 (37,807,500 pixels), about 1,156 MiB at the program's 32-bytes/pixel estimate. Runtime config now permits 1,536 MiB per image with an 8,192 MiB shared estimate budget; thread count remains capped at 4. This is not a measured RSS guarantee.
 - 2024 also has two truly truncated FITS header inputs. Policy is to annotate and preserve each as a source symlink; their invalid source bytes cannot be repaired by cropping. 2023 has not had a prior output summary and is part of the requested rerun.
 - Requested remediation dataset: years 2009, 2011, 2012, 2017, 2018, 2019, 2021, 2023, 2024, 2026 only. The yearly script sanitizes each selected year’s dedicated `science_calibrated/` output root before processing; calibration links and original source data are outside that root.
+- At the user's request, the long rerun stopped during 2011. Year 2009 completed with 3,095/3,095 outputs (1,025 clipped, 2,070 kept, zero errors) in 758,857 ms. The partial 2011 run has 2,675 completion records and no final summary; sanitation had already removed its previous products, so its output is incomplete. Its transient `masks/` tree was removed. Later selected years were not started.
+- Four disputed 2004–2005 crops were reproduced with release `0.2.57`. Independent search over captured reason planes matched the Rust maximum-clean-rectangle output for all four; Astropy verified exact source slices and `NAXIS1/2`, and fitsverify found zero errors. This isolates the issue to the detector mask or crop acceptance policy, not rectangle geometry. No thresholds were tuned on these repeated inspection frames because no independent usable/invalid pixel labels exist. See [the investigation record](wrong-rectangle-investigation-plan.md).
 
 ## Identity and active work
 

@@ -1,7 +1,7 @@
 # Yearly large-image remediation plan
 
 Date: 2026-10-29
-Status: implementation and selected-year reruns in progress.
+Status: batch stopped at the user's request; 2009 complete, 2011 interrupted, later selected years not rerun.
 
 ## Scope and observed cause
 
@@ -25,8 +25,11 @@ The 2023 source has no `dark/` directory. The yearly script reports this missing
 
 - [x] Existing summaries and source inventory inspected for the requested years.
 - [x] Workspace policy raised to cover the largest observed frame; four configured threads retained.
-- [ ] Release binary built.
-- [ ] Ten requested years rerun with per-year progress.
-- [ ] Summary parity, remaining errors and expected symlinks checked.
-- [ ] Actual elapsed time and memory measured/reported where available.
-- [ ] Documentation and memory updated with final evidence; verified local commit created.
+- [x] Release binary built as `0.2.57` after the configuration change.
+- [ ] Ten requested years rerun with per-year progress. The user stopped the batch during 2011; only 2009 completed.
+- [ ] Summary parity, remaining errors and expected symlinks checked. 2009: `total=output_images=3095`, 1,025 clipped, 2,070 kept, zero errors. 2011 was interrupted after 2,675 `file_finished` records and has no final summary.
+- [x] Actual elapsed time and memory measured/reported where available. The completed 2009 run took 758,857 ms (12m 38.857s); live 2011 RSS samples were about 180–305 MiB. These are observations, not a peak bound.
+- [x] Capacity/progress/optional-calibration script changes committed locally as `4bf7c6d` and `1657ee2`.
+- [x] Documentation and memory updated with final evidence; this is included in the current scoped documentation commit.
+
+The yearly script sanitizes selected outputs before starting. As a result, the old 2011 science output was cleared before the user stopped processing; the current 2011 directory contains only the partial run and activity log. Its transient `masks/` directory was removed after interruption. Do not treat that directory as a complete output set.
