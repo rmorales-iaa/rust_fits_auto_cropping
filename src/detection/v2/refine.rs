@@ -18,7 +18,7 @@ use super::bitset::Bitset;
 use super::distance::banded_signed_distance;
 use super::noise::{second_differences, sigma_from_differences};
 use crate::config::{UncertainPolicy, V2Rules};
-use crate::detection::robust::location_scale_with;
+use crate::detection::robust::median_finite_with;
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
@@ -85,120 +85,165 @@ pub fn refine(
     // 0 = not evaluated, 1 = below low, 2 = weak, 3 = strong. Rows are
     // independent and collected in order (deterministic for any worker count).
     let in_band = |i: usize| signed(i).abs() <= band;
-    let classify_row = |y: usize| -> Vec<u8> {
+    let eval = bg.pixel_eval();
+    // Rows are classified in chunks. Each chunk caches the residual
+    // x - B of every pixel its 5x5 level windows touch, filled on first use
+    // (NaN = not yet computed), so B is evaluated once per pixel instead of
+    // once per window position. Values are identical to direct evaluation.
+    const CHUNK: usize = 32;
+    let classify_chunk = |chunk: usize| -> Vec<u8> {
+        let (r0, r1) = (chunk * CHUNK, ((chunk + 1) * CHUNK).min(height));
+        let (c0, c1) = (r0.saturating_sub(2), (r1 + 2).min(height));
+        let mut cache = vec![f64::NAN; (c1 - c0) * width];
         let mut window = Vec::with_capacity(49);
         let mut scratch = Vec::with_capacity(49);
-        (0..width)
-            .map(|x| {
-                let i = y * width + x;
-                if !in_band(i) || !data[i].is_finite() || sources.get(i) {
-                    return 0;
-                }
-                let sigma = bg.noise(x as f64, y as f64).max(1e-300);
-                let mut level_score = || -> Option<(f64, f64)> {
-                    window.clear();
-                    for wy in y.saturating_sub(2)..=(y + 2).min(height - 1) {
-                        for wx in x.saturating_sub(2)..=(x + 2).min(width - 1) {
-                            let j = wy * width + wx;
-                            if data[j].is_finite() && !sources.get(j) {
-                                window.push(data[j] - bg.level(wx as f64, wy as f64));
+        let mut out = Vec::with_capacity((r1 - r0) * width);
+        for y in r0..r1 {
+            for x in 0..width {
+                out.push({
+                    let i = y * width + x;
+                    if !in_band(i) || !data[i].is_finite() || sources.get(i) {
+                        0
+                    } else {
+                        let sigma = eval.noise(x, y).max(1e-300);
+                        let mut level_score = || -> Option<(f64, f64)> {
+                            window.clear();
+                            for wy in y.saturating_sub(2)..=(y + 2).min(height - 1) {
+                                for wx in x.saturating_sub(2)..=(x + 2).min(width - 1) {
+                                    let j = wy * width + wx;
+                                    if data[j].is_finite() && !sources.get(j) {
+                                        let slot = &mut cache[(wy - c0) * width + wx];
+                                        if slot.is_nan() {
+                                            *slot = data[j] - eval.level(wx, wy);
+                                        }
+                                        window.push(*slot);
+                                    }
+                                }
                             }
+                            if window.len() < 9 {
+                                return None;
+                            }
+                            let n_eff = bg.effective_n(window.len());
+                            let median = median_finite_with(window.iter().copied(), &mut scratch);
+                            Some((median / (1.2533 * sigma / n_eff.sqrt()), median))
+                        };
+                        let level_z = if signature.level != 0 {
+                            level_score()
+                        } else {
+                            None
+                        };
+                        let dispersion_z = if signature.dispersion != 0 {
+                            window.clear();
+                            let (x0, x1) = (x.saturating_sub(3), (x + 4).min(width));
+                            let (y0, y1) = (y.saturating_sub(3), (y + 4).min(height));
+                            second_differences(
+                                data,
+                                width,
+                                x0,
+                                x1,
+                                y0,
+                                y1,
+                                |j| sources.get(j),
+                                &mut window,
+                            );
+                            let (s_diff, n_diff) =
+                                sigma_from_differences(&window, bg.quantum, &mut scratch);
+                            let reference = eval.diff_noise(x, y).max(1e-300);
+                            (s_diff.is_finite() && n_diff > 0.0).then(|| {
+                                let n_eff = bg.effective_n(n_diff as usize);
+                                let ratio = s_diff.max(1e-300) / reference;
+                                (ratio.ln() / (1.36 / n_eff).sqrt(), ratio)
+                            })
+                        } else {
+                            None
+                        };
+                        // Significance class (units of the high threshold) and the
+                        // D4 relative-illumination class; a pixel is strong/weak only
+                        // when it is both significant and on the invalid side of eta.
+                        let significance = |z: f64, sign: i8, high: f64| -> u8 {
+                            let t = f64::from(sign) * z / high;
+                            if t >= 1.0 {
+                                3
+                            } else if t >= low {
+                                2
+                            } else {
+                                1
+                            }
+                        };
+                        let eta_i = eta_invalid(rules.eta_valid);
+                        let mut class = 1u8;
+                        if let Some((z, residual)) = level_z {
+                            let sig = significance(z, signature.level, high_level);
+                            let eta_level = match signature.core_residual {
+                                // eta = 1 - r / r0, with r0 the unilluminated core.
+                                Some(r0) if signature.level < 0 && r0 < 0.0 => {
+                                    eta_class(1.0 - residual / r0, eta_i, rules.eta_valid)
+                                }
+                                _ => 3,
+                            };
+                            class = class.max(sig.min(eta_level));
                         }
-                    }
-                    if window.len() < 9 {
-                        return None;
-                    }
-                    let n_eff = bg.effective_n(window.len());
-                    let (median, _) = location_scale_with(window.iter().copied(), &mut scratch);
-                    Some((median / (1.2533 * sigma / n_eff.sqrt()), median))
-                };
-                let level_z = if signature.level != 0 {
-                    level_score()
-                } else {
-                    None
-                };
-                let dispersion_z = if signature.dispersion != 0 {
-                    window.clear();
-                    let (x0, x1) = (x.saturating_sub(3), (x + 4).min(width));
-                    let (y0, y1) = (y.saturating_sub(3), (y + 4).min(height));
-                    second_differences(
-                        data,
-                        width,
-                        x0,
-                        x1,
-                        y0,
-                        y1,
-                        |j| sources.get(j),
-                        &mut window,
-                    );
-                    let (s_diff, n_diff) =
-                        sigma_from_differences(&window, bg.quantum, &mut scratch);
-                    let reference = bg.diff_noise(x as f64, y as f64).max(1e-300);
-                    (s_diff.is_finite() && n_diff > 0.0).then(|| {
-                        let n_eff = bg.effective_n(n_diff as usize);
-                        let ratio = s_diff.max(1e-300) / reference;
-                        (ratio.ln() / (1.36 / n_eff).sqrt(), ratio)
-                    })
-                } else {
-                    None
-                };
-                // Significance class (units of the high threshold) and the
-                // D4 relative-illumination class; a pixel is strong/weak only
-                // when it is both significant and on the invalid side of eta.
-                let significance = |z: f64, sign: i8, high: f64| -> u8 {
-                    let t = f64::from(sign) * z / high;
-                    if t >= 1.0 {
-                        3
-                    } else if t >= low {
-                        2
-                    } else {
-                        1
-                    }
-                };
-                let eta_i = eta_invalid(rules.eta_valid);
-                let mut class = 1u8;
-                if let Some((z, residual)) = level_z {
-                    let sig = significance(z, signature.level, high_level);
-                    let eta_level = match signature.core_residual {
-                        // eta = 1 - r / r0, with r0 the unilluminated core.
-                        Some(r0) if signature.level < 0 && r0 < 0.0 => {
-                            eta_class(1.0 - residual / r0, eta_i, rules.eta_valid)
+                        if let Some((z, ratio)) = dispersion_z {
+                            let sig = significance(z, signature.dispersion, high_disp);
+                            // Noise-dominated sky: raw ratio^2 ~ eta; flat-divided ~ 1/eta.
+                            let eta = if signature.dispersion < 0 {
+                                ratio * ratio
+                            } else {
+                                1.0 / (ratio * ratio)
+                            };
+                            class = class.max(sig.min(eta_class(eta, eta_i, rules.eta_valid)));
                         }
-                        _ => 3,
-                    };
-                    class = class.max(sig.min(eta_level));
-                }
-                if let Some((z, ratio)) = dispersion_z {
-                    let sig = significance(z, signature.dispersion, high_disp);
-                    // Noise-dominated sky: raw ratio^2 ~ eta; flat-divided ~ 1/eta.
-                    let eta = if signature.dispersion < 0 {
-                        ratio * ratio
-                    } else {
-                        1.0 / (ratio * ratio)
-                    };
-                    class = class.max(sig.min(eta_class(eta, eta_i, rules.eta_valid)));
-                }
-                class
-            })
-            .collect()
+                        class
+                    }
+                });
+            }
+        }
+        out
     };
-    let class: Vec<u8> = (0..height)
+    let class: Vec<u8> = (0..height.div_ceil(CHUNK))
         .into_par_iter()
-        .map(classify_row)
+        .map(classify_chunk)
         .collect::<Vec<_>>()
         .into_iter()
         .flatten()
         .collect();
-    let mut reached = vec![0u8; n];
-    let mut queue = VecDeque::new();
-    for i in 0..n {
-        let core = tile_mask[i] && signed(i) > band && data[i].is_finite();
-        let strong_seed = tile_mask[i] && class[i] == 3;
-        if core || strong_seed {
-            reached[i] = if core { 3 } else { class[i] };
-            queue.push_back(i);
-        }
-    }
+    // Growth result: every pixel 4-connected to a seed (core or strong
+    // in-component pixel) through admissible pixels (core or class >= 2),
+    // valued 3 for core and `class` otherwise. That closure does not depend
+    // on visiting order, so seeds are marked in parallel and only seeds with
+    // an unmarked neighbour are queued.
+    let core = |i: usize| tile_mask[i] && signed(i) > band && data[i].is_finite();
+    let mut reached: Vec<u8> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            if core(i) {
+                3
+            } else if tile_mask[i] && class[i] == 3 {
+                class[i]
+            } else {
+                0
+            }
+        })
+        .collect();
+    let frontier: Vec<usize> = (0..height)
+        .into_par_iter()
+        .flat_map_iter(|y| {
+            let reached = &reached;
+            (0..width).filter_map(move |x| {
+                let i = y * width + x;
+                let open = |nx: usize, ny: usize| {
+                    nx < width && ny < height && reached[ny * width + nx] == 0
+                };
+                (reached[i] != 0
+                    && (open(x.wrapping_sub(1), y)
+                        || open(x + 1, y)
+                        || open(x, y.wrapping_sub(1))
+                        || open(x, y + 1)))
+                .then_some(i)
+            })
+        })
+        .collect();
+    let mut queue: VecDeque<usize> = frontier.into();
     while let Some(i) = queue.pop_front() {
         let (x, y) = (i % width, i / width);
         for (nx, ny) in [
@@ -214,7 +259,7 @@ pub fn refine(
             if reached[j] != 0 {
                 continue;
             }
-            let interior_core = tile_mask[j] && signed(j) > band && data[j].is_finite();
+            let interior_core = core(j);
             if interior_core || class[j] >= 2 {
                 reached[j] = if interior_core { 3 } else { class[j] };
                 queue.push_back(j);

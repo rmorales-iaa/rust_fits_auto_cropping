@@ -1,6 +1,7 @@
 //! Rust-native FITS loading, eligibility checks, and detection-value conversion.
 use anyhow::{Context, bail};
 use fitskit::{FitsFile, HduData, Header, Keyword, PixelData};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -156,8 +157,8 @@ pub fn read_image(
             }
             (integer_values(raw, existing_blank)?, existing_blank)
         }
-        PixelData::F32(raw) => (center_float_values(raw.iter().map(|&v| f64::from(v))), None),
-        PixelData::F64(raw) => (center_float_values(raw.iter().copied()), None),
+        PixelData::F32(raw) => (center_float_values(raw, f64::from, f32::total_cmp), None),
+        PixelData::F64(raw) => (center_float_values(raw, |v| v, f64::total_cmp), None),
     };
     if values.len() != n {
         bail!("FITS array size does not match NAXIS dimensions");
@@ -196,15 +197,20 @@ pub fn read_fits_snapshot(path: &Path) -> anyhow::Result<FitsFile> {
 /// Hash bytes as fitskit reads them. Forward seeks are implemented by reading
 /// the skipped bytes, so FITS block padding is part of the digest too.
 struct HashingReader<'a> {
-    inner: &'a mut File,
+    inner: io::BufReader<&'a mut File>,
+    /// Logical stream offset of the next byte returned (the buffered file
+    /// position runs ahead of it, so it is tracked here instead of queried).
+    position: u64,
     hasher: Sha256,
     repairs: Vec<RawHeaderCard>,
 }
 
 impl<'a> HashingReader<'a> {
+    /// `inner` must be positioned at offset 0.
     fn new(inner: &'a mut File, repairs: Vec<RawHeaderCard>) -> Self {
         Self {
-            inner,
+            inner: io::BufReader::with_capacity(1 << 20, inner),
+            position: 0,
             hasher: Sha256::new(),
             repairs,
         }
@@ -217,10 +223,11 @@ impl<'a> HashingReader<'a> {
 
 impl Read for HashingReader<'_> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        let start = self.inner.stream_position()?;
+        let start = self.position;
         let read = self.inner.read(output)?;
         self.hasher.update(&output[..read]);
         let end = start.saturating_add(read as u64);
+        self.position = end;
         for repair in &self.repairs {
             let repair_end = repair
                 .offset
@@ -242,7 +249,7 @@ impl Read for HashingReader<'_> {
 
 impl Seek for HashingReader<'_> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-        let current = self.inner.stream_position()?;
+        let current = self.position;
         let target = match position {
             SeekFrom::Start(target) => target,
             SeekFrom::Current(delta) => current
@@ -250,6 +257,7 @@ impl Seek for HashingReader<'_> {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid seek"))?,
             SeekFrom::End(delta) => self
                 .inner
+                .get_ref()
                 .metadata()?
                 .len()
                 .checked_add_signed(delta)
@@ -262,7 +270,7 @@ impl Seek for HashingReader<'_> {
             ));
         }
         let mut remaining = target - current;
-        let mut buffer = [0_u8; 8192];
+        let mut buffer = [0_u8; 65536];
         while remaining > 0 {
             let chunk = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
             let read = self.read(&mut buffer[..chunk])?;
@@ -509,22 +517,26 @@ where
 
 fn integer_values<T>(raw: &[T], existing_blank: Option<i64>) -> anyhow::Result<Vec<f64>>
 where
-    T: Copy + Into<i64>,
+    T: Copy + Ord + Send + Sync + Into<i64>,
 {
-    let raw: Vec<i64> = raw.iter().copied().map(Into::into).collect();
-    let mut valid: Vec<i64> = raw
+    // Select in the native sample type: the widening to i64 is exact and
+    // order-preserving, so the anchor equals the sorted upper median while
+    // the scratch copy stays at the stored sample width.
+    let mut valid: Vec<T> = raw
         .iter()
         .copied()
-        .filter(|v| Some(*v) != existing_blank)
+        .filter(|&v| Some(v.into()) != existing_blank)
         .collect();
     if valid.is_empty() {
         bail!("integer image contains no defined pixels");
     }
-    valid.sort_unstable();
-    let anchor = valid[valid.len() / 2];
+    let middle = valid.len() / 2;
+    let anchor: i64 = (*valid.select_nth_unstable(middle).1).into();
+    drop(valid);
     Ok(raw
-        .iter()
+        .par_iter()
         .map(|&v| {
+            let v: i64 = v.into();
             if Some(v) == existing_blank {
                 f64::NAN
             } else {
@@ -534,30 +546,62 @@ where
         .collect())
 }
 
-fn center_float_values(values: impl Iterator<Item = f64>) -> Vec<f64> {
-    let mut values: Vec<f64> = values.collect();
-    let mut finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
-    if finite.is_empty() {
-        return values;
-    }
-    finite.sort_by(f64::total_cmp);
+/// Median of `finite` by exact O(n) selection under `cmp`, converted with
+/// `to_f64`; bit-identical to sorting the converted values and averaging the
+/// two middle values. `to_f64` must be exact and order-preserving.
+fn exact_median<T: Copy>(
+    mut finite: Vec<T>,
+    cmp: impl Fn(&T, &T) -> std::cmp::Ordering,
+    to_f64: impl Fn(T) -> f64,
+) -> f64 {
+    let even = finite.len().is_multiple_of(2);
     let middle = finite.len() / 2;
-    let center = if finite.len().is_multiple_of(2) {
-        finite[middle - 1] * 0.5 + finite[middle] * 0.5
+    let (lower, &mut upper, _) = finite.select_nth_unstable_by(middle, &cmp);
+    let upper = to_f64(upper);
+    if even {
+        // The lower middle is the largest element left of the partition.
+        let below = lower
+            .iter()
+            .copied()
+            .max_by(&cmp)
+            .expect("an even non-empty slice has a lower half");
+        to_f64(below) * 0.5 + upper * 0.5
     } else {
-        finite[middle]
-    };
-    for value in &mut values {
-        if value.is_finite() {
-            let difference = *value - center;
-            *value = if difference.is_finite() {
+        upper
+    }
+}
+
+/// Centre floating samples on their finite median. The median is selected
+/// in the stored type (f32 widening is exact and order-preserving), and the
+/// conversion and centring run in one ordered parallel pass.
+fn center_float_values<T: Copy + Send + Sync>(
+    raw: &[T],
+    to_f64: impl Fn(T) -> f64 + Sync + Copy,
+    cmp: impl Fn(&T, &T) -> std::cmp::Ordering,
+) -> Vec<f64> {
+    let finite: Vec<T> = raw
+        .iter()
+        .copied()
+        .filter(|&v| to_f64(v).is_finite())
+        .collect();
+    if finite.is_empty() {
+        return raw.par_iter().map(|&v| to_f64(v)).collect();
+    }
+    let center = exact_median(finite, cmp, to_f64);
+    raw.par_iter()
+        .map(|&v| {
+            let value = to_f64(v);
+            if !value.is_finite() {
+                return value;
+            }
+            let difference = value - center;
+            if difference.is_finite() {
                 difference
             } else {
-                *value * 0.5 - center * 0.5
-            };
-        }
-    }
-    values
+                value * 0.5 - center * 0.5
+            }
+        })
+        .collect()
 }
 
 pub fn unused_integer_value(bitpix: i64, raw: &[i64]) -> anyhow::Result<i64> {
@@ -593,9 +637,110 @@ mod tests {
 
     #[test]
     fn float_centering_avoids_overflow_across_opposite_extremes() {
-        let values = center_float_values([f64::MAX, -f64::MAX].into_iter());
+        let values = center_float_values(&[f64::MAX, -f64::MAX], |v| v, f64::total_cmp);
         assert_eq!(values, [f64::MAX, -f64::MAX]);
         assert!(values.iter().all(|value| value.is_finite()));
+    }
+
+    /// The pre-optimisation implementation: sort a full f64 copy.
+    fn reference_center(values: Vec<f64>) -> Vec<f64> {
+        let mut finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+        if finite.is_empty() {
+            return values;
+        }
+        finite.sort_by(f64::total_cmp);
+        let m = finite.len() / 2;
+        let center = if finite.len().is_multiple_of(2) {
+            finite[m - 1] * 0.5 + finite[m] * 0.5
+        } else {
+            finite[m]
+        };
+        values
+            .into_iter()
+            .map(|v| {
+                if !v.is_finite() {
+                    return v;
+                }
+                let d = v - center;
+                if d.is_finite() {
+                    d
+                } else {
+                    v * 0.5 - center * 0.5
+                }
+            })
+            .collect()
+    }
+
+    fn reference_integer(raw: &[i64], blank: Option<i64>) -> Vec<f64> {
+        let mut valid: Vec<i64> = raw.iter().copied().filter(|v| Some(*v) != blank).collect();
+        valid.sort_unstable();
+        let anchor = valid[valid.len() / 2];
+        raw.iter()
+            .map(|&v| {
+                if Some(v) == blank {
+                    f64::NAN
+                } else {
+                    (v as i128 - anchor as i128) as f64
+                }
+            })
+            .collect()
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|v| v.to_bits()).collect()
+    }
+
+    #[test]
+    fn selection_centering_is_bit_identical_to_sorting() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let specials = [
+            f64::NAN,
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.5,
+            -1.5,
+        ];
+        for trial in 0..400 {
+            let len = 1 + (next() % 300) as usize; // even and odd lengths
+            let f64s: Vec<f64> = (0..len)
+                .map(|_| match next() % 10 {
+                    0 => specials[(next() % specials.len() as u64) as usize],
+                    1..=3 => ((next() % 7) as f64) - 3.0, // ties
+                    _ => (next() as f64 / u64::MAX as f64 - 0.5) * 1e4,
+                })
+                .collect();
+            assert_eq!(
+                bits(&center_float_values(&f64s, |v| v, f64::total_cmp)),
+                bits(&reference_center(f64s.clone())),
+                "f64 trial {trial}"
+            );
+            let f32s: Vec<f32> = f64s.iter().map(|&v| v as f32).collect();
+            assert_eq!(
+                bits(&center_float_values(&f32s, f64::from, f32::total_cmp)),
+                bits(&reference_center(
+                    f32s.iter().map(|&v| f64::from(v)).collect()
+                )),
+                "f32 trial {trial}"
+            );
+            let i16s: Vec<i16> = (0..len).map(|_| (next() % 41) as i16 - 20).collect();
+            let blank = (trial % 3 == 0).then_some(-20);
+            let widened: Vec<i64> = i16s.iter().map(|&v| i64::from(v)).collect();
+            if widened.iter().any(|v| Some(*v) != blank) {
+                assert_eq!(
+                    bits(&integer_values(&i16s, blank).unwrap()),
+                    bits(&reference_integer(&widened, blank)),
+                    "i16 trial {trial}"
+                );
+            }
+        }
     }
 
     #[test]

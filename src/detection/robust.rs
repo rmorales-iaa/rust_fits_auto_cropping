@@ -27,6 +27,14 @@ pub fn median(values: &mut [f64]) -> f64 {
     }
 }
 
+/// Median of the finite values produced by `values`, reusing `scratch`; equal
+/// bit for bit to the location returned by `location_scale_with`.
+pub fn median_finite_with(values: impl Iterator<Item = f64>, scratch: &mut Vec<f64>) -> f64 {
+    scratch.clear();
+    scratch.extend(values.filter(|v| v.is_finite()));
+    median(scratch)
+}
+
 /// Median and 1.4826-scaled MAD of the finite values.
 pub fn location_scale(values: &[f64]) -> (f64, f64) {
     let mut scratch = Vec::with_capacity(values.len());

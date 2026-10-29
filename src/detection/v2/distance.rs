@@ -156,9 +156,9 @@ pub fn banded_signed_distance(
     height: usize,
     radius: usize,
 ) -> Banded {
+    use rayon::prelude::*;
     let n = width * height;
     let radius = radius.min(255);
-    let mut squared = vec![FAR; n];
     let r = radius as isize;
     let r2 = (radius * radius) as isize;
     let neighbor_differs = |i: usize| {
@@ -169,42 +169,96 @@ pub fn banded_signed_distance(
             || (y > 0 && inside[i - width] != here)
             || (y + 1 < height && inside[i + width] != here)
     };
-    for b in 0..n {
-        if !neighbor_differs(b) {
-            continue;
-        }
-        // A boundary pixel of one side is the nearest-candidate for the
-        // other side's pixels.
-        let side = inside[b];
-        let (bx, by) = ((b % width) as isize, (b / width) as isize);
-        for dy in -r..=r {
-            let y = by + dy;
-            if y < 0 || y >= height as isize {
-                continue;
+    // Boundary pixels grouped by row.
+    let boundary: Vec<Vec<usize>> = (0..height)
+        .into_par_iter()
+        .map(|y| {
+            (y * width..(y + 1) * width)
+                .filter(|&i| neighbor_differs(i))
+                .collect()
+        })
+        .collect();
+    // Each chunk of output rows takes the minimum over the disks of boundary
+    // pixels within `radius` rows. A minimum does not depend on visiting
+    // order, so the parallel result equals the serial stamping exactly.
+    const CHUNK: usize = 64;
+    let mut squared = vec![FAR; n];
+    squared
+        .par_chunks_mut(CHUNK * width.max(1))
+        .enumerate()
+        .for_each(|(chunk, rows)| {
+            let r0 = chunk * CHUNK;
+            let r1 = r0 + rows.len() / width.max(1);
+            let b0 = r0.saturating_sub(radius);
+            let b1 = (r1 + radius).min(height);
+            for row in &boundary[b0..b1] {
+                for &b in row {
+                    // A boundary pixel of one side is the nearest-candidate
+                    // for the other side's pixels.
+                    let side = inside[b];
+                    let (bx, by) = ((b % width) as isize, (b / width) as isize);
+                    let y_lo = (by - r).max(r0 as isize);
+                    let y_hi = (by + r).min(r1 as isize - 1);
+                    for y in y_lo..=y_hi {
+                        let dy = y - by;
+                        for dx in -r..=r {
+                            let d2 = dx * dx + dy * dy;
+                            let x = bx + dx;
+                            if d2 > r2 || x < 0 || x >= width as isize {
+                                continue;
+                            }
+                            let j = y as usize * width + x as usize;
+                            if inside[j] == side {
+                                continue;
+                            }
+                            let q = d2 as u16;
+                            let slot = &mut rows[j - r0 * width];
+                            if q < *slot {
+                                *slot = q;
+                            }
+                        }
+                    }
+                }
             }
-            for dx in -r..=r {
-                let d2 = dx * dx + dy * dy;
-                let x = bx + dx;
-                if d2 > r2 || x < 0 || x >= width as isize {
-                    continue;
-                }
-                let j = y as usize * width + x as usize;
-                if inside[j] == side {
-                    continue;
-                }
-                let q = d2 as u16;
-                if q < squared[j] {
-                    squared[j] = q;
-                }
-            }
-        }
-    }
+        });
     Banded { squared }
 }
 
 #[cfg(test)]
 mod banded_tests {
     use super::*;
+
+    #[test]
+    fn chunked_banded_distance_matches_full_transform_across_chunks() {
+        // Several 64-row chunks, blobs straddling chunk edges, radius > 0.
+        let (w, h) = (97, 301);
+        let mut state = 5u64;
+        let mut inside = vec![false; w * h];
+        for _ in 0..25 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let (cx, cy) = ((state >> 33) as usize % w, (state >> 13) as usize % h);
+            let rad = 3 + (state >> 50) as usize % 9;
+            for y in cy.saturating_sub(rad)..(cy + rad).min(h) {
+                for x in cx.saturating_sub(rad)..(cx + rad).min(w) {
+                    inside[y * w + x] = true;
+                }
+            }
+        }
+        let full = signed_distance(&inside, w, h);
+        for radius in [1, 7, 30, 70] {
+            let banded = banded_signed_distance(&inside, w, h, radius);
+            for i in 0..w * h {
+                match banded.get(i, inside[i]) {
+                    Some(d) => assert_eq!(d, full[i], "radius {radius} pixel {i}"),
+                    None => assert!(
+                        full[i].abs() > radius as f64,
+                        "radius {radius}: missing {}",
+                        full[i]
+                    ),
+                }
+            }
+        }
+    }
 
     #[test]
     fn banded_distance_matches_full_transform_inside_the_band() {

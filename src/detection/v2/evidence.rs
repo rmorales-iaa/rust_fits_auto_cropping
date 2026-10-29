@@ -17,7 +17,7 @@ use super::background::Background;
 use super::bitset::Bitset;
 use super::distance::banded_signed_distance;
 use crate::config::V2Rules;
-use crate::detection::robust::location_scale_with;
+use crate::detection::robust::{location_scale_with, median_finite_with};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
@@ -31,6 +31,10 @@ pub struct TileEvidence {
     pub samples: usize,
     pub constant: bool,
     pub rule: Rule,
+    /// Second-difference noise of the tile and its effective count. They
+    /// depend only on the data and the source bits inside the tile.
+    pub diff_sigma: f64,
+    pub diff_n: f64,
 }
 
 /// Which registered rule made a tile a candidate.
@@ -72,6 +76,9 @@ impl TileGrid {
     }
 }
 
+/// `previous` is the source mask and grid of an earlier evaluation of the
+/// same frame and tile size: tiles whose source bits are unchanged reuse its
+/// second-difference noise (identical by construction).
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_tiles(
     data: &[f64],
@@ -82,9 +89,17 @@ pub fn evaluate_tiles(
     sources: &Bitset,
     quantum: f64,
     rules: &V2Rules,
+    previous: Option<(&Bitset, &TileGrid)>,
 ) -> TileGrid {
     let cols = width.div_ceil(tile_size);
     let rows = height.div_ceil(tile_size);
+    if let Some((_, old)) = previous {
+        assert!(
+            old.size == tile_size && old.cols == cols && old.rows == rows,
+            "previous tile grid must come from the same frame and tile size"
+        );
+    }
+    let eval = bg.pixel_eval();
     // Tile rows are independent; ordered collection keeps results identical
     // for any worker count.
     let tile_row = |ty: usize| -> Vec<TileEvidence> {
@@ -118,7 +133,7 @@ pub fn evaluate_tiles(
                     } else if data[i] != first {
                         constant = false;
                     }
-                    residuals.push(data[i] - bg.level(x as f64, y as f64));
+                    residuals.push(data[i] - eval.level(x, y));
                 }
             }
             let mut tile = TileEvidence {
@@ -136,27 +151,37 @@ pub fn evaluate_tiles(
                 let floor = (quantum / 12.0_f64.sqrt()).max(1e-12 * (1.0 + bg.level(xc, yc).abs()));
                 let sigma = bg.noise(xc, yc).max(floor);
                 let n_eff = bg.effective_n(residuals.len());
-                let (median, spread) = location_scale_with(residuals.iter().copied(), &mut scratch);
+                let median = median_finite_with(residuals.iter().copied(), &mut scratch);
                 let level_se = (bg.prediction_var(xc, yc)
                     + std::f64::consts::FRAC_PI_2 * sigma * sigma / n_eff)
                     .sqrt();
                 tile.z_level = median / level_se.max(floor);
                 // Dispersion uses gradient-immune second differences so an
                 // unmodelled ramp inside the tile is not counted as noise.
-                let _ = spread;
-                diffs.clear();
-                super::noise::second_differences(
-                    data,
-                    width,
-                    x0,
-                    x1,
-                    y0,
-                    y1,
-                    |i| sources.get(i),
-                    &mut diffs,
-                );
-                let (tile_diff_sigma, tile_diff_n) =
-                    super::noise::sigma_from_differences(&diffs, quantum, &mut scratch);
+                let reused = previous.and_then(|(old_sources, old)| {
+                    let unchanged = (y0..y1).all(|y| {
+                        (x0..x1)
+                            .all(|x| sources.get(y * width + x) == old_sources.get(y * width + x))
+                    });
+                    let t = &old.tiles[ty * cols + tx];
+                    (unchanged && t.samples >= 16).then_some((t.diff_sigma, t.diff_n))
+                });
+                let (tile_diff_sigma, tile_diff_n) = reused.unwrap_or_else(|| {
+                    diffs.clear();
+                    super::noise::second_differences(
+                        data,
+                        width,
+                        x0,
+                        x1,
+                        y0,
+                        y1,
+                        |i| sources.get(i),
+                        &mut diffs,
+                    );
+                    super::noise::sigma_from_differences(&diffs, quantum, &mut scratch)
+                });
+                tile.diff_sigma = tile_diff_sigma;
+                tile.diff_n = tile_diff_n;
                 let reference_diff = bg.diff_noise(xc, yc).max(floor);
                 let mut dispersion_se = f64::INFINITY;
                 if tile_diff_sigma.is_finite() && tile_diff_n > 0.0 {
@@ -350,6 +375,7 @@ pub fn boundary_step_ratio(
     half_width: usize,
 ) -> Option<(f64, f64)> {
     let banded = banded_signed_distance(component_pixels, width, height, half_width);
+    let eval = bg.pixel_eval();
     let bins = 2 * half_width + 1;
     let mut values: Vec<Vec<f64>> = vec![Vec::new(); bins];
     for i in 0..component_pixels.len() {
@@ -360,8 +386,7 @@ pub fn boundary_step_ratio(
         if k.abs() > half_width as f64 || !data[i].is_finite() || sources.get(i) {
             continue;
         }
-        let (x, y) = ((i % width) as f64, (i / width) as f64);
-        values[(k + half_width as f64) as usize].push(data[i] - bg.level(x, y));
+        values[(k + half_width as f64) as usize].push(data[i] - eval.level(i % width, i / width));
     }
     let mut scratch = Vec::new();
     let points: Vec<(f64, f64, f64)> = values

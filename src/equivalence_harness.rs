@@ -2,7 +2,7 @@
 //! speed-only changes are bit-identical (plan R0). Run with:
 //! `cargo test --release --locked equivalence_harness -- --ignored --nocapture`
 //! and compare the printed digest with the previous revision.
-use crate::config::{EvidenceModel, HeuristicsConfig, ReferenceModel};
+use crate::config::{DetectorKind, EvidenceModel, HeuristicsConfig, ReferenceModel};
 use crate::crop::{CropPolicy, largest_clean_region, residual_tolerant_rectangle};
 use crate::detection::detect_border;
 use sha2::{Digest, Sha256};
@@ -65,15 +65,31 @@ pub fn decision_digest(cfg_text: &str) -> (String, f64) {
         .heuristics;
     let mut hasher = Sha256::new();
     let start = std::time::Instant::now();
-    for (reference, evidence) in [
-        (ReferenceModel::CentralTiles, EvidenceModel::SingleScale),
-        (ReferenceModel::RobustAffine, EvidenceModel::SingleScale),
+    // The three tile_v1 model combinations, then v2, whatever the file selects.
+    for (detector, reference, evidence) in [
         (
+            DetectorKind::TileV1,
+            ReferenceModel::CentralTiles,
+            EvidenceModel::SingleScale,
+        ),
+        (
+            DetectorKind::TileV1,
+            ReferenceModel::RobustAffine,
+            EvidenceModel::SingleScale,
+        ),
+        (
+            DetectorKind::TileV1,
             ReferenceModel::CentralTiles,
             EvidenceModel::MultiscaleConsensus,
         ),
+        (
+            DetectorKind::BackgroundV2,
+            ReferenceModel::CentralTiles,
+            EvidenceModel::SingleScale,
+        ),
     ] {
         let mut cfg = base.clone();
+        cfg.detector = detector;
         cfg.reference_model = reference;
         cfg.evidence_model = evidence;
         for (name, w, h, data) in fixtures() {
@@ -95,6 +111,8 @@ pub fn decision_digest(cfg_text: &str) -> (String, f64) {
                 det.candidate_tiles,
                 det.candidate_components,
                 det.accepted_components,
+                det.uncertain_boundary_pixels,
+                det.protected_source_pixels,
             ] {
                 hasher.update(n.to_le_bytes());
             }

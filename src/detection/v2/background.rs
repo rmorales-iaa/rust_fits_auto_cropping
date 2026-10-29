@@ -26,6 +26,10 @@ pub struct Background {
     pub cols: usize,
     pub rows: usize,
     pub meshes: Vec<Mesh>,
+    /// Per-mesh statistics before trust selection. They depend only on the
+    /// data and the exclusion bits inside the mesh, so a refit reuses them
+    /// for meshes whose exclusions did not change.
+    raw_meshes: Vec<Mesh>,
     pub coefficients: Vec<f64>,
     pub degree: usize,
     /// Trusted support bounding box in normalised coordinates; evaluation
@@ -204,6 +208,9 @@ pub fn clipped_stats(
 }
 
 /// Estimate the background from finite samples not in `excluded`.
+/// `previous` is the exclusion set and result of an earlier fit of the same
+/// frame with the same rules; meshes whose exclusion bits are unchanged reuse
+/// its per-mesh statistics (identical by construction), the rest are recomputed.
 pub fn fit(
     data: &[f64],
     width: usize,
@@ -211,6 +218,7 @@ pub fn fit(
     excluded: &Bitset,
     quantum: f64,
     rules: &V2Rules,
+    previous: Option<(&Bitset, &Background)>,
 ) -> Option<Background> {
     // At least 8x8 meshes on small frames, each still >= 256 samples.
     let b = rules.mesh_size_px.min(width.min(height) / 8).max(16);
@@ -226,9 +234,18 @@ pub fn fit(
         let mut scratch = Vec::with_capacity(b * b);
         (0..cols)
             .map(|mx| {
-                samples.clear();
                 let (x0, x1) = (mx * b, ((mx + 1) * b).min(width));
                 let (y0, y1) = (my * b, ((my + 1) * b).min(height));
+                if let Some((old_excluded, old)) = previous {
+                    let unchanged = (y0..y1).all(|y| {
+                        (x0..x1)
+                            .all(|x| excluded.get(y * width + x) == old_excluded.get(y * width + x))
+                    });
+                    if unchanged {
+                        return old.raw_meshes[my * cols + mx];
+                    }
+                }
+                samples.clear();
                 for y in y0..y1 {
                     for x in x0..x1 {
                         let i = y * width + x;
@@ -279,13 +296,20 @@ pub fn fit(
             })
             .collect()
     };
-    let mut meshes: Vec<Mesh> = (0..rows)
+    if let Some((_, old)) = previous {
+        assert!(
+            old.mesh_size == b && old.raw_meshes.len() == cols * rows && old.quantum == quantum,
+            "previous background must come from the same frame and rules"
+        );
+    }
+    let raw_meshes: Vec<Mesh> = (0..rows)
         .into_par_iter()
         .map(mesh_row)
         .collect::<Vec<_>>()
         .into_iter()
         .flatten()
         .collect();
+    let mut meshes = raw_meshes.clone();
     let mut scratch = Vec::with_capacity(b * b);
     // Reject trusted meshes whose level is a gross outlier (5 robust sigma), or
     // whose gradient-immune noise implies illumination outside the valid range:
@@ -418,6 +442,7 @@ pub fn fit(
         cols,
         rows,
         meshes,
+        raw_meshes,
         coefficients,
         degree,
         support,
@@ -532,7 +557,76 @@ fn fill_noise_grid(
     grid
 }
 
+/// Pixel-grid evaluator for `level`, `noise` and `diff_noise` at integer
+/// pixel coordinates. Per-column and per-row terms are computed once with the
+/// same expressions as the `Background` methods, so every value is
+/// bit-identical to the corresponding method call; only repeated work is
+/// removed.
+pub struct PixelEval<'a> {
+    bg: &'a Background,
+    u: Vec<f64>,
+    v: Vec<f64>,
+    gx: Vec<(usize, usize, f64)>,
+    gy: Vec<(usize, usize, f64)>,
+}
+
+impl PixelEval<'_> {
+    #[inline]
+    pub fn level(&self, x: usize, y: usize) -> f64 {
+        evaluate(&self.bg.coefficients, self.bg.degree, self.u[x], self.v[y])
+    }
+
+    #[inline]
+    pub fn noise(&self, x: usize, y: usize) -> f64 {
+        self.interpolate(&self.bg.noise_grid, x, y)
+    }
+
+    #[inline]
+    pub fn diff_noise(&self, x: usize, y: usize) -> f64 {
+        self.interpolate(&self.bg.diff_noise_grid, x, y)
+    }
+
+    #[inline]
+    fn interpolate(&self, grid: &[f64], x: usize, y: usize) -> f64 {
+        let (x0, x1, fx) = self.gx[x];
+        let (y0, y1, fy) = self.gy[y];
+        let g = |cx: usize, cy: usize| grid[cy * self.bg.cols + cx];
+        (1.0 - fy) * ((1.0 - fx) * g(x0, y0) + fx * g(x1, y0))
+            + fy * ((1.0 - fx) * g(x0, y1) + fx * g(x1, y1))
+    }
+}
+
 impl Background {
+    /// Precompute the per-column and per-row terms of the pixel evaluators.
+    pub fn pixel_eval(&self) -> PixelEval<'_> {
+        let (mesh_u, mesh_v) = self.mesh_extent();
+        let du = EXTRAPOLATION_MESHES * mesh_u;
+        let dv = EXTRAPOLATION_MESHES * mesh_v;
+        let u = (0..self.width)
+            .map(|x| {
+                normalized(x as f64, self.width).clamp(self.support[0] - du, self.support[1] + du)
+            })
+            .collect();
+        let v = (0..self.height)
+            .map(|y| {
+                normalized(y as f64, self.height).clamp(self.support[2] - dv, self.support[3] + dv)
+            })
+            .collect();
+        let b = self.mesh_size as f64;
+        let axis = |p: usize, cells: usize| {
+            let g = ((p as f64 + 0.5) / b - 0.5).clamp(0.0, (cells - 1) as f64);
+            let p0 = g.floor() as usize;
+            (p0, (p0 + 1).min(cells - 1), g - p0 as f64)
+        };
+        PixelEval {
+            bg: self,
+            u,
+            v,
+            gx: (0..self.width).map(|x| axis(x, self.cols)).collect(),
+            gy: (0..self.height).map(|y| axis(y, self.rows)).collect(),
+        }
+    }
+
     /// Surface value at a pixel. The polynomial is extrapolated up to
     /// `EXTRAPOLATION_MESHES` mesh widths beyond the trusted support box
     /// (mesh centres stop half a mesh short of the frame edge) and held
@@ -735,10 +829,62 @@ mod tests {
         let (w, h) = (256, 256);
         let mut rng = crate::detection::v2::tests::Rng(1);
         let data: Vec<f64> = (0..w * h).map(|_| 10.0 * rng.gauss()).collect();
-        let bg = fit(&data, w, h, &Bitset::new(w * h), 0.0, &V2Rules::default()).unwrap();
+        let bg = fit(
+            &data,
+            w,
+            h,
+            &Bitset::new(w * h),
+            0.0,
+            &V2Rules::default(),
+            None,
+        )
+        .unwrap();
         assert!(bg.structure_sigma < 1.0, "{}", bg.structure_sigma);
         assert!(bg.rho < 0.05);
         let noise = bg.noise(100.0, 100.0);
         assert!((noise - 10.0).abs() < 1.0, "noise {noise}");
+    }
+
+    #[test]
+    fn pixel_eval_is_bit_identical_to_the_background_methods() {
+        // Odd frame size, curved background and an excluded block so the
+        // trusted support box is smaller than the frame (clamped extrapolation).
+        let (w, h) = (301, 257);
+        let mut rng = crate::detection::v2::tests::Rng(7);
+        let data: Vec<f64> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f64 / w as f64, (i / w) as f64 / h as f64);
+                100.0 + 40.0 * x * x - 25.0 * x * y + 30.0 * y + 3.0 * rng.gauss()
+            })
+            .collect();
+        let mut excluded = Bitset::new(w * h);
+        for y in 0..h {
+            for x in 0..90 {
+                excluded.set(y * w + x);
+            }
+        }
+        let bg = fit(&data, w, h, &excluded, 0.0, &V2Rules::default(), None).unwrap();
+        assert!(bg.degree >= 1, "degree {}", bg.degree);
+        let eval = bg.pixel_eval();
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (x as f64, y as f64);
+                assert_eq!(
+                    eval.level(x, y).to_bits(),
+                    bg.level(fx, fy).to_bits(),
+                    "level {x},{y}"
+                );
+                assert_eq!(
+                    eval.noise(x, y).to_bits(),
+                    bg.noise(fx, fy).to_bits(),
+                    "noise {x},{y}"
+                );
+                assert_eq!(
+                    eval.diff_noise(x, y).to_bits(),
+                    bg.diff_noise(fx, fy).to_bits(),
+                    "diff noise {x},{y}"
+                );
+            }
+        }
     }
 }

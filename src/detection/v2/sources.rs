@@ -25,7 +25,12 @@ pub struct SourceMask {
 /// independent of candidate exclusions. Second differences cancel smooth gradients (galaxy
 /// halos, vignetting), so extended sources stay seeded, while amplified noise
 /// raises the estimate and is not mistaken for sources.
-fn local_block_noise(data: &[f64], width: usize, height: usize, quantum: f64) -> (usize, Vec<f64>) {
+pub fn local_block_noise(
+    data: &[f64],
+    width: usize,
+    height: usize,
+    quantum: f64,
+) -> (usize, Vec<f64>) {
     const B: usize = 16;
     let cols = width.div_ceil(B);
     let rows = height.div_ceil(B);
@@ -83,16 +88,20 @@ fn locally_significant(
     !ring_sigma.is_finite() || peak > rules.source_seed_snr * ring_sigma
 }
 
+/// `block_noise` is `local_block_noise(data, width, height, bg.quantum)`; it
+/// does not depend on the background fit, so callers compute it once per frame.
 pub fn detect(
     data: &[f64],
     width: usize,
     height: usize,
     bg: &Background,
+    block_noise: &(usize, Vec<f64>),
     rules: &V2Rules,
 ) -> SourceMask {
     let n = width * height;
     let mut seed = Bitset::new(n);
-    let (block_cols, block_noise) = local_block_noise(data, width, height, bg.quantum);
+    let (block_cols, block_noise) = (block_noise.0, &block_noise.1);
+    let eval = bg.pixel_eval();
     let seeds_by_row: Vec<Vec<usize>> = (0..height)
         .into_par_iter()
         .map(|y| {
@@ -103,15 +112,14 @@ pub fn detect(
                 if !value.is_finite() {
                     continue;
                 }
-                let (fx, fy) = (x as f64, y as f64);
                 let local = block_noise[(y / 16) * block_cols + x / 16];
-                let trusted = bg.noise(fx, fy);
+                let trusted = eval.noise(x, y);
                 let sigma = if local.is_finite() {
                     trusted.max(local)
                 } else {
                     trusted
                 };
-                if sigma > 0.0 && (value - bg.level(fx, fy)) / sigma > rules.source_seed_snr {
+                if sigma > 0.0 && (value - eval.level(x, y)) / sigma > rules.source_seed_snr {
                     row.push(i);
                 }
             }

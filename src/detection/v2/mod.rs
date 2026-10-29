@@ -68,11 +68,25 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
     }
     let q = quantum(data);
     let tile = cfg.tile_size;
+    // Independent of the background fit (bg.quantum == q), so computed once.
+    let block_noise = sources::local_block_noise(data, width, height, q);
     let mut excluded = Bitset::new(n);
     let mut accepted_tiles: Vec<usize> = Vec::new();
-    let mut state = None;
+    type State = (
+        background::Background,
+        sources::SourceMask,
+        evidence::TileGrid,
+        Vec<Vec<usize>>,
+        usize,
+    );
+    let mut state: Option<State> = None;
+    let mut previous_excluded: Option<Bitset> = None;
     for iteration in 0..rules.refit_iterations {
-        let Some(bg) = background::fit(data, width, height, &excluded, q, rules) else {
+        let previous = match (&previous_excluded, &state) {
+            (Some(old), Some((old_bg, ..))) => Some((old, old_bg)),
+            _ => None,
+        };
+        let Some(bg) = background::fit(data, width, height, &excluded, q, rules, previous) else {
             return empty(
                 n,
                 "reference_support_abstained",
@@ -82,9 +96,20 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
                 ),
             );
         };
-        let source_mask = sources::detect(data, width, height, &bg, rules);
-        let grid =
-            evidence::evaluate_tiles(data, width, height, tile, &bg, &source_mask.mask, q, rules);
+        let source_mask = sources::detect(data, width, height, &bg, &block_noise, rules);
+        let grid = evidence::evaluate_tiles(
+            data,
+            width,
+            height,
+            tile,
+            &bg,
+            &source_mask.mask,
+            q,
+            rules,
+            state
+                .as_ref()
+                .map(|(_, old_sources, old_grid, ..)| (&old_sources.mask, old_grid)),
+        );
         let candidate: Vec<bool> = grid.tiles.iter().map(|t| t.rule != Rule::None).collect();
         let mut components = evidence::edge_components(&grid, &candidate);
         // Deficit-only evidence must show a step, not a smooth gradient.
@@ -141,7 +166,7 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
             break;
         }
         // Refit without the accepted candidate pixels (plan R2.1 step 6).
-        excluded = Bitset::new(n);
+        previous_excluded = Some(std::mem::replace(&mut excluded, Bitset::new(n)));
         let (_, _, grid, _, _) = state.as_ref().expect("state set above");
         for &t in &accepted_tiles {
             let (x0, x1, y0, y1) = grid.bounds(t, width, height);
@@ -190,6 +215,7 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
         }
     }
     let mut mask = vec![false; n];
+    let eval = bg.pixel_eval();
     let mut uncertain = 0usize;
     let mut evidence = Vec::new();
     for component in &accepted {
@@ -242,7 +268,7 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
                     for x in x0..x1 {
                         let i = y * width + x;
                         if data[i].is_finite() && !source_mask.mask.get(i) {
-                            values.push(data[i] - bg.level(x as f64, y as f64));
+                            values.push(data[i] - eval.level(x, y));
                         }
                     }
                 }
