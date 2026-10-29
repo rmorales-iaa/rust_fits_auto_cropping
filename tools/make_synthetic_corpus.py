@@ -136,12 +136,30 @@ FAMILIES = (
 )
 
 
-def write_corpus(out: Path, seeds: int, eta_i: float, eta_v: float, dtype: str, group_dirs: bool = False) -> dict:
+def write_corpus(
+    out: Path,
+    seeds: int,
+    eta_i: float,
+    eta_v: float,
+    dtype: str,
+    group_dirs: bool = False,
+    seed_offset: int = 0,
+    truth_dir: Path | None = None,
+) -> dict:
+    """Write fixtures; seeds run from seed_offset (held-out corpora use a
+    disjoint range). Truth goes to truth_dir, default ``out/truth``."""
+    truth_root = truth_dir if truth_dir is not None else out / "truth"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "truth").mkdir(exist_ok=True)
-    manifest = {"generator": GENERATOR_VERSION, "eta_i": eta_i, "eta_v": eta_v, "files": []}
+    truth_root.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "generator": GENERATOR_VERSION,
+        "eta_i": eta_i,
+        "eta_v": eta_v,
+        "seed_offset": seed_offset,
+        "files": [],
+    }
     for fam in FAMILIES:
-        for seed in range(seeds):
+        for seed in range(seed_offset, seed_offset + seeds):
             rng = np.random.default_rng([zlib.crc32(fam.encode()), seed])
             shape = (int(rng.integers(160, 260)), int(rng.integers(160, 260)))
             data, truth, desc = family(fam, rng, shape, eta_i, eta_v)
@@ -151,7 +169,7 @@ def write_corpus(out: Path, seeds: int, eta_i: float, eta_v: float, dtype: str, 
                 # (e.g. a night) for group-bootstrap evaluation.
                 name = f"group_{seed:04d}/{name}"
                 (out / f"group_{seed:04d}").mkdir(exist_ok=True)
-                (out / "truth" / f"group_{seed:04d}").mkdir(exist_ok=True)
+                (truth_root / f"group_{seed:04d}").mkdir(exist_ok=True)
             if dtype == "int16":
                 finite = np.isfinite(data)
                 stored = np.clip(np.round(data), -32767, 32767)
@@ -166,9 +184,9 @@ def write_corpus(out: Path, seeds: int, eta_i: float, eta_v: float, dtype: str, 
             th.header["TSCHEME"] = ("VIQU0", "0=V 1=I 2=Q 3=U0")
             th.header["ETA_I"] = eta_i
             th.header["ETA_V"] = eta_v
-            th.writeto(out / "truth" / name, overwrite=True)
+            th.writeto(truth_root / name, overwrite=True)
             manifest["files"].append({"file": name, "family": fam, "seed": seed, "description": desc})
-    (out / "truth" / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    (truth_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
 
 
@@ -180,10 +198,21 @@ def main() -> int:
     parser.add_argument("--eta-v", type=float, default=0.50)
     parser.add_argument("--dtype", choices=("float32", "int16"), default="float32")
     parser.add_argument("--group-dirs", action="store_true", help="one subdirectory per seed")
+    parser.add_argument("--seed-offset", type=int, default=0, help="first seed (held-out corpora: disjoint range)")
+    parser.add_argument("--truth-dir", type=Path, help="truth planes outside the input tree (default: OUTPUT/truth)")
     args = parser.parse_args()
     if not 0.0 <= args.eta_i < args.eta_v <= 1.0:
         parser.error("require 0 <= eta_i < eta_v <= 1")
-    manifest = write_corpus(args.output, args.seeds, args.eta_i, args.eta_v, args.dtype, args.group_dirs)
+    if args.seed_offset < 0:
+        parser.error("--seed-offset must be non-negative")
+    if args.truth_dir is not None:
+        out, truth = args.output.resolve(), args.truth_dir.resolve()
+        if out == truth or out in truth.parents or truth in out.parents:
+            parser.error("--truth-dir must not overlap the output tree")
+    manifest = write_corpus(
+        args.output, args.seeds, args.eta_i, args.eta_v, args.dtype, args.group_dirs,
+        args.seed_offset, args.truth_dir,
+    )
     print(f"wrote {len(manifest['files'])} fixtures to {args.output}")
     return 0
 

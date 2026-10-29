@@ -74,14 +74,18 @@ pub enum EvidenceModel {
     MultiscaleConsensus,
 }
 
-/// Detector family. `tile_v1` is the default baseline; the v2 background
-/// model is experimental and opt-in until it passes the plan's gates.
+/// Detector family. `background_v2` (default since the Revision 2
+/// implementation, user decision D5) is the source-masked background model;
+/// `tile_v1` is the legacy tile baseline, kept selectable for comparison and
+/// reproduction of earlier products. v2 is synthetic-validated only (gate G4
+/// on labelled real frames is open).
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectorKind {
-    #[default]
     TileV1,
-    BackgroundV2Experimental,
+    #[default]
+    #[serde(alias = "background_v2_experimental")]
+    BackgroundV2,
 }
 
 /// Uncertain-boundary handling for the v2 pixel mask (plan R3.4).
@@ -242,6 +246,11 @@ pub struct HeuristicRules {
     pub maximum_crop_sacrifice_fraction: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop_sacrifice_fraction_by_border_component_count: Option<CropSacrificeLimits>,
+    /// Residual flagged fraction for `crop_masked`, where retained flags are
+    /// written undefined rather than kept as data. Omitted: use
+    /// `maximum_residual_artifact_fraction`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop_masked_residual_fraction: Option<f64>,
     /// Crop-mode action when no rectangle is accepted (decision D1).
     #[serde(default)]
     pub crop_fallback: CropFallback,
@@ -261,11 +270,23 @@ pub struct CropSacrificeLimits {
 }
 
 impl HeuristicRules {
+    /// Residual flagged fraction allowed inside a rectangle for this mode:
+    /// in `crop` retained flags stay as data; in `crop_masked` they are
+    /// written undefined.
+    pub fn residual_fraction(&self, mode: ProcessingMode) -> f64 {
+        match mode {
+            ProcessingMode::CropMasked => self
+                .crop_masked_residual_fraction
+                .unwrap_or(self.maximum_residual_artifact_fraction),
+            _ => self.maximum_residual_artifact_fraction,
+        }
+    }
+
     /// Algorithm identity recorded in reports and logs.
     pub fn algorithm_version(&self) -> &'static str {
         match self.detector {
             DetectorKind::TileV1 => self.reference_model.algorithm_version(self.evidence_model),
-            DetectorKind::BackgroundV2Experimental => "border-detector-v2-background-experimental",
+            DetectorKind::BackgroundV2 => "border-detector-v2-background",
         }
     }
 
@@ -376,6 +397,11 @@ impl HeuristicsConfig {
             bail!("heuristics.maximum_residual_artifact_fraction must be in [0, 1]");
         }
         h.v2.validate()?;
+        if let Some(fraction) = h.crop_masked_residual_fraction
+            && (!fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+        {
+            bail!("heuristics.crop_masked_residual_fraction must be in [0, 1]");
+        }
         if let Some(rate) = h.crop_exchange_rate
             && (!rate.is_finite() || rate < 0.0)
         {
@@ -422,6 +448,7 @@ mode = "mask"
 
 const DEFAULT_HEURISTICS: &str = r#"
 [heuristics]
+detector = "background_v2"
 reference_model = "central_tiles"
 evidence_model = "single_scale"
 tile_size = 16
@@ -435,15 +462,11 @@ minimum_evidence_ratio = 1.25
 maximum_evidence_ratio = 5.0
 valid_pixel_loss_cost = 1.5
 minimum_net_utility = 0.001
-maximum_residual_artifact_fraction = 0.05
-maximum_crop_sacrifice_fraction = 0.35
+maximum_residual_artifact_fraction = 0.0
+crop_masked_residual_fraction = 0.05
+maximum_crop_sacrifice_fraction = 0.10
+crop_exchange_rate = 0.5
 crop_fallback = "bbox_mask"
-
-[heuristics.crop_sacrifice_fraction_by_border_component_count]
-one = 0.35
-two = 0.35
-three = 0.35
-four_or_more = 0.47
 "#;
 
 #[cfg(test)]
@@ -469,7 +492,7 @@ mod tests {
     #[test]
     fn rejects_crop_sacrifice_fraction_outside_unit_interval() {
         let text = DEFAULT_HEURISTICS.replace(
-            "maximum_crop_sacrifice_fraction = 0.35",
+            "maximum_crop_sacrifice_fraction = 0.10",
             "maximum_crop_sacrifice_fraction = 1.1",
         );
         let config: HeuristicsConfig = toml::from_str(&text).unwrap();
@@ -480,7 +503,7 @@ mod tests {
     fn residual_artifact_fraction_is_bounded_and_shipped_default_is_explicit() {
         for value in ["-0.01", "1.01", "nan"] {
             let text = DEFAULT_HEURISTICS.replace(
-                "maximum_residual_artifact_fraction = 0.05",
+                "maximum_residual_artifact_fraction = 0.0",
                 &format!("maximum_residual_artifact_fraction = {value}"),
             );
             let config: HeuristicsConfig = toml::from_str(&text).unwrap();
@@ -488,14 +511,39 @@ mod tests {
                 config.validate().is_err(),
                 "accepted residual fraction {value}"
             );
+            let text = DEFAULT_HEURISTICS.replace(
+                "crop_masked_residual_fraction = 0.05",
+                &format!("crop_masked_residual_fraction = {value}"),
+            );
+            let config: HeuristicsConfig = toml::from_str(&text).unwrap();
+            assert!(
+                config.validate().is_err(),
+                "accepted crop_masked residual fraction {value}"
+            );
         }
         let config: HeuristicsConfig = toml::from_str(DEFAULT_HEURISTICS).unwrap();
-        assert_eq!(config.heuristics.maximum_residual_artifact_fraction, 0.05);
+        let h = &config.heuristics;
+        assert_eq!(h.maximum_residual_artifact_fraction, 0.0);
+        assert_eq!(h.residual_fraction(ProcessingMode::Crop), 0.0);
+        assert_eq!(h.residual_fraction(ProcessingMode::CropMasked), 0.05);
+        assert_eq!(h.residual_fraction(ProcessingMode::Mask), 0.0);
+        let omitted = DEFAULT_HEURISTICS.replace("crop_masked_residual_fraction = 0.05\n", "");
+        let omitted: HeuristicsConfig = toml::from_str(&omitted).unwrap();
+        assert_eq!(
+            omitted
+                .heuristics
+                .residual_fraction(ProcessingMode::CropMasked),
+            0.0
+        );
     }
 
     #[test]
-    fn crop_sacrifice_limit_uses_border_connected_area_count_table() {
+    fn crop_sacrifice_limit_is_flat_by_default_and_table_still_applies() {
         let config: HeuristicsConfig = toml::from_str(DEFAULT_HEURISTICS).unwrap();
+        for count in [1, 2, 3, 4, 8] {
+            assert_eq!(config.heuristics.crop_sacrifice_limit(count), 0.10);
+        }
+        let config: HeuristicsConfig = toml::from_str(&with_tier_table("0.35")).unwrap();
         assert_eq!(config.heuristics.crop_sacrifice_limit(1), 0.35);
         assert_eq!(config.heuristics.crop_sacrifice_limit(2), 0.35);
         assert_eq!(config.heuristics.crop_sacrifice_limit(3), 0.35);
@@ -503,29 +551,51 @@ mod tests {
         assert_eq!(config.heuristics.crop_sacrifice_limit(8), 0.47);
     }
 
+    fn with_tier_table(two: &str) -> String {
+        format!(
+            "{DEFAULT_HEURISTICS}\n[heuristics.crop_sacrifice_fraction_by_border_component_count]\n\
+             one = 0.35\ntwo = {two}\nthree = 0.35\nfour_or_more = 0.47\n"
+        )
+    }
+
     #[test]
     fn crop_fallback_defaults_to_keep_for_legacy_files_and_ships_bbox_mask() {
         let shipped: HeuristicsConfig = toml::from_str(DEFAULT_HEURISTICS).unwrap();
         assert_eq!(shipped.heuristics.crop_fallback, CropFallback::BboxMask);
-        let legacy = DEFAULT_HEURISTICS.replace("crop_fallback = \"bbox_mask\"\n", "");
+        let legacy = DEFAULT_HEURISTICS
+            .replace("crop_fallback = \"bbox_mask\"\n", "")
+            .replace("crop_exchange_rate = 0.5\n", "");
         let legacy: HeuristicsConfig = toml::from_str(&legacy).unwrap();
         assert_eq!(legacy.heuristics.crop_fallback, CropFallback::Keep);
         assert!(legacy.heuristics.crop_exchange_rate.is_none());
     }
 
     #[test]
-    fn rejects_negative_exchange_rate() {
-        let text = DEFAULT_HEURISTICS.replace(
-            "crop_fallback = \"bbox_mask\"",
-            "crop_fallback = \"bbox_mask\"\ncrop_exchange_rate = -1.0",
+    fn v2_is_the_default_detector_and_legacy_name_still_parses() {
+        let shipped: HeuristicsConfig = toml::from_str(DEFAULT_HEURISTICS).unwrap();
+        assert_eq!(shipped.heuristics.detector, DetectorKind::BackgroundV2);
+        let legacy = DEFAULT_HEURISTICS.replace(
+            "detector = \"background_v2\"",
+            "detector = \"background_v2_experimental\"",
         );
+        let legacy: HeuristicsConfig = toml::from_str(&legacy).unwrap();
+        assert_eq!(legacy.heuristics.detector, DetectorKind::BackgroundV2);
+        let omitted = DEFAULT_HEURISTICS.replace("detector = \"background_v2\"\n", "");
+        let omitted: HeuristicsConfig = toml::from_str(&omitted).unwrap();
+        assert_eq!(omitted.heuristics.detector, DetectorKind::BackgroundV2);
+    }
+
+    #[test]
+    fn rejects_negative_exchange_rate() {
+        let text =
+            DEFAULT_HEURISTICS.replace("crop_exchange_rate = 0.5", "crop_exchange_rate = -1.0");
         let config: HeuristicsConfig = toml::from_str(&text).unwrap();
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn rejects_decreasing_crop_sacrifice_limits() {
-        let text = DEFAULT_HEURISTICS.replace("two = 0.35", "two = 0.20");
+        let text = with_tier_table("0.20");
         let config: HeuristicsConfig = toml::from_str(&text).unwrap();
         assert!(config.validate().is_err());
     }

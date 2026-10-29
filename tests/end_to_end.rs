@@ -77,7 +77,7 @@ fn config(dir: &Path) {
     .unwrap();
     fs::write(
         dir.join("heuristics.toml"),
-        "[heuristics]\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\nmaximum_crop_sacrifice_fraction=0.35\n\n[heuristics.crop_sacrifice_fraction_by_border_component_count]\none=0.35\ntwo=0.35\nthree=0.35\nfour_or_more=0.47\n",
+        "[heuristics]\ndetector=\"tile_v1\"\ntile_size=8\nminimum_border_tiles=2\nminimum_abs_z_score=6.0\nmaximum_tile_noise_ratio=0.1\nminimum_spatial_correlation=0.95\nminimum_mask_fraction=0.01\nmaximum_mask_fraction=0.50\nminimum_evidence_ratio=1.25\nmaximum_evidence_ratio=5.0\nvalid_pixel_loss_cost=1.5\nminimum_net_utility=0.001\nmaximum_crop_sacrifice_fraction=0.35\n\n[heuristics.crop_sacrifice_fraction_by_border_component_count]\none=0.35\ntwo=0.35\nthree=0.35\nfour_or_more=0.47\n",
     )
     .unwrap();
 }
@@ -1700,7 +1700,7 @@ fn legacy_rules_without_fallback_still_keep_rejected_crops() {
 }
 
 #[test]
-fn experimental_v2_detector_is_opt_in_reported_and_refines_boundaries() {
+fn v2_detector_is_the_default_and_refines_boundaries() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
     let output = t.path().join("out");
@@ -1708,12 +1708,10 @@ fn experimental_v2_detector_is_opt_in_reported_and_refines_boundaries() {
     config(&input);
     let heuristics_path = input.join("heuristics.toml");
     let heuristics = fs::read_to_string(&heuristics_path).unwrap();
+    // A rule file without a detector key now selects the v2 default.
     fs::write(
         &heuristics_path,
-        heuristics.replace(
-            "[heuristics]",
-            "[heuristics]\ndetector = \"background_v2_experimental\"",
-        ),
+        heuristics.replace("detector=\"tile_v1\"\n", ""),
     )
     .unwrap();
     // Noisy sky with a dark 37-column strip: not aligned to any tile grid.
@@ -1745,7 +1743,7 @@ fn experimental_v2_detector_is_opt_in_reported_and_refines_boundaries() {
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     assert_eq!(
         summary["algorithm_version"],
-        "border-detector-v2-background-experimental"
+        "border-detector-v2-background"
     );
     let record = &summary["files"][0];
     assert_eq!(record["action"], "mask", "{record}");

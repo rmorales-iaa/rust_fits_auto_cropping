@@ -183,7 +183,7 @@ fn calibration_null_false_alarms() {
             continue;
         }
         let mut row = format!("FAR {family:<24} n={n}");
-        for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2Experimental] {
+        for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2] {
             let mut cfg = rules();
             cfg.detector = detector;
             let side = size();
@@ -192,7 +192,7 @@ fn calibration_null_false_alarms() {
                 let r = detect_border(&null_frame(family, seed), side, side, &cfg);
                 if r.accepted {
                     false_alarms += 1;
-                    if detector == DetectorKind::BackgroundV2Experimental {
+                    if detector == DetectorKind::BackgroundV2 {
                         println!("FALSE_ALARM {family} seed={seed}: {}", r.reason);
                     }
                 }
@@ -282,7 +282,7 @@ fn calibration_injection_recovery() {
             continue;
         }
         let mut row = format!("POWER {family:<26} n={n}");
-        for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2Experimental] {
+        for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2] {
             let mut cfg = rules();
             cfg.detector = detector;
             if std::env::var("FAR_EXCLUDE_UNCERTAIN").is_ok() {
@@ -294,7 +294,7 @@ fn calibration_injection_recovery() {
                 let r = detect_border(&data, size(), size(), &cfg);
                 detected += usize::from(r.accepted);
                 if !r.accepted
-                    && detector == DetectorKind::BackgroundV2Experimental
+                    && detector == DetectorKind::BackgroundV2
                     && std::env::var("FAR_VERBOSE").is_ok()
                 {
                     println!(
@@ -330,7 +330,7 @@ fn debug_null_frame() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(88);
     let mut cfg = rules();
-    cfg.detector = DetectorKind::BackgroundV2Experimental;
+    cfg.detector = DetectorKind::BackgroundV2;
     let r = detect_border(&null_frame(&family, seed), size(), size(), &cfg);
     println!("DEBUG {}", r.reason);
 }
@@ -340,7 +340,7 @@ fn debug_null_frame() {
 fn debug_calibrated_false_negatives() {
     let side = size();
     let mut cfg = rules();
-    cfg.detector = DetectorKind::BackgroundV2Experimental;
+    cfg.detector = DetectorKind::BackgroundV2;
     let mut by_eta = [0usize; 4]; // eta bands for FN truth-I pixels: <0.05, <0.1, <0.15, <0.2
     let mut by_edge = [0usize; 4]; // distance to frame edge: <4, <16, <48, >=48
     let mut total_fn = 0usize;

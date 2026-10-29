@@ -44,7 +44,7 @@ struct Tile {
 /// The method deliberately abstains on weak contrast, inadequate interior support,
 /// small regions and excessive masks. It is a conservative baseline requiring empirical validation.
 pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules) -> Detection {
-    if cfg.detector == DetectorKind::BackgroundV2Experimental {
+    if cfg.detector == DetectorKind::BackgroundV2 {
         return super::v2::detect_v2(data, width, height, cfg);
     }
     match cfg.evidence_model {

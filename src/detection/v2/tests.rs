@@ -24,7 +24,7 @@ pub(crate) fn rules() -> HeuristicRules {
     let mut rules = toml::from_str::<HeuristicsConfig>(&text)
         .unwrap()
         .heuristics;
-    rules.detector = DetectorKind::BackgroundV2Experimental;
+    rules.detector = DetectorKind::BackgroundV2;
     rules
 }
 
@@ -307,7 +307,7 @@ fn probes() -> Vec<Probe> {
 fn v1_v2_comparison() {
     for (name, data, truth) in probes() {
         let mut row = format!("COMPARE {name:<26}");
-        for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2Experimental] {
+        for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2] {
             let mut cfg = rules();
             cfg.detector = detector;
             let r = crate::detection::detect_border(&data, W, W, &cfg);
@@ -327,7 +327,7 @@ fn v1_v2_comparison() {
             data[y * w + x] = 50.0 + 3.0 * Rng((y * w + x) as u64).gauss();
         }
     }
-    for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2Experimental] {
+    for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2] {
         let mut cfg = rules();
         cfg.detector = detector;
         let t = std::time::Instant::now();

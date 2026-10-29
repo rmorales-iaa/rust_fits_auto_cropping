@@ -218,7 +218,7 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
             height,
             anchor,
             CropPolicy {
-                maximum_residual_artifact_fraction: rules.maximum_residual_artifact_fraction,
+                maximum_residual_artifact_fraction: rules.residual_fraction(mode),
                 maximum_unmasked_sacrifice_fraction: rules
                     .crop_sacrifice_limit(detection.accepted_components),
                 evidence_ratio: detection.evidence_ratio,

@@ -13,6 +13,7 @@ from astropy.io import fits
 
 from tools.evaluate_masks import counts, evaluate, excluded_mask, metrics
 from tools.flat_labels import I, Q, U0, V, illumination, labels
+from tools.make_synthetic_corpus import FAMILIES, write_corpus
 
 
 class FlatLabelTests(unittest.TestCase):
@@ -106,6 +107,24 @@ class ReconstructionTests(unittest.TestCase):
             self.assertEqual(result["pooled"]["removal_recall"], 1.0)
             self.assertEqual(result["pooled"]["valid_loss"], 0.0)
             self.assertEqual(result["bootstrap"]["groups"], 3)
+
+
+class CorpusGeneratorTests(unittest.TestCase):
+    def test_seed_offset_gives_disjoint_reproducible_fixtures_and_external_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = write_corpus(root / "a", 1, 0.2, 0.5, "float32")
+            b = write_corpus(root / "b", 1, 0.2, 0.5, "float32", seed_offset=1000, truth_dir=root / "tb")
+            write_corpus(root / "c", 1, 0.2, 0.5, "float32", seed_offset=1000, truth_dir=root / "tc")
+            self.assertEqual({f["seed"] for f in a["files"]}, {0})
+            self.assertEqual({f["seed"] for f in b["files"]}, {1000})
+            self.assertFalse((root / "b" / "truth").exists())
+            self.assertEqual(len(list((root / "tb").glob("*.fits"))), len(FAMILIES))
+            name = b["files"][0]["file"]
+            self.assertTrue(np.array_equal(fits.getdata(root / "b" / name), fits.getdata(root / "c" / name), equal_nan=True))
+            first_a = fits.getdata(root / "a" / a["files"][0]["file"])
+            first_b = fits.getdata(root / "b" / name)
+            self.assertFalse(first_a.shape == first_b.shape and np.array_equal(first_a, first_b, equal_nan=True))
 
 
 if __name__ == "__main__":
