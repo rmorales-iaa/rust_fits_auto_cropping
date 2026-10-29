@@ -12,6 +12,7 @@ mod background;
 pub(crate) mod bitset;
 mod distance;
 mod evidence;
+mod noise;
 mod refine;
 mod sources;
 
@@ -107,7 +108,9 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
                 &source_mask.mask,
                 2 * tile,
             );
-            if ratio.is_some_and(|r| r >= 1.0 + rules.boundary_min_cv_gain) {
+            if ratio.is_some_and(|(r, jump)| {
+                r >= 1.0 + rules.boundary_min_cv_gain && jump >= rules.boundary_min_jump_fraction
+            }) {
                 kept.push(component);
             } else {
                 let rest: Vec<usize> = component
@@ -175,6 +178,16 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
         result.score = score;
         result.protected_source_pixels = protected_source_pixels;
         return result;
+    }
+    let mut rule_counts = [0usize; 4];
+    for &t in accepted.iter().flatten() {
+        match grid.tiles[t].rule {
+            Rule::Variance => rule_counts[0] += 1,
+            Rule::Noise => rule_counts[1] += 1,
+            Rule::Deficit => rule_counts[2] += 1,
+            Rule::Constant => rule_counts[3] += 1,
+            Rule::None => {}
+        }
     }
     let mut mask = vec![false; n];
     let mut uncertain = 0usize;
@@ -258,8 +271,12 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
         accepted: selected > 0 && fraction >= cfg.minimum_mask_fraction,
         reason_code: "candidate_accepted",
         reason: format!(
-            "v2 accepted {} edge component(s): {selected} pixels after native-resolution refinement ({uncertain} uncertain boundary pixels, policy {:?}); surface degree {}, {} trusted meshes, structure sigma {:.3}, rho {:.2}, FWHM {:.1} px, {} source seeds protected",
+            "v2 accepted {} edge component(s) [tiles by rule: variance {}, noise {}, deficit {}, constant {}]: {selected} pixels after native-resolution refinement ({uncertain} uncertain boundary pixels, policy {:?}); surface degree {}, {} trusted meshes, structure sigma {:.3}, rho {:.2}, FWHM {:.1} px, {} source seeds protected",
             accepted.len(),
+            rule_counts[0],
+            rule_counts[1],
+            rule_counts[2],
+            rule_counts[3],
             rules.uncertain_policy,
             bg.degree,
             bg.trusted_count,
@@ -286,5 +303,7 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
     result
 }
 
+#[cfg(test)]
+mod calibration_tests;
 #[cfg(test)]
 mod tests;

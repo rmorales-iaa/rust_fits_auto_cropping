@@ -3,8 +3,9 @@
 //! Within a band of `tile + 8` pixels on both sides of a component's tile
 //! boundary, each pixel gets a level score
 //!   z_pL = median_{5x5}(x - B) / (1.2533 sigma / sqrt(n_eff))
-//! and a dispersion score
-//!   z_pV = ln(1.4826 MAD_{7x7}(x - B) / sigma) / sqrt(1.36 / n_eff)
+//! and a dispersion score from gradient-immune second differences in a 7x7
+//! window,
+//!   z_pV = ln(s_diff / sigma_diff) / sqrt(1.36 / n_eff)
 //! over finite, non-source window samples. A pixel is strong when the
 //! component's signature (sign of level and/or dispersion anomaly) reaches the
 //! high threshold, weak when it reaches `hysteresis_low_fraction` of it.
@@ -15,6 +16,7 @@
 use super::background::Background;
 use super::bitset::Bitset;
 use super::distance::banded_signed_distance;
+use super::noise::{second_differences, sigma_from_differences};
 use crate::config::{UncertainPolicy, V2Rules};
 use crate::detection::robust::location_scale_with;
 use rayon::prelude::*;
@@ -72,10 +74,10 @@ pub fn refine(
                     return 0;
                 }
                 let sigma = bg.noise(x as f64, y as f64).max(1e-300);
-                let mut score = |radius: usize, level: bool| -> Option<f64> {
+                let mut level_score = || -> Option<f64> {
                     window.clear();
-                    for wy in y.saturating_sub(radius)..=(y + radius).min(height - 1) {
-                        for wx in x.saturating_sub(radius)..=(x + radius).min(width - 1) {
+                    for wy in y.saturating_sub(2)..=(y + 2).min(height - 1) {
+                        for wx in x.saturating_sub(2)..=(x + 2).min(width - 1) {
                             let j = wy * width + wx;
                             if data[j].is_finite() && !sources.get(j) {
                                 window.push(data[j] - bg.level(wx as f64, wy as f64));
@@ -86,23 +88,43 @@ pub fn refine(
                         return None;
                     }
                     let n_eff = bg.effective_n(window.len());
-                    let (median, spread) =
-                        location_scale_with(window.iter().copied(), &mut scratch);
-                    Some(if level {
-                        median / (1.2533 * sigma / n_eff.sqrt())
-                    } else {
-                        (spread.max(1e-300) / sigma).ln() / (1.36 / n_eff).sqrt()
+                    let (median, _) = location_scale_with(window.iter().copied(), &mut scratch);
+                    Some(median / (1.2533 * sigma / n_eff.sqrt()))
+                };
+                let level_z = if signature.level != 0 {
+                    level_score()
+                } else {
+                    None
+                };
+                let dispersion_z = if signature.dispersion != 0 {
+                    window.clear();
+                    let (x0, x1) = (x.saturating_sub(3), (x + 4).min(width));
+                    let (y0, y1) = (y.saturating_sub(3), (y + 4).min(height));
+                    second_differences(
+                        data,
+                        width,
+                        x0,
+                        x1,
+                        y0,
+                        y1,
+                        |j| sources.get(j),
+                        &mut window,
+                    );
+                    let (s_diff, n_diff) =
+                        sigma_from_differences(&window, bg.quantum, &mut scratch);
+                    let reference = bg.diff_noise(x as f64, y as f64).max(1e-300);
+                    (s_diff.is_finite() && n_diff > 0.0).then(|| {
+                        let n_eff = bg.effective_n(n_diff as usize);
+                        (s_diff.max(1e-300) / reference).ln() / (1.36 / n_eff).sqrt()
                     })
+                } else {
+                    None
                 };
                 let mut best = 0.0_f64; // in units of the high threshold
-                if signature.level != 0
-                    && let Some(z) = score(2, true)
-                {
+                if let Some(z) = level_z {
                     best = best.max(f64::from(signature.level) * z / high_level);
                 }
-                if signature.dispersion != 0
-                    && let Some(z) = score(3, false)
-                {
+                if let Some(z) = dispersion_z {
                     best = best.max(f64::from(signature.dispersion) * z / high_disp);
                 }
                 if best >= 1.0 {

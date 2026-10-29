@@ -111,11 +111,23 @@ pub struct V2Rules {
     pub strong_level_threshold: f64,
     /// Rule N: noise excess alone (flat-amplified borders at sky level).
     pub noise_only_threshold: f64,
+    /// Relative illumination at the valid boundary (decision D4, eta_V).
+    /// Dispersion rules also require the effect |ln(s/sigma)| >=
+    /// 0.5 ln(1/eta_valid), the variance ratio of a noise-dominated sky at
+    /// that illumination (raw: ratio ~ eta; flat-divided: ~ 1/eta).
+    pub eta_valid: f64,
+    /// One-sided minimum-effect test: (|ln(s/sigma)| - delta) / SE >= this,
+    /// with delta = 0.5 ln(1/eta_valid); the effect must lie significantly
+    /// beyond the D4 boundary, not just its point estimate.
+    pub effect_margin_z: f64,
     pub source_seed_snr: f64,
     pub source_min_pixels: usize,
     pub source_dilation_fwhm: f64,
     pub refit_iterations: usize,
     pub boundary_min_cv_gain: f64,
+    /// Fraction of the profile contrast the fitted discontinuity must carry
+    /// (a step is abrupt; hinges and smooth ramps carry almost none).
+    pub boundary_min_jump_fraction: f64,
     pub hysteresis_low_fraction: f64,
     pub uncertain_policy: UncertainPolicy,
 }
@@ -133,11 +145,14 @@ impl Default for V2Rules {
             dispersion_threshold: 4.0,
             strong_level_threshold: 8.0,
             noise_only_threshold: 8.0,
+            eta_valid: 0.5,
+            effect_margin_z: 2.0,
             source_seed_snr: 5.0,
             source_min_pixels: 5,
             source_dilation_fwhm: 1.5,
             refit_iterations: 3,
             boundary_min_cv_gain: 1.0,
+            boundary_min_jump_fraction: 0.5,
             hysteresis_low_fraction: 0.6,
             uncertain_policy: UncertainPolicy::RetainUncertain,
         }
@@ -159,6 +174,9 @@ impl V2Rules {
             || !(16..=4096).contains(&self.mesh_size_px)
             || !(1..=20).contains(&self.clip_iterations)
             || !(0.0..=1.0).contains(&self.trusted_valid_fraction)
+            || !(self.eta_valid > 0.0 && self.eta_valid < 1.0)
+            || !self.effect_margin_z.is_finite()
+            || self.effect_margin_z < 0.0
             || self.min_trusted_meshes < 4
             || self.surface_max_degree > 2
             || self.source_min_pixels == 0
@@ -166,6 +184,7 @@ impl V2Rules {
             || self.refit_iterations > 10
             || !self.boundary_min_cv_gain.is_finite()
             || self.boundary_min_cv_gain < 0.0
+            || !(0.0..=1.0).contains(&self.boundary_min_jump_fraction)
             || !(0.0..1.0).contains(&self.hysteresis_low_fraction)
             || self.hysteresis_low_fraction <= 0.0
             || self.strong_level_threshold < self.level_threshold

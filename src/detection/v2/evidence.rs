@@ -1,14 +1,17 @@
 //! Two-sided, standard-error-based tile evidence and components (plan R2.2,
 //! R2.4, R3.1).
 //!
-//! For tile t with n_t finite non-source samples, residual median r_t and
-//! dispersion s_t (1.4826 MAD of x - B):
+//! For tile t with n_t finite non-source samples and residual median r_t:
 //!   z_L = r_t / sqrt(Var_B + (pi/2) sigma^2 / n_eff)
-//!   z_V = ln(s_t / sigma) / sqrt(1.36/n_eff + 1.36/n_ref)
+//!   z_V = ln(s_t / s_ref) / sqrt(1.36/n_t + 1.36/n_ref)
 //! where sigma is the interpolated trusted noise, Var_B the background
-//! prediction variance, n_eff the AR(1) effective sample size, pi/2 the
-//! asymptotic median-to-mean variance ratio and 1.36/n the asymptotic
-//! variance of ln(MAD) for Gaussian samples. These are scores in standard
+//! prediction variance, n_eff the AR(1) effective sample size and pi/2 the
+//! asymptotic median-to-mean variance ratio. s_t and s_ref are
+//! gradient-immune second-difference noise estimates (tile and interpolated
+//! trusted reference) with conservative effective counts n_t and n_ref, and
+//! 1.36/n is the asymptotic variance of ln(MAD) for Gaussian samples. A
+//! dispersion rule also requires the effect |ln(s_t/s_ref)| >=
+//! 0.5 ln(1/eta_valid) (decision D4). These are scores in standard
 //! error units under a Gaussian working model, not calibrated p-values.
 use super::background::Background;
 use super::bitset::Bitset;
@@ -22,6 +25,8 @@ use std::collections::VecDeque;
 pub struct TileEvidence {
     pub z_level: f64,
     pub z_dispersion: f64,
+    /// Effect size ln(s/sigma), independent of sample size.
+    pub log_dispersion_ratio: f64,
     pub source_fraction: f64,
     pub samples: usize,
     pub constant: bool,
@@ -80,21 +85,12 @@ pub fn evaluate_tiles(
 ) -> TileGrid {
     let cols = width.div_ceil(tile_size);
     let rows = height.div_ceil(tile_size);
-    let reference_n = {
-        let mut counts: Vec<f64> = bg
-            .meshes
-            .iter()
-            .filter(|m| m.trusted)
-            .map(|m| m.count as f64)
-            .collect();
-        crate::detection::robust::median(&mut counts)
-    };
-    let n_ref = bg.effective_n(reference_n as usize);
     // Tile rows are independent; ordered collection keeps results identical
     // for any worker count.
     let tile_row = |ty: usize| -> Vec<TileEvidence> {
         let mut residuals = Vec::with_capacity(tile_size * tile_size);
-        let mut scratch = Vec::with_capacity(tile_size * tile_size);
+        let mut diffs = Vec::with_capacity(2 * tile_size * tile_size);
+        let mut scratch = Vec::with_capacity(2 * tile_size * tile_size);
         let mut row = Vec::with_capacity(cols);
         for tx in 0..cols {
             let (x0, x1, y0, y1) = (
@@ -145,18 +141,49 @@ pub fn evaluate_tiles(
                     + std::f64::consts::FRAC_PI_2 * sigma * sigma / n_eff)
                     .sqrt();
                 tile.z_level = median / level_se.max(floor);
-                tile.z_dispersion =
-                    (spread.max(floor) / sigma).ln() / (1.36 / n_eff + 1.36 / n_ref).sqrt();
+                // Dispersion uses gradient-immune second differences so an
+                // unmodelled ramp inside the tile is not counted as noise.
+                let _ = spread;
+                diffs.clear();
+                super::noise::second_differences(
+                    data,
+                    width,
+                    x0,
+                    x1,
+                    y0,
+                    y1,
+                    |i| sources.get(i),
+                    &mut diffs,
+                );
+                let (tile_diff_sigma, tile_diff_n) =
+                    super::noise::sigma_from_differences(&diffs, quantum, &mut scratch);
+                let reference_diff = bg.diff_noise(xc, yc).max(floor);
+                let mut dispersion_se = f64::INFINITY;
+                if tile_diff_sigma.is_finite() && tile_diff_n > 0.0 {
+                    let n_t = bg.effective_n(tile_diff_n as usize);
+                    let n_r = bg.effective_n(bg.reference_diff_n as usize);
+                    dispersion_se = (1.36 / n_t + 1.36 / n_r).sqrt();
+                    tile.log_dispersion_ratio = (tile_diff_sigma.max(floor) / reference_diff).ln();
+                    tile.z_dispersion = tile.log_dispersion_ratio / dispersion_se;
+                }
+                // Significance alone flags physically expected photon-noise
+                // changes in large tiles. Require a one-sided minimum-effect
+                // test against the D4 boundary delta = 0.5 ln(1/eta_valid).
+                let delta = 0.5 * (1.0 / rules.eta_valid).ln();
+                let effect = (tile.log_dispersion_ratio.abs() - delta) / dispersion_se
+                    >= rules.effect_margin_z;
                 let protected = tile.z_level > 0.0 && tile.source_fraction >= 0.5;
                 tile.rule = if tile.constant && sigma > floor * 1.0001 && median.abs() > floor {
                     Rule::Constant
                 } else if protected {
                     Rule::None
-                } else if tile.z_dispersion.abs() >= rules.dispersion_threshold
+                } else if effect
+                    && tile.z_dispersion.abs() >= rules.dispersion_threshold
                     && tile.z_level.abs() >= rules.level_threshold
                 {
                     Rule::Variance
-                } else if tile.z_dispersion >= rules.noise_only_threshold
+                } else if effect
+                    && tile.z_dispersion >= rules.noise_only_threshold
                     && tile.source_fraction < 0.5
                 {
                     Rule::Noise
@@ -309,8 +336,10 @@ fn fit_step(points: &[(f64, f64, f64)]) -> Option<(f64, Vec<f64>, Vec<f64>)> {
 
 /// Blocked change-point test across a component boundary (plan R3.1).
 /// Profiles median residual by signed distance d in [-L, L] (inside > 0).
-/// Returns the ratio CV_smooth / CV_step of 5-fold interleaved
-/// cross-validated weighted squared errors (quadratic versus two-line step).
+/// Returns `(ratio, jump_fraction)`: the ratio CV_smooth / CV_step of 5-fold
+/// interleaved cross-validated weighted squared errors (quadratic versus
+/// two-line step), and the fraction of the end-to-end profile contrast carried
+/// by the full-data step's discontinuity at its split.
 pub fn boundary_step_ratio(
     data: &[f64],
     width: usize,
@@ -319,7 +348,7 @@ pub fn boundary_step_ratio(
     bg: &Background,
     sources: &Bitset,
     half_width: usize,
-) -> Option<f64> {
+) -> Option<(f64, f64)> {
     let banded = banded_signed_distance(component_pixels, width, height, half_width);
     let bins = 2 * half_width + 1;
     let mut values: Vec<Vec<f64>> = vec![Vec::new(); bins];
@@ -373,11 +402,19 @@ pub fn boundary_step_ratio(
             cv_step += w * (y - step).powi(2);
         }
     }
-    Some(if cv_step > 0.0 {
+    let ratio = if cv_step > 0.0 {
         cv_smooth / cv_step
     } else if cv_smooth > 0.0 {
         f64::INFINITY
     } else {
         1.0
-    })
+    };
+    let (split, left, right) = fit_step(&points)?;
+    let jump = (poly_at(&right, split) - poly_at(&left, split)).abs();
+    let (first, last) = (points[0], points[points.len() - 1]);
+    let contrast = (poly_at(&right, last.0) - poly_at(&left, first.0))
+        .abs()
+        .max(jump);
+    let jump_fraction = if contrast > 0.0 { jump / contrast } else { 0.0 };
+    Some((ratio, jump_fraction))
 }

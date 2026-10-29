@@ -9,8 +9,9 @@
 //! deletes nothing from the science image.
 use super::background::Background;
 use super::bitset::Bitset;
+use super::noise::{second_differences, sigma_from_differences};
 use crate::config::V2Rules;
-use crate::detection::robust::{location_scale_with, median};
+use crate::detection::robust::median;
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
@@ -20,12 +21,11 @@ pub struct SourceMask {
     pub seeds: usize,
 }
 
-/// Local noise of each 16x16 block from horizontal second differences,
-/// sigma = 1.4826 * MAD(x[i-1] - 2 x[i] + x[i+1]) / sqrt(6), independent of
-/// candidate exclusions. Second differences cancel smooth gradients (galaxy
+/// Local noise of each 16x16 block from second differences (see `noise`),
+/// independent of candidate exclusions. Second differences cancel smooth gradients (galaxy
 /// halos, vignetting), so extended sources stay seeded, while amplified noise
 /// raises the estimate and is not mistaken for sources.
-fn local_block_noise(data: &[f64], width: usize, height: usize) -> (usize, Vec<f64>) {
+fn local_block_noise(data: &[f64], width: usize, height: usize, quantum: f64) -> (usize, Vec<f64>) {
     const B: usize = 16;
     let cols = width.div_ceil(B);
     let rows = height.div_ceil(B);
@@ -36,20 +36,10 @@ fn local_block_noise(data: &[f64], width: usize, height: usize) -> (usize, Vec<f
             (0..cols)
                 .map(|bx| {
                     diffs.clear();
-                    for y in by * B..((by + 1) * B).min(height) {
-                        let row = &data[y * width..(y + 1) * width];
-                        for x in (bx * B).max(1)..((bx + 1) * B).min(width - 1) {
-                            let (a, b, c) = (row[x - 1], row[x], row[x + 1]);
-                            if a.is_finite() && b.is_finite() && c.is_finite() {
-                                diffs.push(a - 2.0 * b + c);
-                            }
-                        }
-                    }
-                    if diffs.len() >= 16 {
-                        location_scale_with(diffs.iter().copied(), &mut scratch).1 / 6.0_f64.sqrt()
-                    } else {
-                        f64::NAN
-                    }
+                    let (x0, x1) = (bx * B, ((bx + 1) * B).min(width));
+                    let (y0, y1) = (by * B, ((by + 1) * B).min(height));
+                    second_differences(data, width, x0, x1, y0, y1, |_| false, &mut diffs);
+                    sigma_from_differences(&diffs, quantum, &mut scratch).0
                 })
                 .collect::<Vec<_>>()
         })
@@ -69,7 +59,7 @@ pub fn detect(
 ) -> SourceMask {
     let n = width * height;
     let mut seed = Bitset::new(n);
-    let (block_cols, block_noise) = local_block_noise(data, width, height);
+    let (block_cols, block_noise) = local_block_noise(data, width, height, bg.quantum);
     let seeds_by_row: Vec<Vec<usize>> = (0..height)
         .into_par_iter()
         .map(|y| {
