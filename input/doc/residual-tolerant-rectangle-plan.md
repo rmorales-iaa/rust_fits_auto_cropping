@@ -22,7 +22,7 @@ The user selected a crop policy that may retain a small number of pixels flagged
 3. Integrate it into crop selection and reporting without changing mask mode or detector proposals. **Complete.**
 4. Add unit/oracle tests for residual-budget boundaries, undefined samples, deterministic ties, candidate budget and sacrifice/utility rejection; run Rust formatting, tests and Clippy. **Complete: 69 unit, 29 end-to-end and 4 version tests; 17 Python checker tests; strict Clippy and formatting pass.**
 5. Reprocess only the four named 2004–2005 frames in an isolated diagnostic directory. Compare crop areas, residual flags, source-slice identity, FITS dimensions/WCS and independent FITS validation. Do not modify whole-year summaries or the stopped 2011 run. **Complete: release 0.2.74, run `20261029T080236.828463976Z`; all four accepted; Astropy/fitsverify and 500-sample preview validation passed.**
-6. Record the provisional policy and limitations, inspect the diff, and make a scoped local commit. **Documentation/evidence recorded; commit remains.**
+6. Record the provisional policy and limitations, inspect the diff, and make a scoped local commit. **Complete: implementation and validation were committed as `590b375`; no Git remote is configured for a push.**
 
 ## Stop conditions and limitations
 
