@@ -232,6 +232,20 @@ pub fn plan(input: PlanInput<'_>) -> ActionPlan {
     if let Some(search) = search
         && let Some(accepted) = search.accepted
     {
+        let r = accepted.rect;
+        if r.x == 0 && r.y == 0 && r.width == width && r.height == height {
+            // Not a crop: keep dimensions and remove the accepted detections,
+            // so crop provenance is only ever written on cropped products.
+            let mut plan = mask(
+                detection,
+                "crop_full_frame_mask",
+                "selected rectangle is the full frame, so accepted detections were applied as a mask"
+                    .to_owned(),
+            );
+            plan.search = Some(search);
+            plan.candidate = Some(accepted);
+            return plan;
+        }
         let undefined_mask: Vec<bool> = if masked_mode {
             detection
                 .mask
@@ -507,17 +521,18 @@ mod tests {
         let crop = plan_for(ProcessingMode::Crop, &tolerant, &det, &values, n);
         let crop_masked = plan_for(ProcessingMode::CropMasked, &tolerant, &det, &values, n);
         assert_eq!(crop.kind, ActionKind::Crop);
-        assert_eq!(crop_masked.kind, ActionKind::CropMasked);
         // Retaining flags as data removes nothing, so the utility rule keeps
-        // the clean 39-column anchor; masking them makes the full frame the
-        // larger accepted product.
+        // the clean 39-column anchor. Masking them makes the full frame the
+        // best crop_masked rectangle; a full frame is not a crop, so it is
+        // applied as a dimension-preserving mask (no crop provenance).
         assert_eq!(crop.rect.unwrap().area(), 39 * n);
-        assert_eq!(crop_masked.rect.unwrap().area(), n * n);
+        assert_eq!(crop_masked.kind, ActionKind::Mask);
+        assert_eq!(crop_masked.reason_code, "crop_full_frame_mask");
+        assert!(crop_masked.rect.is_none());
         let c = count(&crop, &mask, &values);
         let cm = count(&crop_masked, &mask, &values);
         assert_eq!(c.flagged_pixels_retained, 0);
         assert_eq!(cm.flagged_pixels_retained, 0);
-        assert_eq!(cm.interior_undefined_pixels, n);
         assert_eq!(cm.artifact_pixels_removed, n);
         assert_eq!(cm.unflagged_pixels_sacrificed, 0);
     }

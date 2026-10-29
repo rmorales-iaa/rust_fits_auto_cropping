@@ -51,6 +51,8 @@ pub struct Image {
     pub source_fits: FitsFile,
     /// SHA-256 of the exact open source file used to build `source_fits`.
     pub source_sha256: String,
+    /// Base name of the source file, recorded in crop provenance.
+    pub source_file_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -180,6 +182,9 @@ pub fn read_image(
         raw_header_cards: repairs,
         source_fits: file,
         source_sha256,
+        source_file_name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
     }))
 }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,10 @@ CARD_POLICY_IGNORED = {
     "DATE",
     "HISTORY",
 }
+# Written only on cropped science products (see verify_crop_provenance).
+CROP_PROVENANCE_KEYS = (
+    "CROPPED", "CROPSEC", "ORIGNAX1", "ORIGNAX2", "LTV1", "LTV2", "CROPUNDF", "ORIGSHA", "ORIGFILE",
+)
 CARD_POLICY_ADDED = {
     "science": {
         "CHECKSUM",
@@ -64,6 +69,7 @@ CARD_POLICY_ADDED = {
         "CLIPX0",
         "CLIPY0",
         "COMMENT",
+        *CROP_PROVENANCE_KEYS,
     },
     "mask": {"CHECKSUM", "DATASUM", "CREATOR", "DATE", "HISTORY", "COMMENT"},
     "reason": {
@@ -222,6 +228,47 @@ def verify_masked_samples(
         raise AssertionError(f"{path}: retained samples differ from the source")
 
 
+SECTION = re.compile(r"\[(\d+):(\d+),(\d+):(\d+)\]")
+
+
+def verify_crop_provenance(
+    source_path: Path, source: fits.Header, output: fits.Header, path: Path, x0: int, y0: int
+) -> None:
+    """Cropped products must identify the crop for calibration matching."""
+    width, height = int(output["NAXIS1"]), int(output["NAXIS2"])
+    if source.get("CROPPED") is True:  # re-cropped product: compose with the earlier section
+        match = SECTION.fullmatch(str(source.get("CROPSEC", "")))
+        if match is None:
+            raise AssertionError(f"{path}: source CROPSEC is unreadable")
+        ox, oy = int(match.group(1)) - 1 + x0, int(match.group(3)) - 1 + y0
+        original = (int(source["ORIGNAX1"]), int(source["ORIGNAX2"]))
+        sha = source.get("ORIGSHA")
+    else:
+        ox, oy = x0, y0
+        original = (int(source["NAXIS1"]), int(source["NAXIS2"]))
+        sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    expected_section = f"[{ox + 1}:{ox + width},{oy + 1}:{oy + height}]"
+    checks = {
+        "CROPPED": output.get("CROPPED") is True,
+        "CROPSEC": output.get("CROPSEC") == expected_section,
+        "ORIGNAX": (output.get("ORIGNAX1"), output.get("ORIGNAX2")) == original,
+        "LTV1": np.isclose(output.get("LTV1", np.nan), source.get("LTV1", 0.0) - x0, rtol=0, atol=1e-10),
+        "LTV2": np.isclose(output.get("LTV2", np.nan), source.get("LTV2", 0.0) - y0, rtol=0, atol=1e-10),
+        "ORIGSHA": output.get("ORIGSHA") == sha,
+        "CROPUNDF": isinstance(output.get("CROPUNDF"), int) and output["CROPUNDF"] >= 0,
+    }
+    failed = [key for key, ok in checks.items() if not ok]
+    if failed:
+        raise AssertionError(f"{path}: crop provenance cards wrong or missing: {', '.join(failed)}")
+
+
+def verify_no_crop_provenance(source: fits.Header, output: fits.Header, path: Path) -> None:
+    """Uncropped products carry no new crop cards (source cards are preserved as-is)."""
+    for key in CROP_PROVENANCE_KEYS:
+        if key in output and (key not in source or output[key] != source[key]):
+            raise AssertionError(f"{path}: crop card {key} on an uncropped product")
+
+
 def verify_crop_samples(
     original: np.ndarray,
     actual: np.ndarray,
@@ -312,6 +359,7 @@ def verify_preserved_header(
                 or key in CARD_POLICY_IGNORED
                 or re.fullmatch(r"NAXIS\d+|ZNAXIS\d+", key)
                 or key.startswith("CLIP")
+                or (product_kind == "science" and key in CROP_PROVENANCE_KEYS)
                 or WCS_KEY.fullmatch(key)
                 or (product_kind in {"mask", "reason"} and key == "BUNIT")
             ):
@@ -550,6 +598,12 @@ def verify_tree(
                 raise AssertionError(f"{output_path}: shape or BITPIX changed")
             is_crop = bool(crop_shape or x0 or y0 or original.shape != actual.shape)
             verify_wcs(source[0].header, output[0].header, output_path, x0, y0, is_crop)
+            if is_crop:
+                verify_crop_provenance(
+                    source_path, source[0].header, output[0].header, output_path, x0, y0
+                )
+            else:
+                verify_no_crop_provenance(source[0].header, output[0].header, output_path)
             if is_crop:
                 expected = original[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]]
                 if expected.shape != actual.shape:

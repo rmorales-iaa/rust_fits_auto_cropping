@@ -694,6 +694,21 @@ fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference
         cropped.primary().header.get_int("CLIPY0"),
         Some(crop_y as i64)
     );
+    // Crop provenance for applying the same crop to calibration frames.
+    let header = &cropped.primary().header;
+    assert_eq!(header.get_bool("CROPPED"), Some(true));
+    assert_eq!(header.get_string("CROPSEC"), Some("[1:96,17:96]"));
+    assert_eq!(header.get_int("ORIGNAX1"), Some(width as i64));
+    assert_eq!(header.get_int("ORIGNAX2"), Some(height as i64));
+    assert_eq!(header.get_float("LTV1"), Some(-(crop_x as f64)));
+    assert_eq!(header.get_float("LTV2"), Some(-(crop_y as f64)));
+    assert_eq!(header.get_int("CROPUNDF"), Some(0));
+    assert_eq!(header.get_string("ORIGFILE"), Some("four-corners.fits"));
+    {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(fs::read(&input_path).unwrap()));
+        assert_eq!(header.get_string("ORIGSHA"), Some(digest.as_str()));
+    }
     assert_eq!(
         cropped.primary().header.get_float("CRPIX1"),
         original
@@ -1627,7 +1642,7 @@ fn bbox_fallback_crops_to_retained_support_and_masks_remaining_flags() {
 }
 
 #[test]
-fn crop_masked_mode_keeps_larger_rectangle_with_flags_undefined() {
+fn crop_masked_full_frame_rectangle_is_written_as_a_mask() {
     let t = tempdir().unwrap();
     let input = t.path().join("in");
     let output = t.path().join("out");
@@ -1649,13 +1664,23 @@ fn crop_masked_mode_keeps_larger_rectangle_with_flags_undefined() {
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
     let record = &summary["files"][0];
-    assert_eq!(record["action"], "crop_masked", "{record}");
-    assert_eq!(record["reason_code"], "crop_masked_applied");
-    assert_eq!(record["crop_width"], 192);
-    assert_eq!(record["crop_interior_masked_pixels"], 768);
+    // The best crop_masked rectangle is the full frame, which is not a crop:
+    // it is written as a dimension-preserving mask without crop provenance.
+    assert_eq!(record["action"], "mask", "{record}");
+    assert_eq!(record["reason_code"], "crop_full_frame_mask");
+    assert!(record["crop_width"].is_null());
+    assert_eq!(record["applied_artifact_pixels"], 768);
     assert_eq!(record["crop_artifact_pixels_retained"], 0);
     assert_eq!(record["unmasked_pixels_sacrificed"], 0);
     let product = FitsFile::from_file(product_path(&output, "images", "strip.fits")).unwrap();
+    for key in [
+        "CROPPED", "CROPSEC", "ORIGNAX1", "LTV1", "ORIGSHA", "CLIPX0",
+    ] {
+        assert!(
+            product.primary().header.find(key).is_none(),
+            "{key} on an uncropped product"
+        );
+    }
     let HduData::Image(data) = &product.primary().data else {
         panic!()
     };

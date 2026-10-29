@@ -354,6 +354,17 @@ pub fn write_cropped_image(
         );
     }
     remove_data_extrema(&mut hdu.header);
+    if rect.x == 0 && rect.y == 0 && rect.width == width && rect.height == height {
+        bail!("a full-frame rectangle is not a crop; it must be written as a mask product");
+    }
+    stamp_crop_provenance(
+        &mut hdu.header,
+        rect,
+        (width, height),
+        interior_count,
+        &image_info.source_sha256,
+        image_info.source_file_name.as_deref(),
+    );
     hdu.header.set(
         "CLIPX0",
         HeaderValue::Integer(rect.x as i64),
@@ -386,6 +397,180 @@ pub fn write_cropped_image(
         &expected_pixels,
         region,
         (interior_count > 0).then_some(interior_blank).flatten(),
+    )
+}
+
+/// Crop provenance, written only on products smaller than their source. It
+/// identifies the product as cropped and gives everything needed to apply the
+/// same crop to matching calibration frames (`tools/apply_crop.py`):
+/// CROPSEC in IRAF/FITS section syntax (1-based, inclusive, original pixel
+/// coordinates), the original dimensions, and the IRAF image-to-physical
+/// offset LTV (image = physical + LTV), so physical coordinates stay those of
+/// the original frame.
+fn stamp_crop_provenance(
+    header: &mut Header,
+    rect: CropRect,
+    (source_width, source_height): (usize, usize),
+    interior_undefined: usize,
+    source_sha256: &str,
+    source_file_name: Option<&str>,
+) {
+    // A source that is itself a cropped product: express the new section in
+    // the coordinates of the original frame and keep the original identity.
+    let earlier = earlier_crop(header);
+    let (section, (original_width, original_height)) = match &earlier {
+        Some(prior) => (prior.compose(rect), prior.original_size),
+        None => (rect, (source_width, source_height)),
+    };
+    header.set(
+        "CROPPED",
+        HeaderValue::Logical(true),
+        Some("image was cropped; see CROPSEC"),
+    );
+    header.set(
+        "CROPSEC",
+        HeaderValue::String(crop_section(section)),
+        Some("kept section of original image (1-based)"),
+    );
+    header.set(
+        "ORIGNAX1",
+        HeaderValue::Integer(original_width as i64),
+        Some("NAXIS1 of the original image"),
+    );
+    header.set(
+        "ORIGNAX2",
+        HeaderValue::Integer(original_height as i64),
+        Some("NAXIS2 of the original image"),
+    );
+    for (key, offset) in [("LTV1", rect.x), ("LTV2", rect.y)] {
+        let previous = header.get_float(key).unwrap_or(0.0);
+        header.set(
+            key,
+            HeaderValue::Float(previous - offset as f64),
+            Some("image = physical + LTV (IRAF)"),
+        );
+    }
+    header.set(
+        "CROPUNDF",
+        HeaderValue::Integer(interior_undefined as i64),
+        Some("samples inside the crop set undefined"),
+    );
+    if earlier.is_some() {
+        // ORIGSHA/ORIGFILE already identify the original frame.
+        return;
+    }
+    // 64 hex digits fill the card; no room for a comment.
+    header.set(
+        "ORIGSHA",
+        HeaderValue::String(source_sha256.to_owned()),
+        None,
+    );
+    // Long or unusual names are omitted rather than truncated or escaped.
+    if let Some(name) = source_file_name.filter(|name| {
+        name.len() <= 60
+            && name
+                .bytes()
+                .all(|b| (0x20..0x7f).contains(&b) && b != b'\'')
+    }) {
+        header.set("ORIGFILE", HeaderValue::String(name.to_owned()), None);
+    }
+}
+
+/// Check the crop provenance cards of a written product against the source
+/// snapshot and the selected rectangle.
+fn verify_crop_provenance(
+    original: &FitsFile,
+    check: &FitsFile,
+    rect: CropRect,
+) -> anyhow::Result<()> {
+    let old = &original.primary().header;
+    let new = &check.primary().header;
+    let (width, height) = match &original.primary().data {
+        HduData::Image(image) if image.axes.len() == 2 => (image.axes[0], image.axes[1]),
+        _ => bail!("source primary HDU is not a 2D image"),
+    };
+    let ltv_ok = |key: &str, offset: usize| {
+        let expected = old.get_float(key).unwrap_or(0.0) - offset as f64;
+        new.get_float(key)
+            .is_some_and(|v| (v - expected).abs() <= 1e-10)
+    };
+    let earlier = earlier_crop(old);
+    let (section, (original_width, original_height)) = match &earlier {
+        Some(prior) => (prior.compose(rect), prior.original_size),
+        None => (rect, (width, height)),
+    };
+    if new.get_bool("CROPPED") != Some(true)
+        || new.get_string("CROPSEC") != Some(crop_section(section).as_str())
+        || new.get_int("ORIGNAX1") != Some(original_width as i64)
+        || new.get_int("ORIGNAX2") != Some(original_height as i64)
+        || !ltv_ok("LTV1", rect.x)
+        || !ltv_ok("LTV2", rect.y)
+        || new.get_string("ORIGSHA").is_none_or(|sha| sha.len() != 64)
+    {
+        bail!("cropped FITS crop provenance cards are missing or inconsistent");
+    }
+    Ok(())
+}
+
+/// Crop recorded in a source header that is itself a cropped product.
+struct EarlierCrop {
+    x0: usize,
+    y0: usize,
+    original_size: (usize, usize),
+}
+
+impl EarlierCrop {
+    fn compose(&self, rect: CropRect) -> CropRect {
+        CropRect {
+            x: self.x0 + rect.x,
+            y: self.y0 + rect.y,
+            ..rect
+        }
+    }
+}
+
+/// Parse `CROPPED = T`, `CROPSEC` and `ORIGNAX1/2` from a source header.
+fn earlier_crop(header: &Header) -> Option<EarlierCrop> {
+    if header.get_bool("CROPPED") != Some(true) {
+        return None;
+    }
+    let section = parse_section(header.get_string("CROPSEC")?)?;
+    let width = usize::try_from(header.get_int("ORIGNAX1")?).ok()?;
+    let height = usize::try_from(header.get_int("ORIGNAX2")?).ok()?;
+    Some(EarlierCrop {
+        x0: section.x,
+        y0: section.y,
+        original_size: (width, height),
+    })
+}
+
+/// Parse a 1-based inclusive `[x1:x2,y1:y2]` section into a zero-based rectangle.
+fn parse_section(text: &str) -> Option<CropRect> {
+    let inner = text.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let (xs, ys) = inner.split_once(',')?;
+    let range = |part: &str| -> Option<(usize, usize)> {
+        let (a, b) = part.split_once(':')?;
+        let (a, b): (usize, usize) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+        (a >= 1 && b >= a).then(|| (a - 1, b - a + 1))
+    };
+    let ((x, width), (y, height)) = (range(xs)?, range(ys)?);
+    Some(CropRect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+/// IRAF/FITS image section of a zero-based rectangle: `[x1:x2,y1:y2]`,
+/// 1-based and inclusive.
+pub(crate) fn crop_section(rect: CropRect) -> String {
+    format!(
+        "[{}:{},{}:{}]",
+        rect.x + 1,
+        rect.x + rect.width,
+        rect.y + 1,
+        rect.y + rect.height
     )
 }
 
@@ -569,6 +754,7 @@ fn verify_cropped_file(
     {
         bail!("cropped FITS BLANK card does not match the interior sentinel");
     }
+    verify_crop_provenance(original, check, rect)?;
     let header = &check.primary().header;
     if header.get_string("CLIPSHAP") != Some("RECTANGLE")
         || header.get_int("NAXIS") != Some(2)
@@ -841,11 +1027,78 @@ fn verify_masked_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_single_product, write_masked_product, write_reason_mask};
+    use super::{
+        crop_section, parse_section, publish_single_product, stamp_crop_provenance,
+        write_masked_product, write_reason_mask,
+    };
+    use crate::crop::CropRect;
     use crate::fits_image::read_image;
     use fitskit::{FitsFile, HduData, HeaderValue, ImageData, Keyword, PixelData};
     use sha2::{Digest, Sha256};
     use std::fs;
+
+    #[test]
+    fn crop_section_round_trips_and_recrops_compose_on_the_original() {
+        let rect = CropRect {
+            x: 10,
+            y: 0,
+            width: 90,
+            height: 40,
+        };
+        assert_eq!(crop_section(rect), "[11:100,1:40]");
+        assert_eq!(parse_section("[11:100,1:40]"), Some(rect));
+        assert_eq!(parse_section("[0:5,1:2]"), None);
+        assert_eq!(parse_section("[5:4,1:2]"), None);
+
+        let mut header = fitskit::Header::new();
+        header.set("LTV1", HeaderValue::Float(-3.0), None);
+        stamp_crop_provenance(
+            &mut header,
+            rect,
+            (200, 50),
+            7,
+            &"a".repeat(64),
+            Some("raw.fits"),
+        );
+        assert_eq!(header.get_bool("CROPPED"), Some(true));
+        assert_eq!(header.get_float("LTV1"), Some(-13.0));
+        assert_eq!(header.get_float("LTV2"), Some(0.0));
+        assert_eq!(header.get_int("CROPUNDF"), Some(7));
+        assert_eq!(header.get_string("ORIGFILE"), Some("raw.fits"));
+
+        // Cropping that product again: section and size refer to the original.
+        let again = CropRect {
+            x: 5,
+            y: 2,
+            width: 20,
+            height: 30,
+        };
+        stamp_crop_provenance(
+            &mut header,
+            again,
+            (90, 40),
+            0,
+            &"b".repeat(64),
+            Some("x.fits"),
+        );
+        assert_eq!(header.get_string("CROPSEC"), Some("[16:35,3:32]"));
+        assert_eq!(header.get_int("ORIGNAX1"), Some(200));
+        assert_eq!(header.get_int("ORIGNAX2"), Some(50));
+        assert_eq!(header.get_float("LTV1"), Some(-18.0));
+        assert_eq!(header.get_string("ORIGSHA"), Some("a".repeat(64).as_str()));
+        assert_eq!(header.get_string("ORIGFILE"), Some("raw.fits"));
+
+        let mut long = fitskit::Header::new();
+        stamp_crop_provenance(
+            &mut long,
+            rect,
+            (200, 50),
+            0,
+            &"c".repeat(64),
+            Some(&"n".repeat(61)),
+        );
+        assert!(long.find("ORIGFILE").is_none());
+    }
 
     #[test]
     fn failed_staged_verification_leaves_existing_product_and_no_stage() {
