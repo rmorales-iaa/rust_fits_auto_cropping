@@ -19,6 +19,8 @@ Reprocess only 2009, 2011, 2012, 2017, 2018, 2019, 2021, 2023, 2024 and 2026 fro
 
 The host reports 125 GiB total memory and 93 GiB available at planning time; this supports a larger bounded workload, but the configured estimate does not measure actual worker RSS. The crop detector and thresholds remain unchanged. This remediation addresses resource-based pass-throughs, not scientific classification accuracy. Source files remain untouched. Each selected output directory is explicitly sanitized by the script; pre-existing results there will be replaced.
 
+The 2023 source has no `dark/` directory. The yearly script reports this missing ancillary source and continues processing science images; it never invents a dark-frame symlink. Existing calibration-link conflicts still stop that year's processing.
+
 ## Evidence checklist
 
 - [x] Existing summaries and source inventory inspected for the requested years.

@@ -18,6 +18,8 @@ Without arguments, process every year from $FIRST_YEAR through $LAST_YEAR.
 Use --year YEAR to process one year (for example, --year 2002).
 Each run deletes existing contents of that year's dedicated science_calibrated
 output directory before processing. Sibling bias/dark/flat links are unaffected.
+Missing source calibration directories are reported and omitted; science images
+are still processed because calibration products are not inputs to this crop step.
 Set RUST_FITS_AUTO_CROPPING_BIN to override the executable. By default the
 script uses rust_fits_auto_cropping from PATH, then this repository's release binary.
 Set RUST_FITS_AUTO_CROPPING_SOURCE_ROOT and RUST_FITS_AUTO_CROPPING_OUTPUT_ROOT
@@ -242,10 +244,15 @@ process_year() {
     fi
     mkdir -p -- "$output_year"
     for calibration_dir in bias dark flat; do
+        if [[ ! -d "$source_year/$calibration_dir" ]]; then
+            printf 'Year %s has no source %s/ directory; continuing without that calibration link.\n' \
+                "$year" "$calibration_dir" >&2
+            continue
+        fi
         if ! ensure_directory_link \
             "$source_year/$calibration_dir" \
             "$output_year/$calibration_dir"; then
-            printf 'Skipping science processing for year %s because calibration links are incomplete.\n' \
+            printf 'Skipping science processing for year %s because a calibration link conflicts with its source.\n' \
                 "$year" >&2
             return 1
         fi
