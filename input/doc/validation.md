@@ -342,7 +342,7 @@ Environment: cloud review container, 4 logical CPUs, Rust release builds, Astrop
 ### Opt-in v2 detector: null false-alarm gate (R1.2, G3a)
 Frame-level false acceptances with exact one-sided 95% Clopper-Pearson upper bounds; seeded families with sigma^2 = 25 + level/2.
 
-| Family | 256 px, n = 2,995: v1 | 256 px: v2 | 512 px, n = 1,000 (final code): v1 | 512 px: v2 |
+| Family | 256 px, n = 2,995 (final code): v1 | 256 px: v2 | 512 px, n = 1,000 (final code): v1 | 512 px: v2 |
 | --- | --- | --- | --- | --- |
 | flat | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_FLAT_V1 | G3A512_FLAT_V2 |
 | gradient (±40%) | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_GRADIENT_V1 | G3A512_GRADIENT_V2 |
@@ -352,7 +352,7 @@ Frame-level false acceptances with exact one-sided 95% Clopper-Pearson upper bou
 | correlated noise | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_CORR_V1 | G3A512_CORR_V2 |
 | quantized low counts | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_QUANT_V1 | G3A512_QUANT_V2 |
 
-The 256-px runs used commit `1c7b7ac`, before the D4-anchored refinement. That change only shrinks the masks of already-accepted frames, so those counts are upper bounds for the final code; the 256-px flat family was rerun on the final code (0/2,995). The 512-px column was run on the final code with 1,000 frames per family, where zero failures bounds the rate at <= 0.0030; the full 2,995-frame G3a bound is established at 256 px.
+The 256-px column was rerun on the final code (`9d60043`, including source-seed validation) with identical results: v2 had 0 false alarms in every family. An earlier run at `1c7b7ac` gave the same counts. The 512-px column was run on the final code with 1,000 frames per family, where zero failures bounds the rate at <= 0.0030; the full 2,995-frame G3a bound is established at 256 px.
 
 ### Opt-in v2 detector: injection recovery (R1.4), final code, 100 frames per cell
 Truth: plateau = I; illumination eta < 0.2 = I, eta ≥ 0.5 = V, Q in between (excluded).
