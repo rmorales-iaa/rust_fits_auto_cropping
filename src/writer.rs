@@ -3,43 +3,12 @@ use crate::fits_image::{Image, RawHeaderCard, read_fits_snapshot, unused_integer
 use crate::{crop::CropRect, durability::sync_parent};
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
-use fitskit::{FitsFile, HduData, Header, HeaderValue, ImageData, Keyword, PixelData};
+use fitskit::{FitsFile, HduData, Header, HeaderValue, Keyword, PixelData};
 use std::{fs, io::Cursor, path::Path};
 use tempfile::{NamedTempFile, TempDir};
 
 mod reason_mask_writer;
 pub use reason_mask_writer::write_reason_mask;
-
-fn write_mask_with_raw_header_cards(
-    source_header: &Header,
-    path: &Path,
-    width: usize,
-    height: usize,
-    mask: &[bool],
-    history: &str,
-    raw_header_cards: &[RawHeaderCard],
-) -> anyhow::Result<()> {
-    if mask.len() != width.saturating_mul(height) {
-        bail!("mask dimensions do not match its data");
-    }
-    let mut output = FitsFile::with_primary_image(ImageData::new(
-        vec![width, height],
-        PixelData::U8(mask.iter().map(|v| u8::from(*v)).collect()),
-    ));
-    for keyword in source_header.iter() {
-        if !is_structural_or_data_summary(&keyword.name) && keyword.name != "BUNIT" {
-            output.primary_mut().header.push(keyword.clone());
-        }
-    }
-    normalize_history_cards(&mut output.primary_mut().header);
-    stamp_processing_metadata(&mut output.primary_mut().header);
-    push_history(
-        &mut output.primary_mut().header,
-        &format!("rust_fits_auto_cropping: {history}"),
-    );
-    publish_fits_with_raw_header_cards(&output, path, raw_header_cards)?;
-    verify_mask_file(path, width, height, mask)
-}
 
 /// Write the science image by replacing rejected samples with FITS undefined values.
 pub fn write_masked_image(
@@ -130,13 +99,21 @@ pub fn write_masked_image(
     verify_masked_file(source, destination, mask, bitpix, blank_value)
 }
 
-/// Publish science and mask outputs together, restoring previous outputs on failure.
-pub fn write_products(
+/// Publish the dimension-preserving science product for `data_mask`.
+///
+/// The product is written and verified against the parsed source snapshot in
+/// a sibling staging directory, then renamed atomically into place. The binary
+/// action mask is checked in memory by that verification (every masked sample
+/// undefined, every retained sample unchanged); no mask sidecar file is written
+/// (plan R0.5).
+pub fn write_masked_product(
     image_path: &Path,
-    mask_path: &Path,
     image: &Image,
     data_mask: &[bool],
 ) -> anyhow::Result<()> {
+    if data_mask.len() != image.width.saturating_mul(image.height) {
+        bail!("action mask dimensions do not match the image");
+    }
     let blank_value = if image.bitpix > 0 && data_mask.iter().any(|masked| *masked) {
         Some(match image.blank_value {
             Some(blank) => blank,
@@ -145,75 +122,50 @@ pub fn write_products(
     } else {
         image.blank_value
     };
-    write_product_pair(
-        image_path,
-        mask_path,
-        |staged_image| {
-            write_masked_image(
-                &image.source_fits,
-                staged_image,
-                data_mask,
-                image.bitpix,
-                blank_value,
-                &image.raw_header_cards,
-            )
-        },
-        |staged_mask| {
-            write_mask_with_raw_header_cards(
-                &image.source_fits.primary().header,
-                staged_mask,
-                image.width,
-                image.height,
-                data_mask,
-                "companion mask; 1 marks newly rejected pixels",
-                &image.raw_header_cards,
-            )
-        },
-    )
+    publish_single_product(image_path, |staged_image| {
+        write_masked_image(
+            &image.source_fits,
+            staged_image,
+            data_mask,
+            image.bitpix,
+            blank_value,
+            &image.raw_header_cards,
+        )
+    })
 }
 
-/// Write a crop and a full-frame mask describing every source pixel excluded from it.
-pub fn write_cropped_products(
+/// Publish a verified rectangular crop of the parsed source snapshot.
+pub fn write_cropped_product(
     image_path: &Path,
-    mask_path: &Path,
-    excluded_mask: &[bool],
     image: &Image,
     region: CropRect,
 ) -> anyhow::Result<()> {
-    write_product_pair(
-        image_path,
-        mask_path,
-        |staged_image| write_cropped_image(staged_image, image, region),
-        |staged_mask| {
-            write_mask_with_raw_header_cards(
-                &image.source_fits.primary().header,
-                staged_mask,
-                image.width,
-                image.height,
-                excluded_mask,
-                "crop exclusion mask; 1 marks pixels excluded from retained geometry",
-                &image.raw_header_cards,
-            )
-        },
-    )
+    publish_single_product(image_path, |staged_image| {
+        write_cropped_image(staged_image, image, region)
+    })
 }
 
-fn write_product_pair(
-    image_path: &Path,
-    mask_path: &Path,
-    write_image: impl FnOnce(&Path) -> anyhow::Result<()>,
-    write_mask: impl FnOnce(&Path) -> anyhow::Result<()>,
+/// Write and verify a product in a sibling staging directory, then atomically
+/// rename it over `destination`. A symlinked destination is refused so a kept
+/// source link is never written through. On any failure the destination is
+/// unchanged and the staging directory is removed.
+fn publish_single_product(
+    destination: &Path,
+    write_and_verify: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let image_stage = create_stage_directory(image_path)?;
-    let mask_stage = create_stage_directory(mask_path)?;
-    let staged_image = image_stage.path().join("science.fits");
-    let staged_mask = mask_stage.path().join("mask.fits");
-
-    // Both complete products pass their writers' FITS/sample verification
-    // before either final path is changed.
-    write_image(&staged_image)?;
-    write_mask(&staged_mask)?;
-    publish_product_pair(&staged_image, image_path, &staged_mask, mask_path)
+    if fs::symlink_metadata(destination).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        bail!(
+            "refusing to replace symlink output {}",
+            destination.display()
+        );
+    }
+    let stage = create_stage_directory(destination)?;
+    let staged = stage.path().join("product.fits");
+    write_and_verify(&staged)?;
+    fs::rename(&staged, destination)
+        .with_context(|| format!("publishing FITS {}", destination.display()))?;
+    sync_parent(destination)?;
+    Ok(())
 }
 
 fn create_stage_directory(destination: &Path) -> anyhow::Result<TempDir> {
@@ -222,56 +174,6 @@ fn create_stage_directory(destination: &Path) -> anyhow::Result<TempDir> {
         .context("FITS destination has no parent")?;
     tempfile::tempdir_in(parent)
         .with_context(|| format!("creating product staging directory in {}", parent.display()))
-}
-
-fn publish_product_pair(
-    staged_image: &Path,
-    image_path: &Path,
-    staged_mask: &Path,
-    mask_path: &Path,
-) -> anyhow::Result<()> {
-    publish_product_pair_with(
-        staged_image,
-        image_path,
-        staged_mask,
-        mask_path,
-        |from, to| fs::rename(from, to),
-    )
-}
-
-fn publish_product_pair_with<F>(
-    staged_image: &Path,
-    image_path: &Path,
-    staged_mask: &Path,
-    mask_path: &Path,
-    mut publish: F,
-) -> anyhow::Result<()>
-where
-    F: FnMut(&Path, &Path) -> std::io::Result<()>,
-{
-    let image_backup = backup_existing(image_path)?;
-    let mask_backup = backup_existing(mask_path)?;
-    let result = publish(staged_image, image_path)
-        .and_then(|()| publish(staged_mask, mask_path))
-        .and_then(|()| sync_parent(image_path))
-        .and_then(|()| {
-            if image_path.parent() == mask_path.parent() {
-                Ok(())
-            } else {
-                sync_parent(mask_path)
-            }
-        });
-    if let Err(error) = result {
-        let image_rollback = restore_backup(image_path, image_backup);
-        let mask_rollback = restore_backup(mask_path, mask_backup);
-        match (image_rollback, mask_rollback) {
-            (Ok(()), Ok(())) => return Err(error.into()),
-            (image, mask) => bail!(
-                "publishing product pair failed ({error}); rollback image={image:?}, mask={mask:?}"
-            ),
-        }
-    }
-    Ok(())
 }
 
 /// Crop raw stored values, preserve non-structural cards and shift all primary/alternate CRPIX.
@@ -695,30 +597,6 @@ fn bytes_with_valid_checksum(file: &FitsFile) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn backup_existing(path: &Path) -> anyhow::Result<Option<NamedTempFile>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    if path.symlink_metadata()?.file_type().is_symlink() {
-        bail!("refusing to replace symlink output {}", path.display());
-    }
-    let backup = NamedTempFile::new_in(path.parent().context("output path has no parent")?)?;
-    fs::copy(path, backup.path())?;
-    backup.as_file().sync_all()?;
-    sync_parent(path)?;
-    Ok(Some(backup))
-}
-
-fn restore_backup(path: &Path, backup: Option<NamedTempFile>) -> anyhow::Result<()> {
-    if let Some(backup) = backup {
-        fs::rename(backup.path(), path)?;
-    } else if path.exists() {
-        fs::remove_file(path)?;
-    }
-    sync_parent(path)?;
-    Ok(())
-}
-
 pub(super) fn is_structural_or_data_summary(key: &str) -> bool {
     matches!(
         key,
@@ -739,32 +617,6 @@ pub(super) fn is_structural_or_data_summary(key: &str) -> bool {
             | "END"
     ) || key.starts_with("NAXIS")
         || key.starts_with("ZNAXIS")
-}
-
-fn verify_mask_file(
-    path: &Path,
-    width: usize,
-    height: usize,
-    expected: &[bool],
-) -> anyhow::Result<()> {
-    let check = read_fits_snapshot(path)?;
-    if check.len() != 1 {
-        bail!("written mask does not contain exactly one HDU");
-    }
-    check.primary().verify_datasum()?;
-    let actual = match &check.primary().data {
-        HduData::Image(img) => match &img.pixels {
-            PixelData::U8(v) => v,
-            _ => bail!("mask BITPIX changed from 8"),
-        },
-        _ => bail!("mask primary HDU is not an image"),
-    };
-    if actual.len() != width.saturating_mul(height)
-        || actual.iter().zip(expected).any(|(a, b)| *a != u8::from(*b))
-    {
-        bail!("mask samples or dimensions changed during write");
-    }
-    Ok(())
 }
 
 fn verify_masked_file(
@@ -835,62 +687,36 @@ fn float_slice(pixels: &PixelData) -> anyhow::Result<Vec<f64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_product_pair_with, write_products, write_reason_mask};
+    use super::{publish_single_product, write_masked_product, write_reason_mask};
     use crate::fits_image::read_image;
     use fitskit::{FitsFile, HduData, HeaderValue, ImageData, Keyword, PixelData};
     use sha2::{Digest, Sha256};
     use std::fs;
 
-    fn fail_second_publish(
-        staged_image: &std::path::Path,
-        image: &std::path::Path,
-        staged_mask: &std::path::Path,
-        mask: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let mut calls = 0;
-        publish_product_pair_with(staged_image, image, staged_mask, mask, |from, to| {
-            calls += 1;
-            if calls == 2 {
-                return Err(std::io::Error::other("injected second-product failure"));
-            }
-            fs::rename(from, to)
-        })
+    #[test]
+    fn failed_staged_verification_leaves_existing_product_and_no_stage() {
+        let temp = tempfile::tempdir().unwrap();
+        let product = temp.path().join("science.fits");
+        fs::write(&product, b"previous product").unwrap();
+        let result = publish_single_product(&product, |staged| {
+            fs::write(staged, b"unverified").unwrap();
+            anyhow::bail!("injected verification failure")
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&product).unwrap(), b"previous product");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn second_product_publication_failure_restores_previous_pair() {
+    fn symlinked_destination_is_never_written_through() {
         let temp = tempfile::tempdir().unwrap();
-        let staging = temp.path().join("staging");
-        fs::create_dir(&staging).unwrap();
-        let staged_image = staging.join("science.fits");
-        let staged_mask = staging.join("mask.fits");
-        fs::write(&staged_image, b"new science").unwrap();
-        fs::write(&staged_mask, b"new mask").unwrap();
-        let image = temp.path().join("science.fits");
-        let mask = temp.path().join("mask.fits");
-        fs::write(&image, b"old science").unwrap();
-        fs::write(&mask, b"old mask").unwrap();
-
-        assert!(fail_second_publish(&staged_image, &image, &staged_mask, &mask).is_err());
-        assert_eq!(fs::read(image).unwrap(), b"old science");
-        assert_eq!(fs::read(mask).unwrap(), b"old mask");
-    }
-
-    #[test]
-    fn second_product_publication_failure_removes_partial_new_pair() {
-        let temp = tempfile::tempdir().unwrap();
-        let staging = temp.path().join("staging");
-        fs::create_dir(&staging).unwrap();
-        let staged_image = staging.join("science.fits");
-        let staged_mask = staging.join("mask.fits");
-        fs::write(&staged_image, b"new science").unwrap();
-        fs::write(&staged_mask, b"new mask").unwrap();
-        let image = temp.path().join("science.fits");
-        let mask = temp.path().join("mask.fits");
-
-        assert!(fail_second_publish(&staged_image, &image, &staged_mask, &mask).is_err());
-        assert!(!image.exists());
-        assert!(!mask.exists());
+        let target = temp.path().join("source.fits");
+        fs::write(&target, b"source bytes").unwrap();
+        let link = temp.path().join("science.fits");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(publish_single_product(&link, |staged| Ok(fs::write(staged, b"new")?)).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"source bytes");
     }
 
     #[test]
@@ -930,7 +756,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.fits");
         let output = temp.path().join("masked.fits");
-        let mask_path = temp.path().join("mask.fits");
         let (width, height) = (96, 96);
         let mut values = vec![100_u8; width * height];
         for y in 0..16 {
@@ -958,7 +783,7 @@ mod tests {
                 mask[y * width + x] = true;
             }
         }
-        write_products(&output, &mask_path, &image, &mask).unwrap();
+        write_masked_product(&output, &image, &mask).unwrap();
         assert_eq!(
             FitsFile::from_file(&output)
                 .unwrap()
@@ -967,7 +792,7 @@ mod tests {
                 .get_int("BLANK"),
             Some(255)
         );
-        assert!(fs::metadata(&mask_path).unwrap().len() > 0);
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
     }
 
     #[test]
@@ -975,7 +800,6 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let source = t.path().join("source.fits");
         let output = t.path().join("processed.fits");
-        let mask_path = t.path().join("mask.fits");
         let (width, height) = (96, 96);
         let mut original = vec![100_i16; width * height];
         for y in 0..16 {
@@ -1014,7 +838,7 @@ mod tests {
                 mask[y * width + x] = true;
             }
         }
-        write_products(&output, &mask_path, &image, &mask).unwrap();
+        write_masked_product(&output, &image, &mask).unwrap();
 
         let written = FitsFile::from_file(output).unwrap();
         assert_eq!(
@@ -1029,6 +853,5 @@ mod tests {
         };
         assert_eq!(written_pixels[16 * width + 32], original[16 * width + 32]);
         assert_ne!(written_pixels[16 * width + 32], 250);
-        assert!(fs::metadata(mask_path).unwrap().len() > 0);
     }
 }

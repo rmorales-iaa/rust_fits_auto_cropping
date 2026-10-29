@@ -64,15 +64,11 @@ impl OutputLayout {
             sync_parent(&run)?;
             run
         };
-        if flat_output {
-            // Flat mode stores image products at the root. Only the transient
-            // masks directory remains a managed product subdirectory.
-            // Product-level overwrite policy remains controlled by the caller.
-            ensure_plain_directory(&run.join("masks"))?;
-        } else {
-            for name in ["images", "masks"] {
-                fs::create_dir(run.join(name))?;
-            }
+        // Flat mode stores image products at the root; product-level
+        // overwrite policy remains controlled by the caller. No mask sidecar
+        // directory is created: action masks are verified in memory.
+        if !flat_output {
+            fs::create_dir(run.join("images"))?;
         }
         sync_directory(&run)?;
         Ok(Self {
@@ -206,7 +202,6 @@ fn clear_directory_contents(directory: &Path) -> anyhow::Result<()> {
 #[derive(Clone, Copy)]
 pub enum ProductCategory {
     Image,
-    Mask,
     Preview,
     ReasonMask,
 }
@@ -215,7 +210,6 @@ impl ProductCategory {
     fn directory(self) -> &'static str {
         match self {
             Self::Image => "images",
-            Self::Mask => "masks",
             Self::Preview => "previews",
             Self::ReasonMask => "reason_masks",
         }
@@ -322,7 +316,7 @@ mod tests {
                 .unwrap(),
             output.join("runs/20261027T120000000Z/images/night/frame_cropped.fits")
         );
-        assert!(layout.run().join("masks").is_dir());
+        assert!(!layout.run().join("masks").exists());
         assert!(!layout.run().join("previews").exists());
         assert!(!layout.run().join("manifests").exists());
         assert!(layout.preview_path(Path::new("night/frame.fits")).is_ok());

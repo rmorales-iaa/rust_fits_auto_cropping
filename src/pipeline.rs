@@ -12,7 +12,7 @@ use crate::{
     preview::write_crop_preview,
     reason_mask, report,
     workers::effective_worker_count,
-    writer::{write_cropped_products, write_products, write_reason_mask},
+    writer::{write_cropped_product, write_masked_product, write_reason_mask},
 };
 use anyhow::{Context, bail};
 use chrono::Utc;
@@ -552,15 +552,6 @@ fn process_one(
                             return finish(outcome, timer);
                         }
                     };
-                    let mask_path = match layout.product_path(ProductCategory::Mask, rel) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            outcome.status = OutcomeKind::Error;
-                            outcome.reason_code = "output_path_error";
-                            outcome.reason = error.to_string();
-                            return finish(outcome, timer);
-                        }
-                    };
                     let png_path = if options.png_preview && crop_accepted {
                         match layout.preview_path(rel) {
                             Ok(path) => Some(path),
@@ -592,7 +583,6 @@ fn process_one(
                     };
                     if !options.overwrite
                         && (path_exists(&image_path)
-                            || path_exists(&mask_path)
                             || reason_mask_path
                                 .as_ref()
                                 .is_some_and(|path| path_exists(path))
@@ -605,24 +595,12 @@ fn process_one(
                     }
                     let (write_result, has_mask) = if crop_accepted {
                         let region = crop.expect("accepted crop has a region");
-                        let excluded: Vec<bool> = (0..image.width * image.height)
-                            .map(|i| !region.retains(i % image.width, i / image.width))
-                            .collect();
-                        (
-                            write_cropped_products(
-                                &image_path,
-                                &mask_path,
-                                &excluded,
-                                &image,
-                                region,
-                            ),
-                            true,
-                        )
+                        (write_cropped_product(&image_path, &image, region), true)
                     } else if matches!(config.processing.mode, ProcessingMode::Mask)
                         || crop_wcs_mask_fallback
                     {
                         (
-                            write_products(&image_path, &mask_path, &image, &detection.mask),
+                            write_masked_product(&image_path, &image, &detection.mask),
                             true,
                         )
                     } else {
@@ -636,14 +614,6 @@ fn process_one(
                                     outcome.reason_code = "output_cleanup_error";
                                     outcome.reason = format!(
                                         "{e}; could not remove stale image product: {cleanup_error}"
-                                    );
-                                    return finish(outcome, timer);
-                                }
-                                if let Err(cleanup_error) = remove_existing_product(&mask_path) {
-                                    outcome.status = OutcomeKind::Error;
-                                    outcome.reason_code = "output_cleanup_error";
-                                    outcome.reason = format!(
-                                        "{e}; could not remove stale mask product: {cleanup_error}"
                                     );
                                     return finish(outcome, timer);
                                 }
@@ -694,7 +664,6 @@ fn process_one(
                         return finish(outcome, timer);
                     }
                     outcome.output_image = Some(image_path);
-                    outcome.output_mask = has_mask.then_some(mask_path);
                     if let Some(reason_path) = reason_mask_path {
                         let crop_exclusion = crop_accepted.then(|| {
                             let region = crop.expect("accepted crop has a region");
