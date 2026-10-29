@@ -2,6 +2,20 @@
 
 Updated: 2026-10-29, after Revision 3 (v2 default, crop policy, plan review) and the Revision 2 implementation (R0, R1 tools/harness, R2-R4, partial R6), plan Revision 2, large-image remediation and the disputed crop-geometry review.
 
+## Revision 3 follow-up without observatory data (2026-10-29)
+
+- The user said to go ahead but skip tasks that need data access. Done since then:
+  - R1.6 nulls at 2,995 frames per family (v2 0 false alarms per family).
+  - K2 measured: v2 recall 0 on corner glow and light leaks; no rule added.
+  - `tools/shadow_compare.py` (R5.0) and `tools/drift_monitor.py` (R5.2).
+  - Exact R6 speedups: decision-identical; wall time about 2.5x faster on 37.8 Mpx; peak RSS 18-47% lower.
+- The user then asked mid-task that only actually cropped images get crop metadata in the FITS header, with a clear "cropped" marker, so calibration frames can be matched and cropped the same way. Implemented:
+  - cards CROPPED, CROPSEC, ORIGNAX1/2, LTV1/2, CROPUNDF, ORIGSHA, ORIGFILE;
+  - full-frame rectangles become masks;
+  - `tools/apply_crop.py` applies the crop to calibration frames;
+  - DATASEC/TRIMSEC/BIASSEC/CCDSEC are copied unchanged and still refer to original coordinates.
+- Still open and needing data: G4, the shadow sample, yearly re-runs and the 2011 recovery. Without data: a K2 opt-in experiment, numerical R6 options, PIXACT3, and fitsverify (not installable here so far).
+
 ## Revision 3: v2 default, crop policy and plan review (2026-10-29)
 
 - The user asked to make v2 the default, fix the crop limits and push (the first authorised push of branch `claude/eager-galileo-khb8fs`), then review the plan. Decision D5: `detector = "background_v2"` is the default before gate G4. The name `background_v2_experimental` still parses, and `detector = "tile_v1"` reproduces earlier runs. Reports carry `border-detector-v2-background`.

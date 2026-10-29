@@ -465,3 +465,67 @@ Zero in 30 bounds the per-family false-alarm rate at ≤ 9.5% (one-sided 95%); z
 
 99 unit, 33 end-to-end and 4 version tests (7 ignored manual harnesses); strict Clippy and rustfmt clean. 26 Python tests (19 checker, 7 evaluation tools including one new test for `--seed-offset` and `--truth-dir`). The 42 yearly-script checks pass.
 
+## Revision 3 follow-up: work without observatory data (2026-10-29)
+
+Same environment as above. All evidence is synthetic or engineering evidence; G4 remains open.
+
+### Out-of-model nulls at G3a scale (R1.6)
+
+`tools/make_out_of_model_nulls.py OUT 2995 --family F --seed-offset 10000`, 2,995 frames per family, dry run:
+
+| Family | v2 frames with removal | tile_v1 frames with removal |
+| --- | ---: | ---: |
+| cosmic rays (incl. outer-pixel hits) | 0 | 0 |
+| satellite trail | 0 | 0 |
+| saturated edge star with bleed | 0 | 0 |
+| interior hot column | 0 | 0 |
+| crowded edge stars | 0 | 25 (9,440 px) |
+
+Zero in 2,995 bounds each v2 family's false-alarm rate at ≤ 1.0e-3 (one-sided 95%), the same standard as G3a.
+
+### Positive extended artifacts (risk K2)
+
+Labelled families from the same tool (`--family corner_glow --family light_leak --truth-dir`, 200 frames each). Truth: I where the additive excess is ≥ 3σ, Q from 0.5σ to 3σ. Mask mode:
+
+| Family | v2 frames acted / recall | tile_v1 frames acted / recall / precision |
+| --- | --- | --- |
+| corner glow | 0/200 / 0.000 | 146/200 / 0.112 / 1.000 |
+| light leak | 0/200 / 0.000 | 148/200 / 0.227 / 1.000 |
+
+This confirms K2: v2 protects bright, smooth, edge-anchored excess as if it were a source and removes none of it. A single frame cannot separate such an excess from extended astronomical emission cut by the frame edge (the nebulosity null family). Any rule for it must be opt-in and evaluated against the nebulosity and edge-source nulls first. It is not implemented.
+
+### Shadow comparison and drift monitoring tools (R5.0, R5.2)
+
+- `tools/shadow_compare.py`. A 300-repetition simulation (1,200 frames, enriched disagreement strata) showed no detectable bias in the v2 − v1 valid-loss difference, and 95% intervals covered the truth in 90–99% of repetitions. A census reproduces the population ratio exactly, and an unsampled non-empty stratum is refused.
+- Held-out corpus workflow (v2 vs v1, 28 labelled of 72): estimates agree with the full-corpus values within their intervals, and the rollback trigger is not met.
+- `tools/drift_monitor.py`. A per-year baseline from the median of the other years (robust to one drifted year) flagged only the injected drift year. The family-wise false-flag rate on homogeneous years was 2.5–3% (target ≤ 5%).
+
+### Exact performance work (R6, K4)
+
+Speed-only changes, each proven decision-identical:
+- the equivalence digest is unchanged (now covering three tile_v1 variants plus v2, including uncertain and protected counts);
+- 12 run summaries over the development, held-out, int16 and out-of-model corpora in all three modes are identical to the previous build;
+- 72/72 science arrays are byte-identical.
+
+New bit-identity tests cover `PixelEval`, selection-based centring (f32/f64/i16 with NaN, ±0 and ties) and chunked banded distances.
+
+Paired, interleaved release benchmark on 37.8-Mpx float32 frames (dry run, 4 workers, 10 measured runs per build after a warm-up; medians with min–max):
+
+| Frame | Wall time old → new | Read | Detect | Peak RSS |
+| --- | --- | --- | --- | --- |
+| border strip | 5.48 s [5.14–6.67] → 2.23 s [2.19–2.40] | 2.51 → 0.51 s | 2.63 → 1.49 s | 872 → 715 MiB |
+| artifact-free | 3.97 s [3.50–4.49] → 1.52 s [1.50–1.56] | 2.74 → 0.50 s | 1.05 → 0.82 s | 872 → 462 MiB |
+
+The two builds' ranges do not overlap. In mask mode, the product write stage fell from 2.6–3.9 s to 1.6 s: the written file is now re-read and its DATASUM checked once, and samples are compared in their stored type. v2 detection remains slower than tile_v1 (about 0.35 s); K4 is reduced, not closed.
+
+### Crop provenance and calibration cropping
+
+- **Cards.** Cropped products carry `CROPPED`, `CROPSEC`, `ORIGNAX1/2`, `LTV1/2`, `CROPUNDF`, `ORIGSHA` and `ORIGFILE`. The writer verifies them on the on-disk snapshot, and the independent checker verifies them against the source file, including its SHA-256. Uncropped products carry none.
+- **Full-frame rectangles.** A full-frame `crop_masked` rectangle is now written as a mask (`crop_full_frame_mask`).
+- **Calibration tool.** `tools/apply_crop.py` was tested on unsigned int16 bias data (BZERO 32768 preserved; raw samples identical) and on its refusals (size mismatch, uncropped reference, already cropped frame, existing output). Unit tests caught and fixed two defects before release: Astropy dropping BZERO/BSCALE from new HDUs, and an eager underflow in section parsing.
+- **Alignment check.** Applying each held-out crop product's section to its own source frame reproduced the product exactly in 59/59 cases: same section and LTV, and identical samples outside the `CROPUNDF` undefined pixels.
+
+### Test totals
+
+103 unit, 33 end-to-end and 4 version tests (7 ignored manual harnesses); 37 Python tests; 42 yearly-script checks. Strict Clippy and rustfmt are clean.
+

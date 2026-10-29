@@ -111,9 +111,9 @@ The held-out results agree with development within the bootstrap intervals, so t
 
 ### 0R.4 Remaining open items, in dependency order
 
-1. **R5.0 shadow sample and G4.** Needs observatory data access and calibration provenance for `tools/flat_labels.py`. This blocks every release claim and the rollback decision.
-2. **R1.6 scale-up.** Grow to 2,995 frames per out-of-model family, then add the positive-artifact families (K2, K5).
-3. **R6 v2 performance (K4).** Border-band meshes and strided mesh subsampling first, then f32 analysis, weighted memory admission and the G5 benchmark.
+1. **R5.0 shadow sample and G4.** The tools are ready (`tools/shadow_compare.py`, `tools/drift_monitor.py`). Running them needs observatory data access and calibration provenance for `tools/flat_labels.py`. This blocks every release claim and the rollback decision.
+2. **K2 positive extended artifacts.** Measured (v2 recall 0). Any rule is an opt-in experiment, gated on the nebulosity and edge-source nulls. The null part of R1.6 is done (0/2,995 per family).
+3. **R6 numerical options (K4).** Exact work is done (about 2.5x faster end to end). Strided mesh subsampling and border-band evaluation are numerical changes that need the full harness. Weighted memory admission and the G5 workload set remain open.
 4. **Yearly re-runs with v2,** after R5.0. The 2011 tree is incomplete and has to be recovered before it is re-processed.
 5. **Small corners (K3)** after G4 strata are available. **PIXACT3** reason plane; **R3.3 morphology** only if G4 shows holes; **fitsverify** checks in an environment that provides it.
 
@@ -450,7 +450,11 @@ The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = mas
 | R4.4 hybrid products (D2) | done | `--mode crop_masked`; the bounding-box product; independent checker verifies masked interiors. |
 | R4.5 support-based abstention | done (v2) | `reference_support_abstained`; v1 keeps its mask-fraction veto for compatibility. |
 | R5 calibration and promotion | open | Synthetic evidence: G3a met at 256 px (0/2,995 in all seven null families, bound <= 1e-3; 512 px in validation). G3 met for strips and raw stops (recall 1.000, precision >= 0.997), and for pooled valid loss <= 0.1% and per-image <= 1% on the corpus. Flat-divided stop recall is now 0.963-0.966 (>= 0.95) after source-seed validation. Not met: small corners below the minimum mask fraction (a policy gate). G4 needs flat labels and human labels on held-out night groups. v2 became the default by decision D5 (§0R.1); the release claim still waits for G4, and the rollback trigger governs the default. |
-| R6 performance hardening | partial | v2 parallelised and band-limited (37.8 Mpx: 8.3 s to about 2-2.6 s). With v2 as the default this is an accepted regression versus v1 (K4); v2 border-band meshes come first. Border-band v1 evaluation, f32 analysis, weighted memory admission and the full G5 benchmark remain open. |
+| R6 performance hardening | partial | v2 parallelised and band-limited (37.8 Mpx: 8.3 s to about 2-2.6 s). Revision 3 follow-up, exact (decision-identical) work: selection-based read centring, buffered hashing, pixel-grid background evaluators, refit caches, parallel banded distance and single on-disk verification. Paired benchmark: wall 5.48 -> 2.23 s (strip) and 3.97 -> 1.52 s (null), peak RSS -18% / -47%. v2 detection (0.8-1.5 s) is still slower than v1 (K4 reduced, not closed). Numerical options (strided mesh subsampling, border-band evaluation, f32 analysis), weighted memory admission and the full G5 workload set remain open. |
+| R1.6 out-of-model corpus | done for nulls; K2 measured | Five null families at 2,995 frames each: v2 0 false alarms per family (bound <= 1e-3); v1 25/2,995 on crowded edges. Labelled corner glow and light leak: v2 recall 0 (K2 confirmed), v1 0.11-0.23 with precision 1.0. A positive-artifact rule is not implemented; it must be opt-in and pass the nebulosity and edge-source nulls first. |
+| R5.0 shadow comparison | tool done | `tools/shadow_compare.py`: stratified enriched design, Horvitz-Thompson ratio estimates, paired differences, rollback check; simulation-validated. Running it needs observatory data. |
+| R5.2 drift monitoring | tool done | `tools/drift_monitor.py`: per-year rates against the median of other years, exact binomial tests, Holm control; false-flag rate 2.5-3% on homogeneous simulated years. |
+| Crop provenance (user request) | done | Cropped products only: CROPPED, CROPSEC, ORIGNAX1/2, LTV1/2, CROPUNDF, ORIGSHA, ORIGFILE; full-frame rectangles become masks; `tools/apply_crop.py` crops calibration frames identically (59/59 alignment check). |
 
 **Design amendments forced by calibration evidence** (all v2, made while it was opt-in; each reproduced by the harness before and after the fix):
 1. **Second-difference dispersion instead of residual MAD.** Unmodelled vignetting ramps were counted as noise: 155/200 false alarms at 512 px.
