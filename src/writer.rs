@@ -4,6 +4,7 @@ use crate::{crop::CropRect, durability::sync_parent};
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
 use fitskit::{FitsFile, HduData, Header, HeaderValue, Keyword, PixelData};
+use rayon::prelude::*;
 use std::{fs, io::Cursor, path::Path};
 use tempfile::{NamedTempFile, TempDir};
 
@@ -95,8 +96,8 @@ pub fn write_masked_image(
         &mut hdu.header,
         "rust_fits_auto_cropping: border pixels marked undefined",
     );
-    publish_fits_with_raw_header_cards(&output, destination, raw_header_cards)?;
-    verify_masked_file(source, destination, mask, bitpix, blank_value)
+    let written = publish_fits_with_raw_header_cards(output, destination, raw_header_cards)?;
+    verify_masked_file(source, &written, mask, bitpix, blank_value)
 }
 
 /// Publish the dimension-preserving science product for `data_mask`.
@@ -304,12 +305,12 @@ pub fn write_cropped_image(
     {
         bail!("crop rectangle is outside the source image");
     }
-    let before = image.pixels.clone();
+    let source_len = image.pixels.len();
     image.pixels = crop_pixel_data(&image.pixels, width, rect);
     image.axes = vec![rect.width, rect.height];
     let interior_count = match interior {
         Some(interior) => {
-            if interior.mask.len() != before.len() {
+            if interior.mask.len() != source_len {
                 bail!("interior mask dimensions do not match the source");
             }
             apply_crop_interior(&mut image.pixels, width, rect, interior)?
@@ -377,10 +378,11 @@ pub fn write_cropped_image(
         "rust_fits_auto_cropping: selected axis-aligned rectangle".to_owned()
     };
     push_history(&mut hdu.header, &history);
-    publish_fits_with_raw_header_cards(&output, destination, &image_info.raw_header_cards)?;
+    let written =
+        publish_fits_with_raw_header_cards(output, destination, &image_info.raw_header_cards)?;
     verify_cropped_file(
         &image_info.source_fits,
-        destination,
+        &written,
         &expected_pixels,
         region,
         (interior_count > 0).then_some(interior_blank).flatten(),
@@ -543,19 +545,18 @@ fn integer_value_in_range(bitpix: i64, value: i64) -> bool {
     }
 }
 
+/// `check` is the snapshot re-read from disk (DATASUM already verified).
 fn verify_cropped_file(
     original: &FitsFile,
-    destination: &Path,
+    check: &FitsFile,
     expected: &PixelData,
     region: CropRect,
     interior_blank: Option<i64>,
 ) -> anyhow::Result<()> {
     let rect = region.bounds();
-    let check = read_fits_snapshot(destination)?;
     if check.len() != 1 {
         bail!("cropped output does not contain exactly one HDU");
     }
-    check.primary().verify_datasum()?;
     let image = match &check.primary().data {
         HduData::Image(image) => image,
         _ => bail!("cropped output primary HDU is not an image"),
@@ -603,14 +604,17 @@ fn verify_cropped_file(
 }
 
 pub(super) fn publish_fits(file: &FitsFile, destination: &Path) -> anyhow::Result<()> {
-    publish_fits_with_raw_header_cards(file, destination, &[])
+    publish_fits_with_raw_header_cards(file.clone(), destination, &[]).map(|_| ())
 }
 
+/// Serialize with valid checksums, write and fsync, then re-read the written
+/// file once from disk and verify its DATASUM. Returns that on-disk snapshot,
+/// which callers use for their sample and header checks.
 fn publish_fits_with_raw_header_cards(
-    file: &FitsFile,
+    file: FitsFile,
     destination: &Path,
     raw_header_cards: &[RawHeaderCard],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<FitsFile> {
     let parent = destination
         .parent()
         .context("FITS destination has no parent")?;
@@ -618,18 +622,17 @@ fn publish_fits_with_raw_header_cards(
     let bytes = bytes_with_valid_checksum_and_raw_cards(file, raw_header_cards)?;
     fs::write(temp.path(), bytes)?;
     temp.as_file().sync_all()?;
-    read_fits_snapshot(temp.path())?
-        .primary()
-        .verify_datasum()?;
+    let written = read_fits_snapshot(temp.path())?;
+    written.primary().verify_datasum()?;
     temp.persist(destination)
         .map_err(|e| e.error)
         .with_context(|| format!("publishing FITS {}", destination.display()))?;
     sync_parent(destination)?;
-    Ok(())
+    Ok(written)
 }
 
 fn bytes_with_valid_checksum_and_raw_cards(
-    file: &FitsFile,
+    file: FitsFile,
     raw_header_cards: &[RawHeaderCard],
 ) -> anyhow::Result<Vec<u8>> {
     let mut bytes = bytes_with_valid_checksum(file)?;
@@ -670,11 +673,10 @@ fn bytes_with_valid_checksum_and_raw_cards(
 
 /// Stamp checksums over the exact serialized HDU bytes, then verify the FITS
 /// one's-complement invariant before any output is published.
-fn bytes_with_valid_checksum(file: &FitsFile) -> anyhow::Result<Vec<u8>> {
-    if file.len() != 1 {
+fn bytes_with_valid_checksum(mut staged: FitsFile) -> anyhow::Result<Vec<u8>> {
+    if staged.len() != 1 {
         bail!("science and mask outputs must contain exactly one HDU");
     }
-    let mut staged = file.clone();
     for hdu in &mut staged.hdus {
         hdu.header
             .keywords
@@ -753,18 +755,34 @@ pub(super) fn is_structural_or_data_summary(key: &str) -> bool {
         || key.starts_with("ZNAXIS")
 }
 
+/// First index where `bad(written, source, masked)` holds, searched in
+/// parallel; `position_first` keeps the reported index deterministic.
+fn first_violation<T: Copy + Sync>(
+    after: &[T],
+    before: &[T],
+    mask: &[bool],
+    bad: impl Fn(T, T, bool) -> bool + Sync,
+) -> Option<usize> {
+    after
+        .par_iter()
+        .zip(before)
+        .zip(mask)
+        .position_first(|((got, old), masked)| bad(*got, *old, *masked))
+}
+
+/// `check` is the snapshot re-read from disk (DATASUM already verified).
+/// Samples are compared in their stored type: widening to i64/f64 preserves
+/// equality and NaN exactly, so this is the same invariant as before.
 fn verify_masked_file(
     original: &FitsFile,
-    path: &Path,
+    check: &FitsFile,
     mask: &[bool],
     expected_bitpix: i64,
     blank_value: Option<i64>,
 ) -> anyhow::Result<()> {
-    let check = read_fits_snapshot(path)?;
     if check.len() != 1 {
         bail!("written science output does not contain exactly one HDU");
     }
-    check.primary().verify_datasum()?;
     let before = match &original.primary().data {
         HduData::Image(img) => &img.pixels,
         _ => bail!("source primary HDU is not an image"),
@@ -773,50 +791,52 @@ fn verify_masked_file(
         HduData::Image(img) => img,
         _ => bail!("output primary HDU is not an image"),
     };
-    if after_image.bitpix().to_i64() != expected_bitpix || after_image.pixels.len() != mask.len() {
+    if after_image.bitpix().to_i64() != expected_bitpix
+        || after_image.pixels.len() != mask.len()
+        || before.len() != mask.len()
+    {
         bail!("output BITPIX or dimensions changed");
     }
-    if expected_bitpix > 0 {
+    let violation = if expected_bitpix > 0 {
         let blank = blank_value.context("integer output has no BLANK sentinel")?;
         if check.primary().header.get_int("BLANK") != Some(blank) {
             bail!("output BLANK keyword is missing or changed");
         }
-        let before = integer_slice(before)?;
-        let after = integer_slice(&after_image.pixels)?;
-        for (i, ((got, old), rejected)) in after.iter().zip(before).zip(mask).enumerate() {
-            if (*rejected && *got != blank) || (!*rejected && *got != old) {
-                bail!("integer output pixel {i} violates masked/retained-value invariant");
-            }
+        macro_rules! check_integer {
+            ($after:expr, $before:expr) => {
+                first_violation($after, $before, mask, |got, old, masked| {
+                    (masked && i64::from(got) != blank) || (!masked && got != old)
+                })
+            };
         }
+        let found = match (&after_image.pixels, before) {
+            (PixelData::U8(a), PixelData::U8(b)) => check_integer!(a, b),
+            (PixelData::I16(a), PixelData::I16(b)) => check_integer!(a, b),
+            (PixelData::I32(a), PixelData::I32(b)) => check_integer!(a, b),
+            (PixelData::I64(a), PixelData::I64(b)) => check_integer!(a, b),
+            _ => bail!("expected matching integer FITS storage"),
+        };
+        found.map(|i| format!("integer output pixel {i} violates masked/retained-value invariant"))
     } else {
-        let before = float_slice(before)?;
-        let after = float_slice(&after_image.pixels)?;
-        for (i, ((got, old), rejected)) in after.iter().zip(before).zip(mask).enumerate() {
-            if (*rejected && !got.is_nan())
-                || (!*rejected && *got != old && !(got.is_nan() && old.is_nan()))
-            {
-                bail!("floating output pixel {i} violates masked/retained-value invariant");
-            }
+        macro_rules! check_float {
+            ($after:expr, $before:expr) => {
+                first_violation($after, $before, mask, |got, old, masked| {
+                    (masked && !got.is_nan())
+                        || (!masked && got != old && !(got.is_nan() && old.is_nan()))
+                })
+            };
         }
+        let found = match (&after_image.pixels, before) {
+            (PixelData::F32(a), PixelData::F32(b)) => check_float!(a, b),
+            (PixelData::F64(a), PixelData::F64(b)) => check_float!(a, b),
+            _ => bail!("expected matching floating FITS storage"),
+        };
+        found.map(|i| format!("floating output pixel {i} violates masked/retained-value invariant"))
+    };
+    if let Some(message) = violation {
+        bail!(message);
     }
     Ok(())
-}
-
-fn integer_slice(pixels: &PixelData) -> anyhow::Result<Vec<i64>> {
-    Ok(match pixels {
-        PixelData::U8(v) => v.iter().map(|&x| i64::from(x)).collect(),
-        PixelData::I16(v) => v.iter().map(|&x| i64::from(x)).collect(),
-        PixelData::I32(v) => v.iter().map(|&x| i64::from(x)).collect(),
-        PixelData::I64(v) => v.clone(),
-        _ => bail!("expected integer FITS storage"),
-    })
-}
-fn float_slice(pixels: &PixelData) -> anyhow::Result<Vec<f64>> {
-    Ok(match pixels {
-        PixelData::F32(v) => v.iter().map(|&x| f64::from(x)).collect(),
-        PixelData::F64(v) => v.clone(),
-        _ => bail!("expected floating FITS storage"),
-    })
 }
 
 #[cfg(test)]
