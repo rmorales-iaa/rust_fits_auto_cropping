@@ -88,9 +88,11 @@ pub(super) fn process_decoded(
         outcome.reason.push_str("; ");
         outcome.reason.push_str(&plan.note);
     }
+    let mut global_row_step = 0;
     if let Some(search) = plan.search {
         outcome.crop_search_candidates = search.candidates_examined;
         outcome.crop_search_step_px = search.pixel_step;
+        global_row_step = search.global_row_step;
     }
     if let Some(candidate) = plan.candidate {
         outcome.crop_residual_artifact_fraction = candidate.residual_artifact_fraction;
@@ -100,7 +102,7 @@ pub(super) fn process_decoded(
         let rect = candidate.rect;
         let limit = rules.crop_sacrifice_limit(detection.accepted_components);
         outcome.reason.push_str(&format!(
-            "; rectangle candidate origin ({}, {}), bounds {}x{}: retains {} flagged pixels ({:.2}% of crop; limit {:.2}%) and sacrifices {} unflagged pixels ({:.1}% of remaining defined area; limit {:.1}% for {} accepted border-connected area(s)); utility {:.4}; search evaluated {} rectangles at {} px step; {}",
+            "; rectangle candidate origin ({}, {}), bounds {}x{}: retains {} flagged pixels ({:.2}% of crop; limit {:.2}%) and sacrifices {} unflagged pixels ({:.1}% of remaining defined area; limit {:.1}% for {} accepted border-connected area(s)); utility {:.4}; search evaluated {} rectangles (anchor family at {} px step; global family row step {} px); {}",
             rect.x, rect.y, rect.width, rect.height,
             candidate.retained_artifact_pixels,
             100.0 * candidate.residual_artifact_fraction,
@@ -112,6 +114,7 @@ pub(super) fn process_decoded(
             candidate.net_utility,
             outcome.crop_search_candidates,
             outcome.crop_search_step_px,
+            global_row_step,
             match (plan.crop_rejected, plan.kind) {
                 (false, _) => "accepted".to_owned(),
                 (true, ActionKind::Keep) => "rejected; source retained".to_owned(),

@@ -170,3 +170,49 @@ fn equivalence_harness() {
         );
     }
 }
+
+#[test]
+#[ignore = "manual crop-search timing on a 7100x5325 circular field"]
+fn crop_search_timing() {
+    let (w, h) = (7100usize, 5325usize);
+    let (cx, cy, r) = (3550.0, 2662.0, 2500.0);
+    let mut flags = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let d = ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
+            flags[y * w + x] = d > r;
+        }
+    }
+    let undefined = vec![false; w * h];
+    let anchor = largest_clean_region(&flags, w, h).unwrap();
+    for rho in [0.0, 0.05] {
+        let t = std::time::Instant::now();
+        let result = residual_tolerant_rectangle(
+            &flags,
+            &undefined,
+            w,
+            h,
+            anchor,
+            CropPolicy {
+                maximum_residual_artifact_fraction: rho,
+                maximum_unmasked_sacrifice_fraction: 1.0,
+                evidence_ratio: 5.0,
+                valid_pixel_loss_cost: 1.5,
+                minimum_net_utility: 0.0,
+                exchange_rate: None,
+                mask_retained_flags: false,
+            },
+        )
+        .unwrap();
+        let c = result.accepted.unwrap_or(result.proposed);
+        println!(
+            "CROP rho={rho} seconds={:.3} anchor_area={} area={} rect={:?} examined={} row_step={}",
+            t.elapsed().as_secs_f64(),
+            anchor.area(),
+            c.rect.area(),
+            c.rect,
+            result.candidates_examined,
+            result.global_row_step
+        );
+    }
+}

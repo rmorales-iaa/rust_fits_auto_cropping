@@ -1,5 +1,7 @@
 //! Deterministic largest axis-aligned rectangle that excludes all proposed artifacts.
 
+mod global_search;
+
 const MAX_RESIDUAL_CROP_CANDIDATES: usize = 100_000;
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +39,8 @@ pub struct CropSearchResult {
     pub proposed: CropCandidate,
     pub candidates_examined: usize,
     pub pixel_step: usize,
+    /// Row-grid step of the global search family (1 = exact row sweep).
+    pub global_row_step: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,30 +92,18 @@ pub fn residual_tolerant_rectangle(
         return None;
     }
 
-    let defined_pixels = undefined_mask
-        .iter()
-        .filter(|undefined| !**undefined)
-        .count();
-    let total_artifacts = artifact_mask
-        .iter()
-        .zip(undefined_mask)
-        .filter(|(artifact, undefined)| **artifact && !**undefined)
-        .count();
-    let (artifact_prefix, undefined_prefix) =
-        build_prefix_counts(artifact_mask, undefined_mask, width, height)?;
+    let ctx = SearchContext::new(artifact_mask, undefined_mask, width, height, policy)?;
     let stride = choose_search_stride(clean_anchor, width, height);
     let left_offsets = expansion_offsets(clean_anchor.x, stride);
     let top_offsets = expansion_offsets(clean_anchor.y, stride);
     let right_offsets = expansion_offsets(width - clean_anchor.x - clean_anchor.width, stride);
     let bottom_offsets = expansion_offsets(height - clean_anchor.y - clean_anchor.height, stride);
-    let candidates_examined = left_offsets
+    let mut candidates_examined = left_offsets
         .len()
         .saturating_mul(top_offsets.len())
         .saturating_mul(right_offsets.len())
         .saturating_mul(bottom_offsets.len());
-    let mut best_residual: Option<CropCandidate> = None;
-    let mut best_accepted: Option<CropCandidate> = None;
-    let prefix_width = width + 1;
+    let mut best = Best::default();
 
     for &left in &left_offsets {
         for &top in &top_offsets {
@@ -123,79 +115,163 @@ pub fn residual_tolerant_rectangle(
                         width: clean_anchor.width + left + right,
                         height: clean_anchor.height + top + bottom,
                     };
-                    let area = rect.area();
-                    let undefined = prefix_rect_sum(&undefined_prefix, prefix_width, rect);
-                    if undefined != 0 {
-                        continue;
-                    }
-                    let retained_artifact_pixels =
-                        prefix_rect_sum(&artifact_prefix, prefix_width, rect);
-                    let residual_artifact_fraction = retained_artifact_pixels as f64 / area as f64;
-                    if residual_artifact_fraction > policy.maximum_residual_artifact_fraction {
-                        continue;
-                    }
-                    let excluded_artifact_pixels = total_artifacts - retained_artifact_pixels;
-                    // Every sample inside the crop occupies area, including
-                    // tolerated flags; remove those and excluded flags to get
-                    // the number of defined unflagged samples sacrificed.
-                    let sacrificed_valid_pixels = defined_pixels
-                        .saturating_sub(area)
-                        .saturating_sub(excluded_artifact_pixels);
-                    let removed_artifact_pixels = if policy.mask_retained_flags {
-                        total_artifacts
-                    } else {
-                        excluded_artifact_pixels
-                    };
-                    let sacrifice_denominator = defined_pixels
-                        .saturating_sub(removed_artifact_pixels)
-                        .max(1);
-                    let sacrifice_fraction =
-                        sacrificed_valid_pixels as f64 / sacrifice_denominator as f64;
-                    let valid_loss_fraction =
-                        sacrificed_valid_pixels as f64 / defined_pixels.max(1) as f64;
-                    let artifact_benefit = removed_artifact_pixels as f64
-                        / defined_pixels.max(1) as f64
-                        * policy.evidence_ratio;
-                    let valid_pixel_loss = policy.valid_pixel_loss_cost * valid_loss_fraction
-                        / (1.0 - valid_loss_fraction).max(f64::EPSILON);
-                    let candidate = CropCandidate {
-                        rect,
-                        retained_artifact_pixels,
-                        removed_artifact_pixels,
-                        sacrificed_valid_pixels,
-                        residual_artifact_fraction,
-                        sacrifice_fraction,
-                        artifact_benefit,
-                        valid_pixel_loss,
-                        net_utility: artifact_benefit - valid_pixel_loss,
-                    };
-                    if best_residual.is_none_or(|best| candidate_is_better(candidate, best)) {
-                        best_residual = Some(candidate);
-                    }
-                    let exchange_ok = policy.exchange_rate.is_none_or(|rate| {
-                        sacrificed_valid_pixels as f64 <= rate * removed_artifact_pixels as f64
-                    });
-                    if sacrifice_fraction <= policy.maximum_unmasked_sacrifice_fraction
-                        && candidate.net_utility >= policy.minimum_net_utility
-                        && exchange_ok
-                        && best_accepted.is_none_or(|best| candidate_is_better(candidate, best))
-                    {
-                        best_accepted = Some(candidate);
+                    if let Some(candidate) = ctx.evaluate(rect) {
+                        best.offer(candidate, ctx.accepts(&candidate));
                     }
                 }
             }
         }
     }
+    // Plan R4.2: also search rectangles that need not contain the anchor and
+    // keep the better feasible result, so this can never return a smaller crop
+    // than the anchor family alone.
+    let global = global_search::search(&ctx, &mut best);
+    candidates_examined = candidates_examined.saturating_add(global.candidates_examined);
 
     Some(CropSearchResult {
-        accepted: best_accepted,
-        proposed: best_residual?,
+        accepted: best.accepted,
+        proposed: best.residual?,
         candidates_examined,
         pixel_step: stride,
+        global_row_step: global.row_step,
     })
 }
 
-fn candidate_is_better(candidate: CropCandidate, best: CropCandidate) -> bool {
+/// Best residual-feasible and best fully accepted candidates seen so far.
+#[derive(Default)]
+pub(crate) struct Best {
+    pub residual: Option<CropCandidate>,
+    pub accepted: Option<CropCandidate>,
+}
+
+impl Best {
+    pub fn offer(&mut self, candidate: CropCandidate, accepted: bool) {
+        if self
+            .residual
+            .is_none_or(|best| candidate_is_better(candidate, best))
+        {
+            self.residual = Some(candidate);
+        }
+        if accepted
+            && self
+                .accepted
+                .is_none_or(|best| candidate_is_better(candidate, best))
+        {
+            self.accepted = Some(candidate);
+        }
+    }
+}
+
+/// Summed-area counts and policy shared by all candidate families.
+pub(crate) struct SearchContext {
+    pub artifact_prefix: Vec<u32>,
+    pub undefined_prefix: Vec<u32>,
+    pub width: usize,
+    pub height: usize,
+    defined_pixels: usize,
+    total_artifacts: usize,
+    pub policy: CropPolicy,
+}
+
+impl SearchContext {
+    fn new(
+        artifact_mask: &[bool],
+        undefined_mask: &[bool],
+        width: usize,
+        height: usize,
+        policy: CropPolicy,
+    ) -> Option<Self> {
+        let defined_pixels = undefined_mask
+            .iter()
+            .filter(|undefined| !**undefined)
+            .count();
+        let total_artifacts = artifact_mask
+            .iter()
+            .zip(undefined_mask)
+            .filter(|(artifact, undefined)| **artifact && !**undefined)
+            .count();
+        let (artifact_prefix, undefined_prefix) =
+            build_prefix_counts(artifact_mask, undefined_mask, width, height)?;
+        Some(Self {
+            artifact_prefix,
+            undefined_prefix,
+            width,
+            height,
+            defined_pixels,
+            total_artifacts,
+            policy,
+        })
+    }
+
+    pub fn flags_in(&self, rect: CropRect) -> usize {
+        prefix_rect_sum(&self.artifact_prefix, self.width + 1, rect)
+    }
+
+    pub fn undefined_in(&self, rect: CropRect) -> usize {
+        prefix_rect_sum(&self.undefined_prefix, self.width + 1, rect)
+    }
+
+    /// Candidate metrics, or `None` when the rectangle contains an originally
+    /// undefined sample or exceeds the residual flagged fraction.
+    pub fn evaluate(&self, rect: CropRect) -> Option<CropCandidate> {
+        let area = rect.area();
+        if area == 0 || self.undefined_in(rect) != 0 {
+            return None;
+        }
+        let retained_artifact_pixels = self.flags_in(rect);
+        let residual_artifact_fraction = retained_artifact_pixels as f64 / area as f64;
+        if residual_artifact_fraction > self.policy.maximum_residual_artifact_fraction {
+            return None;
+        }
+        let policy = self.policy;
+        let defined_pixels = self.defined_pixels;
+        let excluded_artifact_pixels = self.total_artifacts - retained_artifact_pixels;
+        // Every sample inside the crop occupies area, including tolerated
+        // flags; remove those and excluded flags to get the number of defined
+        // unflagged samples sacrificed.
+        let sacrificed_valid_pixels = defined_pixels
+            .saturating_sub(area)
+            .saturating_sub(excluded_artifact_pixels);
+        let removed_artifact_pixels = if policy.mask_retained_flags {
+            self.total_artifacts
+        } else {
+            excluded_artifact_pixels
+        };
+        let sacrifice_denominator = defined_pixels
+            .saturating_sub(removed_artifact_pixels)
+            .max(1);
+        let sacrifice_fraction = sacrificed_valid_pixels as f64 / sacrifice_denominator as f64;
+        let valid_loss_fraction = sacrificed_valid_pixels as f64 / defined_pixels.max(1) as f64;
+        let artifact_benefit =
+            removed_artifact_pixels as f64 / defined_pixels.max(1) as f64 * policy.evidence_ratio;
+        let valid_pixel_loss = policy.valid_pixel_loss_cost * valid_loss_fraction
+            / (1.0 - valid_loss_fraction).max(f64::EPSILON);
+        Some(CropCandidate {
+            rect,
+            retained_artifact_pixels,
+            removed_artifact_pixels,
+            sacrificed_valid_pixels,
+            residual_artifact_fraction,
+            sacrifice_fraction,
+            artifact_benefit,
+            valid_pixel_loss,
+            net_utility: artifact_benefit - valid_pixel_loss,
+        })
+    }
+
+    /// Sacrifice, utility and optional exchange-rate gates.
+    pub fn accepts(&self, candidate: &CropCandidate) -> bool {
+        let policy = self.policy;
+        candidate.sacrifice_fraction <= policy.maximum_unmasked_sacrifice_fraction
+            && candidate.net_utility >= policy.minimum_net_utility
+            && policy.exchange_rate.is_none_or(|rate| {
+                candidate.sacrificed_valid_pixels as f64
+                    <= rate * candidate.removed_artifact_pixels as f64
+            })
+    }
+}
+
+pub(crate) fn candidate_is_better(candidate: CropCandidate, best: CropCandidate) -> bool {
     candidate.rect.area() > best.rect.area()
         || (candidate.rect.area() == best.rect.area()
             && (candidate.retained_artifact_pixels < best.retained_artifact_pixels
