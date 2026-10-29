@@ -1,25 +1,59 @@
-# Derived science data and activity logs
-/output/
-# Build artifacts
+# Rust build outputs and generated build metadata
 /target/
-# Local observations; create deterministic test fixtures in tests at runtime
+/build_support/version.rs
+*.rs.bk
+
+# Runtime products, reports, local build state, and activity logs
+/output/
+/logs/
+/activity_*.jsonl
+
+# Local observation data. Keep all FITS science inputs out of Git.
 /input/data/
 *.fits
 *.fit
 *.fts
 *.fits.gz
 *.fit.gz
+*.fts.gz
+*.fits.fz
+*.fit.fz
+*.fts.fz
 *.fz
+
 # Local-only configuration and credentials
 /input/*.local.toml
 .env
 .env.*
 !.env.example
+!.env.sample
 *.pem
 *.key
-# Editor and Python caches
-.DS_Store
-*.swp
+*.p12
+*.pfx
+
+# Python environments, caches, coverage, and profiling output
+.venv/
+venv/
 __pycache__/
 .pytest_cache/
-.venv/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.profraw
+*.profdata
+
+# Editor, operating-system, and temporary files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
+*.orig
+*.rej
