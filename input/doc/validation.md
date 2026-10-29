@@ -533,3 +533,13 @@ The two builds' ranges do not overlap. In mask mode, the product write stage fel
 
 103 unit, 33 end-to-end and 4 version tests (7 ignored manual harnesses); 37 Python tests; 42 yearly-script checks. Strict Clippy and rustfmt are clean.
 
+## Verbatim product headers with MO_ provenance (2026-10-29)
+
+At the user's request, products keep the source header as it was. The only exceptions are the NAXIS adaptation and, by the user's choice, the CRPIX shift, so the WCS stays correct. All program information is in `MO_` keywords. Evidence:
+
+- **Unit tests.** Card formatting round trips (floats including subnormals). Assembly edits only the allowed cards and inserts BLANK after NAXISn. The verifier rejects a changed preserved card. Finished HDUs parse with valid DATASUM. MO_ composition handles re-crops and masks of crops. An end-to-end writer test with a value-style HISTORY, an odd-spaced CRPIX, a quoted apostrophe and source DATE/CREATOR/DATAMIN shows every source card copied byte for byte (mask) or with only NAXIS1 and CRPIX1 changed (crop).
+- **Pipeline runs.** On the held-out float32 and int16 corpora in mask, crop and crop_masked modes, the strict checker passes: byte-for-byte source cards in order, allowed edits only, MO_ values including MO_SHA against the source file, samples, WCS and fitsverify. Astropy verifies every product's CHECKSUM and DATASUM with warnings treated as errors. A tampered preserved card is rejected by the checker.
+- **CHECKSUM layout.** Astropy re-renders the CHECKSUM card with its comment slash in column 32 when verifying. Writing it in that conventional layout was required for Astropy-compatible checksums; fitsverify accepted both layouts.
+- **Calibration frames.** `tools/apply_crop.py` (byte-level copy, canonical checksum encoding identical to Astropy's in 2,000/2,000 random values) reproduced 59/59 held-out crops exactly, and all 59 outputs pass fitsverify.
+- **Write time.** Products no longer clone and re-serialize the image. Crop-mode write on the 37.8-Mpx frame fell from about 2.0 s to 0.9 s.
+

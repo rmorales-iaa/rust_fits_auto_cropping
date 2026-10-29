@@ -14,10 +14,10 @@ from tools.apply_crop import main
 
 def reference(path: Path, section: str = "[3:8,2:6]", size: tuple[int, int] = (10, 7)) -> None:
     header = fits.Header()
-    header["CROPPED"] = True
-    header["CROPSEC"] = section
-    header["ORIGNAX1"], header["ORIGNAX2"] = size
-    header["ORIGSHA"] = "f" * 64
+    header["MO_CROP"] = True
+    header["MO_SEC"] = section
+    header["MO_ONAX1"], header["MO_ONAX2"] = size
+    header["MO_SHA"] = "f" * 64
     fits.PrimaryHDU(np.zeros((5, 6), dtype=np.float32), header=header).writeto(path)
 
 
@@ -43,8 +43,10 @@ class ApplyCropTests(unittest.TestCase):
         hdu.header["BSCALE"] = 1
         hdu.header["CRPIX1"], hdu.header["CRPIX2"], hdu.header["CRPIX1A"] = 5.0, 4.0, 2.5
         hdu.header["LTV1"] = -1.0
+        hdu.header["DATE"] = ("2007-01-11T20:23:31", "original date")
         bias = self.root / "bias.fits"
         hdu.writeto(bias)
+        source_cards = [bias.read_bytes()[i : i + 80] for i in range(0, 2880, 80)]
         before = bias.read_bytes()
         self.assertEqual(self.run_tool(bias), 0)
         self.assertEqual(bias.read_bytes(), before)  # input untouched
@@ -54,13 +56,20 @@ class ApplyCropTests(unittest.TestCase):
             self.assertEqual(data.dtype, np.dtype(">i2"))
             self.assertTrue(np.array_equal(data, raw[1:6, 2:8]))
             self.assertEqual(header["BZERO"], 32768)
-            self.assertIs(header["CROPPED"], True)
-            self.assertEqual(header["CROPSEC"], "[3:8,2:6]")
-            self.assertEqual((header["ORIGNAX1"], header["ORIGNAX2"]), (10, 7))
+            self.assertIs(header["MO_CROP"], True)
+            self.assertEqual(header["MO_SEC"], "[3:8,2:6]")
+            self.assertEqual((header["MO_ONAX1"], header["MO_ONAX2"]), (10, 7))
+            self.assertEqual((header["MO_X0"], header["MO_Y0"]), (2, 1))
             self.assertEqual((header["CRPIX1"], header["CRPIX2"], header["CRPIX1A"]), (3.0, 3.0, 0.5))
-            self.assertEqual((header["LTV1"], header["LTV2"]), (-3.0, -1.0))
-            self.assertEqual(header["CROPREF"], "f" * 64)
-            self.assertEqual(len(header["ORIGSHA"]), 64)
+            self.assertEqual(header["LTV1"], -3.0)
+            self.assertNotIn("LTV2", header)  # LTV is shifted only where it exists
+            self.assertEqual(header["MO_REF"], "f" * 64)
+            self.assertEqual(len(header["MO_SHA"]), 64)
+        # Unedited source cards are byte-identical and in the same order.
+        out_raw = out.read_bytes()
+        out_cards = [out_raw[i : i + 80] for i in range(0, 2880, 80)]
+        unedited = lambda c: not c.startswith((b"NAXIS1 ", b"NAXIS2 ", b"CRPIX", b"LTV", b"MO_", b"CHECKSUM", b"DATASUM", b"END", b" " * 8))
+        self.assertEqual([c for c in source_cards if unedited(c)], [c for c in out_cards if unedited(c)])
         # A second run refuses to replace the output without --overwrite.
         self.assertEqual(self.run_tool(bias), 2)
         self.assertEqual(self.run_tool(bias, overwrite=True), 0)
@@ -77,7 +86,7 @@ class ApplyCropTests(unittest.TestCase):
         )
         done = self.root / "done.fits"
         cropped = fits.PrimaryHDU(np.ones((7, 10), dtype=np.float32))
-        cropped.header["CROPPED"] = True
+        cropped.header["MO_CROP"] = True
         cropped.writeto(done)
         self.assertEqual(self.run_tool(done), 2)
 

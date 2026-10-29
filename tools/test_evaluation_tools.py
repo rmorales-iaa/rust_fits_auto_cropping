@@ -72,8 +72,8 @@ class ReconstructionTests(unittest.TestCase):
             crop = source[1:4, 2:5].copy()
             crop[0, 0] = np.nan  # interior masked sample
             hdu = fits.PrimaryHDU(crop)
-            hdu.header["CLIPX0"] = 2
-            hdu.header["CLIPY0"] = 1
+            hdu.header["MO_X0"] = 2
+            hdu.header["MO_Y0"] = 1
             hdu.writeto(root / "crop.fits")
             excluded = excluded_mask(root / "src.fits", root / "crop.fits")
             self.assertFalse(excluded[0, 0])  # originally undefined: not new loss

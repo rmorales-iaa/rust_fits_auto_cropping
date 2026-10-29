@@ -223,24 +223,26 @@ fn float_mask_and_reports_preserve_headers_and_retained_pixels() {
     assert!(matches!(&img.pixels,PixelData::F64(v) if v[0].is_nan() && v[95*96+95]==100.0));
     assert_eq!(f.primary().header.get_string("OBJECT"), Some("test-field"));
     assert_eq!(f.primary().header.get_string("BUNIT"), Some("adu"));
-    assert_eq!(f.primary().header.get_float("DATAMIN"), None);
-    assert_eq!(f.primary().header.get_float("DATAMAX"), None);
+    // Source cards are kept as they were (DATAMIN/DATAMAX remain valid
+    // bounds); provenance goes into MO_ cards only.
+    assert_eq!(f.primary().header.get_float("DATAMIN"), Some(0.0));
+    assert_eq!(f.primary().header.get_float("DATAMAX"), Some(100.0));
+    assert_eq!(f.primary().header.get_string("CREATOR"), None);
     assert!(
         f.primary()
             .header
-            .get_string("CREATOR")
+            .get_string("MO_PROG")
             .unwrap()
             .contains(env!("RUST_FITS_AUTO_CROPPING_VERSION"))
     );
-    let product_date = f.primary().header.get_string("DATE").unwrap();
+    assert_eq!(f.primary().header.get_string("MO_ACT"), Some("mask"));
+    assert_eq!(f.primary().header.get_bool("MO_CROP"), Some(false));
+    let product_date = f.primary().header.get_string("MO_DATE").unwrap();
     assert!(product_date.len() >= 19 && product_date.contains('T'));
-    assert!(f.primary().header.iter().any(|card| {
-        card.name == "HISTORY"
-            && card
-                .comment
-                .as_deref()
-                .is_some_and(|value| value.contains("generated_utc="))
-    }));
+    assert!(
+        !f.primary().header.iter().any(|card| card.name == "HISTORY"
+            && card.comment.as_deref() != Some("original-history-entry"))
+    );
     assert!(f.primary().verify_datasum().is_ok());
     assert!(!run_dir(&output).join("masks").exists());
     assert!(!run_dir(&output).join("reason_masks").exists());
@@ -687,27 +689,28 @@ fn crop_mode_writes_maximal_clean_rectangle_for_single_side_and_shifts_reference
         crop_height as i64
     );
     assert_eq!(
-        cropped.primary().header.get_int("CLIPX0"),
+        cropped.primary().header.get_int("MO_X0"),
         Some(crop_x as i64)
     );
     assert_eq!(
-        cropped.primary().header.get_int("CLIPY0"),
+        cropped.primary().header.get_int("MO_Y0"),
         Some(crop_y as i64)
     );
     // Crop provenance for applying the same crop to calibration frames.
     let header = &cropped.primary().header;
-    assert_eq!(header.get_bool("CROPPED"), Some(true));
-    assert_eq!(header.get_string("CROPSEC"), Some("[1:96,17:96]"));
-    assert_eq!(header.get_int("ORIGNAX1"), Some(width as i64));
-    assert_eq!(header.get_int("ORIGNAX2"), Some(height as i64));
-    assert_eq!(header.get_float("LTV1"), Some(-(crop_x as f64)));
-    assert_eq!(header.get_float("LTV2"), Some(-(crop_y as f64)));
-    assert_eq!(header.get_int("CROPUNDF"), Some(0));
-    assert_eq!(header.get_string("ORIGFILE"), Some("four-corners.fits"));
+    assert_eq!(header.get_bool("MO_CROP"), Some(true));
+    assert_eq!(header.get_string("MO_ACT"), Some("crop"));
+    assert_eq!(header.get_string("MO_SEC"), Some("[1:96,17:96]"));
+    assert_eq!(header.get_int("MO_ONAX1"), Some(width as i64));
+    assert_eq!(header.get_int("MO_ONAX2"), Some(height as i64));
+    // LTV is never added; only an existing LTV would be shifted.
+    assert_eq!(header.get_float("LTV1"), None);
+    assert_eq!(header.get_int("MO_UNDF"), Some(0));
+    assert_eq!(header.get_string("MO_FILE"), Some("four-corners.fits"));
     {
         use sha2::{Digest, Sha256};
         let digest = format!("{:x}", Sha256::digest(fs::read(&input_path).unwrap()));
-        assert_eq!(header.get_string("ORIGSHA"), Some(digest.as_str()));
+        assert_eq!(header.get_string("MO_SHA"), Some(digest.as_str()));
     }
     assert_eq!(
         cropped.primary().header.get_float("CRPIX1"),
@@ -827,10 +830,10 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
     assert!(product_path(&output, "images", "circular-field_cropped.fits").exists());
     assert!(!run_dir(&output).join("images/circular-field.fits").exists());
     let header = &cropped.primary().header;
-    assert_eq!(header.get_string("CLIPSHAP"), Some("RECTANGLE"));
+    assert_eq!(header.get_bool("MO_CROP"), Some(true));
     assert!(header.get_float("CLIPRAD").is_none());
-    let x0 = header.get_int("CLIPX0").unwrap() as usize;
-    let y0 = header.get_int("CLIPY0").unwrap() as usize;
+    let x0 = header.get_int("MO_X0").unwrap() as usize;
+    let y0 = header.get_int("MO_Y0").unwrap() as usize;
     let before = match &original.primary().data {
         HduData::Image(img) => match &img.pixels {
             PixelData::I16(v) => v,
@@ -959,7 +962,7 @@ fn crop_mode_keeps_source_when_valid_pixel_loss_dominates() {
     let kept = FitsFile::from_file(product_path(&output, "images", "four-corners.fits")).unwrap();
     assert_eq!(kept.primary().header.require_int("NAXIS1").unwrap(), 96);
     assert_eq!(kept.primary().header.require_int("NAXIS2").unwrap(), 96);
-    assert_eq!(kept.primary().header.get_int("CLIPX0"), None);
+    assert_eq!(kept.primary().header.get_int("MO_X0"), None);
     assert!(
         fs::symlink_metadata(product_path(&output, "images", "four-corners.fits"))
             .unwrap()
@@ -1605,7 +1608,7 @@ fn bbox_fallback_crops_to_retained_support_and_masks_remaining_flags() {
         let header = &product.primary().header;
         assert_eq!(header.require_int("NAXIS1").unwrap(), 80);
         assert_eq!(header.require_int("NAXIS2").unwrap(), 96);
-        assert_eq!(header.get_int("CLIPX0"), Some(16));
+        assert_eq!(header.get_int("MO_X0"), Some(16));
         assert_eq!(header.get_float("CRPIX1"), Some(48.5 - 16.0));
         product.primary().verify_datasum().unwrap();
         let HduData::Image(data) = &product.primary().data else {
@@ -1673,9 +1676,7 @@ fn crop_masked_full_frame_rectangle_is_written_as_a_mask() {
     assert_eq!(record["crop_artifact_pixels_retained"], 0);
     assert_eq!(record["unmasked_pixels_sacrificed"], 0);
     let product = FitsFile::from_file(product_path(&output, "images", "strip.fits")).unwrap();
-    for key in [
-        "CROPPED", "CROPSEC", "ORIGNAX1", "LTV1", "ORIGSHA", "CLIPX0",
-    ] {
+    for key in ["MO_SEC", "MO_ONAX1", "MO_X0", "LTV1"] {
         assert!(
             product.primary().header.find(key).is_none(),
             "{key} on an uncropped product"

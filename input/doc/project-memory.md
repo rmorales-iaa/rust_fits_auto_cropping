@@ -2,6 +2,17 @@
 
 Updated: 2026-10-29, after Revision 3 (v2 default, crop policy, plan review) and the Revision 2 implementation (R0, R1 tools/harness, R2-R4, partial R6), plan Revision 2, large-image remediation and the disputed crop-geometry review.
 
+## Product header rule (2026-10-29, user request)
+
+- The user asked that the FITS header be kept as it was, except the NAXIS adaptation, and that program cards use an `mo_` prefix. FITS keywords must be uppercase, so the prefix is `MO_`.
+- The user chose to keep the CRPIX shift so the WCS stays correct, and to put MO_ cards on all products, with cropped images identified by `MO_CROP = T`.
+- Implemented in `src/writer/product_header.rs`:
+  - verbatim 80-byte source cards (captured from the hashed read);
+  - edits limited to NAXIS1/2, CRPIX*, existing LTV1/2, a needed BLANK and CHECKSUM/DATASUM;
+  - MO_ACT, MO_CROP, MO_SEC, MO_ONAX1/2, MO_X0/Y0, MO_UNDF, MO_ALGO, MO_PROG, MO_DATE, MO_SHA, MO_FILE.
+- CREATOR/DATE/HISTORY and DATAMIN/DATAMAX are no longer written or removed. The CHECKSUM card uses the conventional layout because Astropy re-renders it when verifying.
+- `tools/apply_crop.py` follows the same rule at the byte level.
+
 ## Revision 3 follow-up without observatory data (2026-10-29)
 
 - The user said to go ahead but skip tasks that need data access. Done since then:

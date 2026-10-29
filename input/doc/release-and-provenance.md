@@ -10,11 +10,13 @@ At the 2026-10-27 deep review, the package metadata was `0.1.0`, release executa
 
 ## Product provenance
 
-Every newly serialized science image, crop, or mask receives:
+Every generated science product copies the source primary header card for card (original 80-byte images) and adds `MO_` cards:
 
-- `CREATOR`: package name and compiled application version.
-- `DATE`: UTC product creation time in FITS ISO date/time form.
-- `HISTORY`: UTC timestamp with fractional seconds and the program/version.
+- `MO_PROG`: package name and compiled application version.
+- `MO_DATE`: UTC product creation time (ISO 8601, milliseconds).
+- `MO_ACT`, `MO_CROP`, `MO_UNDF`, `MO_ALGO`, `MO_SHA`, `MO_FILE`, and for crops `MO_SEC`, `MO_ONAX1/2`, `MO_X0/Y0` (see the README).
+
+Source `DATE`, `CREATOR` and `HISTORY` cards are never overwritten. The only edited source cards are `NAXIS1/2`, `CRPIX*`, existing `LTV1/2`, `BLANK` when integer samples are newly undefined, and `CHECKSUM`/`DATASUM`. The transient reason plane (built, verified and removed) still uses `CREATOR`/`DATE`/`HISTORY`.
 
 The run-start log and version-9 JSON summary store program/version, algorithm/policy IDs, Git revision/dirty state, executable SHA-256 and source/effective configuration hashes. Per-image reports store SHA-256 for exact source bytes read through the parsed file handle. Reports include a stable `reason_code` and C/A/E/U0 set intersections. Science and mask products are encoded and verified in sibling staging directories, then moved into place with rollback for ordinary publication errors. There is no `manifests/` output directory or per-input completion marker; use `summary.json`, `per-image.csv`, and the activity log to review decisions and published paths. Separate filesystem renames are not a multi-file transaction, so a process crash between final renames can leave a partial product set. A kept image is a symlink to its canonical source and is never edited to add provenance cards; its run provenance is in the report and activity log. Applications consuming output trees must retain access to the source files backing kept symlinks.
 

@@ -56,8 +56,10 @@ def excluded_mask(source_path: Path, product_path: Path | None) -> np.ndarray:
     if product_path is None or product_path.is_symlink():
         return np.zeros(source.shape, dtype=bool)
     product, header = read(product_path)
-    x0 = int(header.get("CLIPX0", 0))
-    y0 = int(header.get("CLIPY0", 0))
+    # MO_X0/MO_Y0 locate the product in the original frame; subtract the
+    # source's own origin when the source is itself a cropped product.
+    x0 = int(header.get("MO_X0", 0)) - int(source_header.get("MO_X0", 0))
+    y0 = int(header.get("MO_Y0", 0)) - int(source_header.get("MO_Y0", 0))
     excluded = np.ones(source.shape, dtype=bool)
     h, w = product.shape
     excluded[y0 : y0 + h, x0 : x0 + w] = undefined(product, header)

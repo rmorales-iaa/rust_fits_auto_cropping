@@ -53,10 +53,10 @@ CARD_POLICY_IGNORED = {
     "DATE",
     "HISTORY",
 }
-# Written only on cropped science products (see verify_crop_provenance).
-CROP_PROVENANCE_KEYS = (
-    "CROPPED", "CROPSEC", "ORIGNAX1", "ORIGNAX2", "LTV1", "LTV2", "CROPUNDF", "ORIGSHA", "ORIGFILE",
-)
+# MO_ provenance written on every science product; crop cards only on crops.
+MO_REQUIRED = ("MO_ACT", "MO_CROP", "MO_UNDF", "MO_ALGO", "MO_PROG", "MO_DATE", "MO_SHA")
+MO_CROP_KEYS = ("MO_SEC", "MO_ONAX1", "MO_ONAX2", "MO_X0", "MO_Y0")
+CRPIX_OR_LTV = re.compile(r"CRPIX[12][A-Z]?|LTV[12]")
 CARD_POLICY_ADDED = {
     "science": {
         "CHECKSUM",
@@ -65,11 +65,7 @@ CARD_POLICY_ADDED = {
         "DATE",
         "HISTORY",
         "BLANK",
-        "CLIPSHAP",
-        "CLIPX0",
-        "CLIPY0",
         "COMMENT",
-        *CROP_PROVENANCE_KEYS,
     },
     "mask": {"CHECKSUM", "DATASUM", "CREATOR", "DATE", "HISTORY", "COMMENT"},
     "reason": {
@@ -231,42 +227,95 @@ def verify_masked_samples(
 SECTION = re.compile(r"\[(\d+):(\d+),(\d+):(\d+)\]")
 
 
-def verify_crop_provenance(
-    source_path: Path, source: fits.Header, output: fits.Header, path: Path, x0: int, y0: int
+def card_key(card: bytes) -> str:
+    return card[:8].decode("ascii", "replace").rstrip()
+
+
+def verify_verbatim_header(source_path: Path, output_path: Path, cropped: bool) -> None:
+    """Source primary-header cards must appear byte for byte and in order.
+
+    Allowed differences: NAXIS1/2, CHECKSUM/DATASUM, MO_* cards, a BLANK card
+    that the source lacked or that changed value because undefined integer
+    samples were added, and (crops only) CRPIX1/2[a] and existing LTV1/2.
+    """
+    source = [card for _, card in read_primary_header_cards(source_path)][:-1]
+    output = [card for _, card in read_primary_header_cards(output_path)][:-1]
+    source_blank = [c for c in source if card_key(c) == "BLANK"]
+    output_blank = [c for c in output if card_key(c) == "BLANK"]
+    blank_edited = output_blank != source_blank
+
+    def editable(card: bytes) -> bool:
+        key = card_key(card)
+        return (
+            key.startswith("MO_")
+            or key in {"NAXIS1", "NAXIS2", "CHECKSUM", "DATASUM"}
+            or (key == "BLANK" and blank_edited)
+            or (cropped and CRPIX_OR_LTV.fullmatch(key) is not None)
+        )
+
+    if [c for c in source if not editable(c)] != [c for c in output if not editable(c)]:
+        raise AssertionError(f"{output_path}: source header cards were not copied verbatim")
+    added = {card_key(c) for c in output if editable(c)} - {card_key(c) for c in source}
+    unexpected = {k for k in added if not k.startswith("MO_")} - {"CHECKSUM", "DATASUM", "BLANK"}
+    if unexpected:
+        raise AssertionError(f"{output_path}: unexpected added cards {sorted(unexpected)}")
+
+
+def verify_mo_provenance(
+    source_path: Path, source: fits.Header, output: fits.Header, path: Path, x0: int, y0: int, cropped: bool
 ) -> None:
-    """Cropped products must identify the crop for calibration matching."""
-    width, height = int(output["NAXIS1"]), int(output["NAXIS2"])
-    if source.get("CROPPED") is True:  # re-cropped product: compose with the earlier section
-        match = SECTION.fullmatch(str(source.get("CROPSEC", "")))
+    """MO_ cards: present on every product; crop cards identify the original section."""
+    missing = [key for key in MO_REQUIRED if key not in output]
+    if missing:
+        raise AssertionError(f"{path}: MO_ provenance cards missing: {', '.join(missing)}")
+    if not str(output["MO_PROG"]).startswith("rust_fits_auto_cropping v"):
+        raise AssertionError(f"{path}: MO_PROG program/version card is malformed")
+    if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?", str(output["MO_DATE"])):
+        raise AssertionError(f"{path}: MO_DATE timestamp is malformed")
+    earlier = source.get("MO_CROP") is True
+    if earlier:
+        match = SECTION.fullmatch(str(source.get("MO_SEC", "")))
         if match is None:
-            raise AssertionError(f"{path}: source CROPSEC is unreadable")
+            raise AssertionError(f"{path}: source MO_SEC is unreadable")
         ox, oy = int(match.group(1)) - 1 + x0, int(match.group(3)) - 1 + y0
-        original = (int(source["ORIGNAX1"]), int(source["ORIGNAX2"]))
-        sha = source.get("ORIGSHA")
+        original = (int(source["MO_ONAX1"]), int(source["MO_ONAX2"]))
+        sha = source.get("MO_SHA")
     else:
         ox, oy = x0, y0
         original = (int(source["NAXIS1"]), int(source["NAXIS2"]))
         sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    expected_section = f"[{ox + 1}:{ox + width},{oy + 1}:{oy + height}]"
+    if output["MO_SHA"] != sha:
+        raise AssertionError(f"{path}: MO_SHA does not identify the original file")
+    if not isinstance(output["MO_UNDF"], int) or output["MO_UNDF"] < 0:
+        raise AssertionError(f"{path}: MO_UNDF is not a non-negative integer")
+    if not (cropped or earlier):
+        if output["MO_CROP"] is not False or any(key in output for key in MO_CROP_KEYS):
+            raise AssertionError(f"{path}: uncropped product carries crop cards")
+        return
+    width, height = int(output["NAXIS1"]), int(output["NAXIS2"])
     checks = {
-        "CROPPED": output.get("CROPPED") is True,
-        "CROPSEC": output.get("CROPSEC") == expected_section,
-        "ORIGNAX": (output.get("ORIGNAX1"), output.get("ORIGNAX2")) == original,
-        "LTV1": np.isclose(output.get("LTV1", np.nan), source.get("LTV1", 0.0) - x0, rtol=0, atol=1e-10),
-        "LTV2": np.isclose(output.get("LTV2", np.nan), source.get("LTV2", 0.0) - y0, rtol=0, atol=1e-10),
-        "ORIGSHA": output.get("ORIGSHA") == sha,
-        "CROPUNDF": isinstance(output.get("CROPUNDF"), int) and output["CROPUNDF"] >= 0,
+        "MO_CROP": output["MO_CROP"] is True,
+        "MO_SEC": output.get("MO_SEC") == f"[{ox + 1}:{ox + width},{oy + 1}:{oy + height}]",
+        "MO_ONAX": (output.get("MO_ONAX1"), output.get("MO_ONAX2")) == original,
+        "MO_X0": (output.get("MO_X0"), output.get("MO_Y0")) == (ox, oy),
     }
+    for key, offset in (("LTV1", x0), ("LTV2", y0)):
+        if key in source:
+            checks[key] = np.isclose(output.get(key, np.nan), source[key] - offset, rtol=0, atol=1e-10)
+        else:
+            checks[key] = key not in output
     failed = [key for key, ok in checks.items() if not ok]
     if failed:
-        raise AssertionError(f"{path}: crop provenance cards wrong or missing: {', '.join(failed)}")
+        raise AssertionError(f"{path}: MO_ crop cards wrong or missing: {', '.join(failed)}")
 
 
-def verify_no_crop_provenance(source: fits.Header, output: fits.Header, path: Path) -> None:
-    """Uncropped products carry no new crop cards (source cards are preserved as-is)."""
-    for key in CROP_PROVENANCE_KEYS:
-        if key in output and (key not in source or output[key] != source[key]):
-            raise AssertionError(f"{path}: crop card {key} on an uncropped product")
+def local_crop_origin(source: fits.Header, output: fits.Header) -> tuple[int, int]:
+    """Crop origin of a product within its immediate source."""
+    x0, y0 = int(output.get("MO_X0", 0)), int(output.get("MO_Y0", 0))
+    if source.get("MO_CROP") is True:
+        x0 -= int(source.get("MO_X0", 0))
+        y0 -= int(source.get("MO_Y0", 0))
+    return x0, y0
 
 
 def verify_crop_samples(
@@ -358,8 +407,7 @@ def verify_preserved_header(
                 not key
                 or key in CARD_POLICY_IGNORED
                 or re.fullmatch(r"NAXIS\d+|ZNAXIS\d+", key)
-                or key.startswith("CLIP")
-                or (product_kind == "science" and key in CROP_PROVENANCE_KEYS)
+                or (product_kind == "science" and key.startswith("MO_"))
                 or WCS_KEY.fullmatch(key)
                 or (product_kind in {"mask", "reason"} and key == "BUNIT")
             ):
@@ -374,11 +422,13 @@ def verify_preserved_header(
             raise AssertionError(f"{path}: source metadata card {key} changed or disappeared")
     source_keys = set(source)
     for key in output:
-        if key in source_keys or key in CARD_POLICY_ADDED[product_kind]:
+        if key in source_keys or key in CARD_POLICY_ADDED[product_kind] or (
+            product_kind == "science" and key.startswith("MO_")
+        ):
             continue
         if (
             re.fullmatch(r"SIMPLE|XTENSION|BITPIX|NAXIS\d*|EXTEND|PCOUNT|GCOUNT", key)
-            or key.startswith("CLIP") and product_kind == "science"
+            or key.startswith("MO_") and product_kind == "science"
         ):
             continue
         raise AssertionError(f"{path}: unexpected output header card {key}")
@@ -579,31 +629,24 @@ def verify_tree(
             if output_path.is_symlink():
                 if output_path.resolve() != source_path.resolve():
                     raise AssertionError(f"{output_path}: kept-image symlink does not target its input")
-            else:
-                verify_provenance(output_path, output[0].header)
             verify_preserved_header(
                 source[0].header,
                 output[0].header,
                 output_path,
                 "science",
             )
-            x0 = int(output[0].header.get("CLIPX0", 0))
-            y0 = int(output[0].header.get("CLIPY0", 0))
             original = np.asarray(source[0].data)
             actual = np.asarray(output[0].data)
-            crop_shape = output[0].header.get("CLIPSHAP")
-            if crop_shape and crop_shape != "RECTANGLE":
-                raise AssertionError(f"{output_path}: crop output is not a rectangle")
+            x0, y0 = local_crop_origin(source[0].header, output[0].header)
             if source[0].header["BITPIX"] != output[0].header["BITPIX"]:
                 raise AssertionError(f"{output_path}: shape or BITPIX changed")
-            is_crop = bool(crop_shape or x0 or y0 or original.shape != actual.shape)
-            verify_wcs(source[0].header, output[0].header, output_path, x0, y0, is_crop)
-            if is_crop:
-                verify_crop_provenance(
-                    source_path, source[0].header, output[0].header, output_path, x0, y0
+            is_crop = bool(x0 or y0 or original.shape != actual.shape)
+            if not output_path.is_symlink():
+                verify_verbatim_header(source_path, output_path, is_crop)
+                verify_mo_provenance(
+                    source_path, source[0].header, output[0].header, output_path, x0, y0, is_crop
                 )
-            else:
-                verify_no_crop_provenance(source[0].header, output[0].header, output_path)
+            verify_wcs(source[0].header, output[0].header, output_path, x0, y0, is_crop)
             if is_crop:
                 expected = original[y0 : y0 + actual.shape[0], x0 : x0 + actual.shape[1]]
                 if expected.shape != actual.shape:

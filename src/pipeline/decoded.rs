@@ -12,7 +12,7 @@ use crate::{
     preview::write_crop_preview,
     reason_mask,
     writer::{
-        write_cropped_masked_product, write_cropped_product, write_masked_product,
+        ProductContext, write_cropped_masked_product, write_cropped_product, write_masked_product,
         write_reason_mask,
     },
 };
@@ -175,6 +175,7 @@ pub(super) fn process_decoded(
         &plan,
         layout,
         options,
+        rules.algorithm_version(),
         &mut outcome,
     );
     outcome.stage_ms.write = elapsed_ms(write_timer);
@@ -203,8 +204,13 @@ fn write_products(
     plan: &action::ActionPlan,
     layout: &OutputLayout,
     options: ProductOptions,
+    algorithm: &str,
     outcome: &mut FileOutcome,
 ) -> Result<(), ()> {
+    let context = ProductContext {
+        action: plan.kind.name(),
+        algorithm,
+    };
     let image_path = match if plan.kind.has_geometry() {
         layout.cropped_image_path(rel)
     } else {
@@ -241,10 +247,12 @@ fn write_products(
     }
     let write_result = match (plan.kind, plan.rect) {
         (ActionKind::Keep, _) => create_kept_symlink(path, &image_path),
-        (ActionKind::Mask, _) => write_masked_product(&image_path, image, &plan.undefined_mask),
-        (ActionKind::Crop, Some(rect)) => write_cropped_product(&image_path, image, rect),
+        (ActionKind::Mask, _) => {
+            write_masked_product(&image_path, image, &plan.undefined_mask, context)
+        }
+        (ActionKind::Crop, Some(rect)) => write_cropped_product(&image_path, image, rect, context),
         (ActionKind::CropMasked | ActionKind::BboxMask, Some(rect)) => {
-            write_cropped_masked_product(&image_path, image, rect, &plan.undefined_mask)
+            write_cropped_masked_product(&image_path, image, rect, &plan.undefined_mask, context)
         }
         (_, None) => Err(anyhow::anyhow!("geometry action has no rectangle")),
     };

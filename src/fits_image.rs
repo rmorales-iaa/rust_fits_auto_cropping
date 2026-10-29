@@ -45,14 +45,15 @@ pub struct Image {
     pub blank_value: Option<i64>,
     pub metadata_warnings: Vec<String>,
     pub crop_wcs_unsupported: Option<String>,
-    /// Original non-standard/raw cards to restore verbatim in generated products.
-    pub raw_header_cards: Vec<RawHeaderCard>,
     /// Parsed source snapshot used by both classification and product writing.
     pub source_fits: FitsFile,
     /// SHA-256 of the exact open source file used to build `source_fits`.
     pub source_sha256: String,
-    /// Base name of the source file, recorded in crop provenance.
+    /// Base name of the source file, recorded in product provenance.
     pub source_file_name: Option<String>,
+    /// The primary header's original 80-byte cards (END excluded), captured
+    /// from the same hashed read as `source_fits`. Products copy them verbatim.
+    pub source_header_cards: Vec<[u8; 80]>,
 }
 
 #[derive(Clone)]
@@ -94,11 +95,12 @@ pub fn read_image(
         );
     }
     source.seek(SeekFrom::Start(0))?;
-    let (file, source_sha256) = {
+    let (file, source_sha256, source_header_cards) = {
         let mut reader = HashingReader::new(&mut source, repairs.clone());
         let file = FitsFile::from_reader(&mut reader)
             .with_context(|| format!("opening FITS {}", path.display()))?;
-        (file, reader.finish())
+        let cards = reader.primary_header_cards()?;
+        (file, reader.finish(), cards)
     };
     let parsed_metadata = source.metadata()?;
     if source_metadata.len() != parsed_metadata.len()
@@ -165,7 +167,20 @@ pub fn read_image(
     if values.len() != n {
         bail!("FITS array size does not match NAXIS dimensions");
     }
-    let crop_wcs_unsupported = crop_wcs_unsupported(&hdu.header);
+    // A malformed CRPIX/LTV card cannot be shifted, so such frames are masked
+    // instead of cropped (crop_wcs_mask_fallback).
+    let crop_wcs_unsupported = crop_wcs_unsupported(&hdu.header).or_else(|| {
+        repairs.iter().find_map(|repair| {
+            let key = String::from_utf8_lossy(&repair.original[..8])
+                .trim_end()
+                .to_owned();
+            let shifted = key.strip_prefix("CRPIX").is_some_and(|rest| {
+                matches!(rest.as_bytes(), [b'1' | b'2'] | [b'1' | b'2', b'A'..=b'Z'])
+            }) || key == "LTV1"
+                || key == "LTV2";
+            shifted.then(|| format!("{key} card is malformed, so a crop cannot shift it"))
+        })
+    });
     if let Some(reason) = &crop_wcs_unsupported {
         metadata_warnings.push(format!(
             "metadata note: {reason}; pixel statistics are still processed"
@@ -179,24 +194,33 @@ pub fn read_image(
         blank_value,
         metadata_warnings,
         crop_wcs_unsupported,
-        raw_header_cards: repairs,
         source_fits: file,
         source_sha256,
         source_file_name: path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned()),
+        source_header_cards,
     }))
 }
 
 /// Read a generated single-HDU FITS snapshot while treating malformed
 /// non-structural header cards as same-width in-memory placeholders.
 pub fn read_fits_snapshot(path: &Path) -> anyhow::Result<FitsFile> {
+    read_fits_snapshot_with_cards(path).map(|(file, _)| file)
+}
+
+/// As `read_fits_snapshot`, also returning the primary header's original
+/// 80-byte cards (END excluded) from the same read.
+pub fn read_fits_snapshot_with_cards(path: &Path) -> anyhow::Result<(FitsFile, Vec<[u8; 80]>)> {
     let mut source =
         File::open(path).with_context(|| format!("opening FITS {}", path.display()))?;
     let (_, _, _, raw_cards) = preflight(&mut source, path)?;
     source.seek(SeekFrom::Start(0))?;
     let mut reader = HashingReader::new(&mut source, raw_cards);
-    FitsFile::from_reader(&mut reader).with_context(|| format!("parsing FITS {}", path.display()))
+    let file = FitsFile::from_reader(&mut reader)
+        .with_context(|| format!("parsing FITS {}", path.display()))?;
+    let cards = reader.primary_header_cards()?;
+    Ok((file, cards))
 }
 
 /// Hash bytes as fitskit reads them. Forward seeks are implemented by reading
@@ -208,6 +232,11 @@ struct HashingReader<'a> {
     position: u64,
     hasher: Sha256,
     repairs: Vec<RawHeaderCard>,
+    /// Original bytes of the primary header (before placeholder repairs),
+    /// captured until its END card; then `header_end` is set.
+    header: Vec<u8>,
+    header_end: Option<usize>,
+    scanned: usize,
 }
 
 impl<'a> HashingReader<'a> {
@@ -218,6 +247,36 @@ impl<'a> HashingReader<'a> {
             position: 0,
             hasher: Sha256::new(),
             repairs,
+            header: Vec::new(),
+            header_end: None,
+            scanned: 0,
+        }
+    }
+
+    /// The primary header's original cards, END excluded.
+    fn primary_header_cards(&self) -> anyhow::Result<Vec<[u8; 80]>> {
+        let end = self
+            .header_end
+            .context("primary header END card was not read")?;
+        Ok(self.header[..end]
+            .chunks_exact(80)
+            .map(|card| card.try_into().expect("80-byte chunk"))
+            .collect())
+    }
+
+    fn capture(&mut self, bytes: &[u8]) {
+        if self.header_end.is_some() {
+            return;
+        }
+        self.header.extend_from_slice(bytes);
+        while self.scanned + 80 <= self.header.len() {
+            let card = &self.header[self.scanned..self.scanned + 80];
+            if &card[..3] == b"END" && card[3..].iter().all(|b| *b == b' ') {
+                self.header_end = Some(self.scanned);
+                self.header.truncate(self.scanned);
+                return;
+            }
+            self.scanned += 80;
         }
     }
 
@@ -231,6 +290,7 @@ impl Read for HashingReader<'_> {
         let start = self.position;
         let read = self.inner.read(output)?;
         self.hasher.update(&output[..read]);
+        self.capture(&output[..read]);
         let end = start.saturating_add(read as u64);
         self.position = end;
         for repair in &self.repairs {

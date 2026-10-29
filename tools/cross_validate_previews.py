@@ -70,10 +70,11 @@ def main() -> int:
         source, _ = image_data(source_path)
         cropped, _ = image_data(cropped_path)
         header = fits.getheader(cropped_path)
-        if header.get("CLIPSHAP") != "RECTANGLE":
-            raise AssertionError(f"{cropped_path}: crop output is not a rectangular FITS image")
-        x0 = int(header.get("CLIPX0", 0))
-        y0 = int(header.get("CLIPY0", 0))
+        if header.get("MO_CROP") is not True:
+            raise AssertionError(f"{cropped_path}: crop output lacks MO_CROP = T")
+        source_header = fits.getheader(source_path)
+        x0 = int(header.get("MO_X0", 0)) - int(source_header.get("MO_X0", 0))
+        y0 = int(header.get("MO_Y0", 0)) - int(source_header.get("MO_Y0", 0))
         if (
             int(header.get("NAXIS", -1)) != 2
             or int(header.get("NAXIS1", -1)) != cropped.shape[1]
@@ -125,7 +126,7 @@ def main() -> int:
                 continue
             right_y = LABEL_HEIGHT + display_crop_height - 1 - display_y
             right_x = width + display_x
-            if header.get("CLIPSHAP") == "CIRCLE":
+            if header.get("MO_SHAPE") == "CIRCLE":  # circular crops are not produced
                 radius = float(header["CLIPRAD"])
                 dx = global_x - float(header["CLIPCX"])
                 dy = global_y - float(header["CLIPCY"])
