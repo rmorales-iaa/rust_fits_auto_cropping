@@ -58,6 +58,8 @@ pub(super) fn process_decoded(
     outcome.artifact_benefit = detection.artifact_benefit;
     outcome.valid_pixel_loss = detection.valid_pixel_loss;
     outcome.net_utility = detection.net_utility;
+    outcome.uncertain_boundary_pixels = detection.uncertain_boundary_pixels;
+    outcome.protected_source_pixels = detection.protected_source_pixels;
     if !image.metadata_warnings.is_empty() {
         outcome.reason.push_str("; ");
         outcome.reason.push_str(&image.metadata_warnings.join("; "));

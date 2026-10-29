@@ -5,7 +5,7 @@ use super::{
     multiscale::detect_multiscale,
     robust::{location_scale, location_scale_with},
 };
-use crate::config::{EvidenceModel, HeuristicRules, ReferenceModel};
+use crate::config::{DetectorKind, EvidenceModel, HeuristicRules, ReferenceModel};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
@@ -25,6 +25,10 @@ pub struct Detection {
     pub artifact_benefit: f64,
     pub valid_pixel_loss: f64,
     pub net_utility: f64,
+    /// v2 only: pixels in the uncertain boundary band (plan R3.4).
+    pub uncertain_boundary_pixels: usize,
+    /// v2 only: pixels in the protected source mask (plan R2.3).
+    pub protected_source_pixels: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +44,9 @@ struct Tile {
 /// The method deliberately abstains on weak contrast, inadequate interior support,
 /// small regions and excessive masks. It is a conservative baseline requiring empirical validation.
 pub fn detect_border(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules) -> Detection {
+    if cfg.detector == DetectorKind::BackgroundV2Experimental {
+        return super::v2::detect_v2(data, width, height, cfg);
+    }
     match cfg.evidence_model {
         EvidenceModel::SingleScale => detect_single_scale(data, width, height, cfg),
         EvidenceModel::MultiscaleConsensus => detect_multiscale(data, width, height, cfg),
@@ -67,6 +74,8 @@ pub(super) fn detect_single_scale(
         artifact_benefit: 0.0,
         valid_pixel_loss: 0.0,
         net_utility: 0.0,
+        uncertain_boundary_pixels: 0,
+        protected_source_pixels: 0,
     };
     if width < cfg.tile_size * 3
         || height < cfg.tile_size * 3
@@ -349,6 +358,8 @@ pub(super) fn detect_single_scale(
             artifact_benefit,
             valid_pixel_loss,
             net_utility,
+            uncertain_boundary_pixels: 0,
+            protected_source_pixels: 0,
         };
     }
     if fraction < cfg.minimum_mask_fraction {
@@ -367,6 +378,8 @@ pub(super) fn detect_single_scale(
             artifact_benefit,
             valid_pixel_loss,
             net_utility,
+            uncertain_boundary_pixels: 0,
+            protected_source_pixels: 0,
         };
     }
     if fraction > cfg.maximum_mask_fraction {
@@ -385,6 +398,8 @@ pub(super) fn detect_single_scale(
             artifact_benefit,
             valid_pixel_loss,
             net_utility,
+            uncertain_boundary_pixels: 0,
+            protected_source_pixels: 0,
         };
     }
     if evidence_ratio < cfg.minimum_evidence_ratio || net_utility < cfg.minimum_net_utility {
@@ -405,6 +420,8 @@ pub(super) fn detect_single_scale(
             artifact_benefit,
             valid_pixel_loss,
             net_utility,
+            uncertain_boundary_pixels: 0,
+            protected_source_pixels: 0,
         };
     }
     let mut mask = vec![false; data.len()];
@@ -438,6 +455,8 @@ pub(super) fn detect_single_scale(
         artifact_benefit,
         valid_pixel_loss,
         net_utility,
+        uncertain_boundary_pixels: 0,
+        protected_source_pixels: 0,
     }
 }
 

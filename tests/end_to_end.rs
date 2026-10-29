@@ -1698,3 +1698,59 @@ fn legacy_rules_without_fallback_still_keep_rejected_crops() {
             .is_symlink()
     );
 }
+
+#[test]
+fn experimental_v2_detector_is_opt_in_reported_and_refines_boundaries() {
+    let t = tempdir().unwrap();
+    let input = t.path().join("in");
+    let output = t.path().join("out");
+    fs::create_dir(&input).unwrap();
+    config(&input);
+    let heuristics_path = input.join("heuristics.toml");
+    let heuristics = fs::read_to_string(&heuristics_path).unwrap();
+    fs::write(
+        &heuristics_path,
+        heuristics.replace(
+            "[heuristics]",
+            "[heuristics]\ndetector = \"background_v2_experimental\"",
+        ),
+    )
+    .unwrap();
+    // Noisy sky with a dark 37-column strip: not aligned to any tile grid.
+    let (width, height) = (256, 256);
+    let mut state = 7u64;
+    let mut gauss = || {
+        let mut u = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let (a, b) = (u(), u());
+        (-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()
+    };
+    let mut pixels = vec![0.0; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            pixels[y * width + x] = if x < 37 {
+                50.0 + 3.0 * gauss()
+            } else {
+                1000.0 + 10.0 * gauss()
+            };
+        }
+    }
+    create_fits(&input.join("strip.fits"), -32, width, height, &pixels);
+    assert!(invoke(&input, &output, &input.join("config.toml")).success());
+    let summary: serde_json::Value =
+        serde_json::from_slice(&fs::read(summary_path(&output)).unwrap()).unwrap();
+    assert_eq!(
+        summary["algorithm_version"],
+        "border-detector-v2-background-experimental"
+    );
+    let record = &summary["files"][0];
+    assert_eq!(record["action"], "mask", "{record}");
+    let masked = record["masked_pixels"].as_u64().unwrap() as i64;
+    // Native-resolution boundary: within one column of the 37-column truth.
+    assert!((masked - 37 * 256).abs() <= 256, "masked {masked}");
+    assert!(record["protected_source_pixels"].is_u64());
+}

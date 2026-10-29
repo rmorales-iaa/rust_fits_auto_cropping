@@ -387,6 +387,8 @@ mod tests {
             artifact_benefit: 0.0,
             valid_pixel_loss: 0.0,
             net_utility: 1.0,
+            uncertain_boundary_pixels: 0,
+            protected_source_pixels: 0,
         }
     }
 

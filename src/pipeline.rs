@@ -143,7 +143,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let mut logger = Logger::create(&run_dir, &run_id)?;
     logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output_root":layout.root(),"run_directory":&run_dir,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
         "source_heuristics_sha256":source_heuristics_hash,"effective_heuristics_sha256":heuristics_hash,
-        "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"algorithm_version":heuristics.heuristics.reference_model.algorithm_version(heuristics.heuristics.evidence_model),"git_revision":env!("RUST_FITS_GIT_REVISION"),"git_dirty":env!("RUST_FITS_GIT_DIRTY")=="true","executable_sha256":executable_sha256,"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run,"reason_mask":args.reason_mask}))?;
+        "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"algorithm_version":heuristics.heuristics.algorithm_version(),"git_revision":env!("RUST_FITS_GIT_REVISION"),"git_dirty":env!("RUST_FITS_GIT_DIRTY")=="true","executable_sha256":executable_sha256,"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run,"reason_mask":args.reason_mask}))?;
     let mut paths = discover(&input, config.processing.recursive)?;
     paths.sort();
     logger.event(&run_id,"discovery_complete",serde_json::json!({"candidate_fits_files":paths.len(),"workers":workers,"memory_budget_mib":config.processing.memory_budget_mib,"maximum_image_mib":config.processing.maximum_image_mib}))?;
@@ -198,10 +198,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         &outcomes,
         args.dry_run,
         report::ReportIdentity {
-            algorithm_version: heuristics
-                .heuristics
-                .reference_model
-                .algorithm_version(heuristics.heuristics.evidence_model),
+            algorithm_version: heuristics.heuristics.algorithm_version(),
             executable_sha256: &executable_sha256,
             source_config_sha256: &source_config_hash,
             effective_config_sha256: &config_hash,

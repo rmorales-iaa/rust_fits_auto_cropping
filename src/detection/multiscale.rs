@@ -155,6 +155,8 @@ mod tests {
 
     fn config(tile_size: usize) -> HeuristicRules {
         HeuristicRules {
+            detector: crate::config::DetectorKind::TileV1,
+            v2: crate::config::V2Rules::default(),
             reference_model: ReferenceModel::CentralTiles,
             evidence_model: EvidenceModel::MultiscaleConsensus,
             tile_size,

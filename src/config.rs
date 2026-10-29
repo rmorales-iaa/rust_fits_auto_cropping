@@ -74,6 +74,108 @@ pub enum EvidenceModel {
     MultiscaleConsensus,
 }
 
+/// Detector family. `tile_v1` is the default baseline; the v2 background
+/// model is experimental and opt-in until it passes the plan's gates.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectorKind {
+    #[default]
+    TileV1,
+    BackgroundV2Experimental,
+}
+
+/// Uncertain-boundary handling for the v2 pixel mask (plan R3.4).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UncertainPolicy {
+    /// Valid retention first: uncertain band pixels stay in the product.
+    #[default]
+    RetainUncertain,
+    ExcludeUncertain,
+}
+
+/// Registered starting values for the v2 detector (plan R2/R3). Thresholds
+/// are in standard-error units and remain provisional until calibrated by
+/// the null false-alarm procedure (plan R1.2).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct V2Rules {
+    pub mesh_size_px: usize,
+    pub clip_kappa: f64,
+    pub clip_iterations: usize,
+    pub trusted_valid_fraction: f64,
+    pub min_trusted_meshes: usize,
+    pub surface_max_degree: usize,
+    pub level_threshold: f64,
+    pub dispersion_threshold: f64,
+    pub strong_level_threshold: f64,
+    /// Rule N: noise excess alone (flat-amplified borders at sky level).
+    pub noise_only_threshold: f64,
+    pub source_seed_snr: f64,
+    pub source_min_pixels: usize,
+    pub source_dilation_fwhm: f64,
+    pub refit_iterations: usize,
+    pub boundary_min_cv_gain: f64,
+    pub hysteresis_low_fraction: f64,
+    pub uncertain_policy: UncertainPolicy,
+}
+
+impl Default for V2Rules {
+    fn default() -> Self {
+        Self {
+            mesh_size_px: 64,
+            clip_kappa: 3.0,
+            clip_iterations: 5,
+            trusted_valid_fraction: 0.5,
+            min_trusted_meshes: 9,
+            surface_max_degree: 2,
+            level_threshold: 5.0,
+            dispersion_threshold: 4.0,
+            strong_level_threshold: 8.0,
+            noise_only_threshold: 8.0,
+            source_seed_snr: 5.0,
+            source_min_pixels: 5,
+            source_dilation_fwhm: 1.5,
+            refit_iterations: 3,
+            boundary_min_cv_gain: 1.0,
+            hysteresis_low_fraction: 0.6,
+            uncertain_policy: UncertainPolicy::RetainUncertain,
+        }
+    }
+}
+
+impl V2Rules {
+    fn validate(&self) -> anyhow::Result<()> {
+        let positive = [
+            self.clip_kappa,
+            self.level_threshold,
+            self.dispersion_threshold,
+            self.strong_level_threshold,
+            self.noise_only_threshold,
+            self.source_seed_snr,
+            self.source_dilation_fwhm,
+        ];
+        if positive.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            || !(16..=4096).contains(&self.mesh_size_px)
+            || !(1..=20).contains(&self.clip_iterations)
+            || !(0.0..=1.0).contains(&self.trusted_valid_fraction)
+            || self.min_trusted_meshes < 4
+            || self.surface_max_degree > 2
+            || self.source_min_pixels == 0
+            || self.refit_iterations == 0
+            || self.refit_iterations > 10
+            || !self.boundary_min_cv_gain.is_finite()
+            || self.boundary_min_cv_gain < 0.0
+            || !(0.0..1.0).contains(&self.hysteresis_low_fraction)
+            || self.hysteresis_low_fraction <= 0.0
+            || self.strong_level_threshold < self.level_threshold
+        {
+            bail!("heuristics.v2 values are out of range");
+        }
+        Ok(())
+    }
+}
+
 impl ReferenceModel {
     pub fn algorithm_version(self, evidence: EvidenceModel) -> &'static str {
         match (self, evidence) {
@@ -94,6 +196,10 @@ impl ReferenceModel {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeuristicRules {
+    #[serde(default)]
+    pub detector: DetectorKind,
+    #[serde(default)]
+    pub v2: V2Rules,
     #[serde(default)]
     pub reference_model: ReferenceModel,
     #[serde(default)]
@@ -136,6 +242,14 @@ pub struct CropSacrificeLimits {
 }
 
 impl HeuristicRules {
+    /// Algorithm identity recorded in reports and logs.
+    pub fn algorithm_version(&self) -> &'static str {
+        match self.detector {
+            DetectorKind::TileV1 => self.reference_model.algorithm_version(self.evidence_model),
+            DetectorKind::BackgroundV2Experimental => "border-detector-v2-background-experimental",
+        }
+    }
+
     /// Return the configured cap for accepted 4-connected artifact components
     /// that each touch at least one image border.
     pub fn crop_sacrifice_limit(&self, border_component_count: usize) -> f64 {
@@ -242,6 +356,7 @@ impl HeuristicsConfig {
         {
             bail!("heuristics.maximum_residual_artifact_fraction must be in [0, 1]");
         }
+        h.v2.validate()?;
         if let Some(rate) = h.crop_exchange_rate
             && (!rate.is_finite() || rate < 0.0)
         {

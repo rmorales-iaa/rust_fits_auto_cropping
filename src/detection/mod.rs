@@ -2,6 +2,7 @@
 mod correlation;
 mod multiscale;
 mod reference;
-mod robust;
+pub(crate) mod robust;
 mod tile_detector;
+mod v2;
 pub use tile_detector::{Detection, detect_border};

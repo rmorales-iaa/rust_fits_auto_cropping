@@ -1,6 +1,8 @@
 use super::*;
 fn config() -> HeuristicRules {
     HeuristicRules {
+        detector: crate::config::DetectorKind::TileV1,
+        v2: crate::config::V2Rules::default(),
         reference_model: crate::config::ReferenceModel::CentralTiles,
         evidence_model: crate::config::EvidenceModel::SingleScale,
         tile_size: 8,

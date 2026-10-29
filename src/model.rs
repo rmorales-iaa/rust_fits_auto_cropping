@@ -36,6 +36,9 @@ pub struct FileOutcome {
     pub crop_artifact_pixels_retained: usize,
     /// Defined flagged samples set undefined inside a crop_masked/bbox_mask product.
     pub crop_interior_masked_pixels: usize,
+    /// v2 detector: uncertain boundary-band pixels and protected source pixels.
+    pub uncertain_boundary_pixels: usize,
+    pub protected_source_pixels: usize,
     pub crop_residual_artifact_fraction: f64,
     pub crop_search_candidates: usize,
     pub crop_search_step_px: usize,
@@ -102,6 +105,8 @@ impl FileOutcome {
             crop_applied_undefined_pixels: 0,
             crop_artifact_pixels_retained: 0,
             crop_interior_masked_pixels: 0,
+            uncertain_boundary_pixels: 0,
+            protected_source_pixels: 0,
             crop_residual_artifact_fraction: 0.0,
             crop_search_candidates: 0,
             crop_search_step_px: 0,
