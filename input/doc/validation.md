@@ -328,7 +328,7 @@ The four disputed 2004/2005 inputs were isolated in `/fast_disk/tmp/clippling_te
 
 ## Revision 2 implementation evidence (2026-10-29)
 
-Environment: cloud review container, 4 logical CPUs, Rust release builds, Astropy 8.0.2 (pip). `fitsverify` was unavailable, so FITS checks used Astropy plus the project's checksum, card-policy and sample verification. Branch `claude/eager-galileo-khb8fs`, local commits only. User decisions: D1 `bbox_mask` fallback, D2 opt-in `crop_masked`, D3 flats as evaluation labels only, D4 eta_I = 0.20 and eta_V = 0.50 with Q in between. All data below are synthetic or seeded. Synthetic success is method evidence only; gate G4 (labelled real frames) remains open.
+Environment: cloud review container, 4 logical CPUs, Rust release builds, Astropy 8.0.2 (pip). `fitsverify` was unavailable for this section (it was installed later; see the Revision 3 follow-up), so FITS checks used Astropy plus the project's checksum, card-policy and sample verification. Branch `claude/eager-galileo-khb8fs`, local commits only. User decisions: D1 `bbox_mask` fallback, D2 opt-in `crop_masked`, D3 flats as evaluation labels only, D4 eta_I = 0.20 and eta_V = 0.50 with Q in between. All data below are synthetic or seeded. Synthetic success is method evidence only; gate G4 (labelled real frames) remains open.
 
 ### Speed-only changes (bit-identical)
 - **Exact selection (R0.2/R0.3).** A 2,000-trial property test shows bit-identity with the sort reference. The decision digest `6f25a8d0…` over 48 seeded fixtures × 3 detector models matches the previous revision. Detection on a 7100×5325 frame: 1.69 s before, 1.17 s single-threaded (−31%), 0.345 s with 4 threads (three runs each, quiet machine).
@@ -524,6 +524,10 @@ The two builds' ranges do not overlap. In mask mode, the product write stage fel
 - **Full-frame rectangles.** A full-frame `crop_masked` rectangle is now written as a mask (`crop_full_frame_mask`).
 - **Calibration tool.** `tools/apply_crop.py` was tested on unsigned int16 bias data (BZERO 32768 preserved; raw samples identical) and on its refusals (size mismatch, uncropped reference, already cropped frame, existing output). Unit tests caught and fixed two defects before release: Astropy dropping BZERO/BSCALE from new HDUs, and an eager underflow in section parsing.
 - **Alignment check.** Applying each held-out crop product's section to its own source frame reproduced the product exactly in 59/59 cases: same section and LTV, and identical samples outside the `CROPUNDF` undefined pixels.
+
+### fitsverify
+
+`fitsverify` 4.22 (HEASARC, Ubuntu package) was installed in this container. The independent checker now runs it on every parsed product. On the held-out float32 and int16 corpora, in mask, crop and crop_masked modes, all products pass. Cropped products with the new cards report 0 warnings and 0 errors, and all 59 `tools/apply_crop.py` outputs pass.
 
 ### Test totals
 

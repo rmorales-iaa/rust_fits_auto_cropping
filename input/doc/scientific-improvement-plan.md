@@ -115,7 +115,7 @@ The held-out results agree with development within the bootstrap intervals, so t
 2. **K2 positive extended artifacts.** Measured (v2 recall 0). Any rule is an opt-in experiment, gated on the nebulosity and edge-source nulls. The null part of R1.6 is done (0/2,995 per family).
 3. **R6 numerical options (K4).** Exact work is done (about 2.5x faster end to end). Strided mesh subsampling and border-band evaluation are numerical changes that need the full harness. Weighted memory admission and the G5 workload set remain open.
 4. **Yearly re-runs with v2,** after R5.0. The 2011 tree is incomplete and has to be recovered before it is re-processed.
-5. **Small corners (K3)** after G4 strata are available. **PIXACT3** reason plane; **R3.3 morphology** only if G4 shows holes; **fitsverify** checks in an environment that provides it.
+5. **Small corners (K3)** after G4 strata are available. **PIXACT3** reason plane, deferred because reason planes are transient (built, verified and removed) and nothing consumes them; **R3.3 morphology** only if G4 shows holes. `fitsverify` checks are done (0 warnings, 0 errors).
 
 ### 0R.5 Review passes 15–19
 
