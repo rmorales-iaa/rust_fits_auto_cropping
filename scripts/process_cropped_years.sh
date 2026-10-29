@@ -170,7 +170,7 @@ run_year_with_progress() {
     program_pid=$!
 
     activity_file=''
-    for ((attempt = 0; attempt < 200; attempt++)); do
+    while [[ -z "$activity_file" && ! -s "$status_file" ]]; do
         shopt -s nullglob
         for candidate in "$output_dir"/activity_*.jsonl; do
             [[ -f "$candidate" ]] || continue

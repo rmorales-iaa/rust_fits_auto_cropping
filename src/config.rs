@@ -233,8 +233,8 @@ const DEFAULT_CONFIG: &str = r#"
 [processing]
 threads = 4
 recursive = false
-memory_budget_mib = 2048
-maximum_image_mib = 512
+memory_budget_mib = 8192
+maximum_image_mib = 1536
 mode = "mask"
 "#;
 

@@ -2,6 +2,12 @@
 
 Updated: 2026-10-28, after replacing circle-constrained crop geometry with a global maximum rectangle.
 
+## Operational remediation: large yearly FITS inputs (2026-10-29)
+
+- The yearly batch summaries for 2009, 2011, 2012, 2017, 2018, 2019, 2021, 2024 and 2026 showed workspace-cap failures: 2,747 valid images were passed through unchanged because the old 512 MiB estimate limit was too small. Largest observed image is 7100×5325 (37,807,500 pixels), about 1,156 MiB at the program's 32-bytes/pixel estimate. Runtime config now permits 1,536 MiB per image with an 8,192 MiB shared estimate budget; thread count remains capped at 4. This is not a measured RSS guarantee.
+- 2024 also has two truly truncated FITS header inputs. Policy is to annotate and preserve each as a source symlink; their invalid source bytes cannot be repaired by cropping. 2023 has not had a prior output summary and is part of the requested rerun.
+- Requested remediation dataset: years 2009, 2011, 2012, 2017, 2018, 2019, 2021, 2023, 2024, 2026 only. The yearly script sanitizes each selected year’s dedicated `science_calibrated/` output root before processing; calibration links and original source data are outside that root.
+
 ## Identity and active work
 
 - Repository/CLI: `rust_fits_auto_cropping`; pure-Rust FITS I/O with `fitskit`; English communication and documentation.
