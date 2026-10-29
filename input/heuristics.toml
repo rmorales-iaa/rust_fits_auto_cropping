@@ -2,6 +2,10 @@
 [heuristics]
 reference_model = "central_tiles"
 evidence_model = "single_scale"
+# Detector family: "tile_v1" (default baseline) or the opt-in
+# "background_v2_experimental" (plan R2/R3; optional [heuristics.v2] table,
+# see input/doc/configuration.md). v2 thresholds are registered starting values.
+# detector = "background_v2_experimental"
 tile_size = 16
 minimum_border_tiles = 2
 minimum_abs_z_score = 8.0

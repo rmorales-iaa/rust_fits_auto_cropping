@@ -210,9 +210,49 @@ pub fn detect_v2(data: &[f64], width: usize, height: usize, cfg: &HeuristicRules
                 0
             }
         };
+        // Zero point for relative illumination: median residual of the
+        // component's tile pixels deeper than one tile from its boundary
+        // (or all its tile pixels if none), excluding sources.
+        let core_residual = {
+            let mut in_component = vec![false; grid.tiles.len()];
+            for &t in component {
+                in_component[t] = true;
+            }
+            // Neighbours beyond the frame edge count as inside: edge
+            // components extend to the edge.
+            let inside = |tx: isize, ty: isize| {
+                tx < 0
+                    || ty < 0
+                    || tx >= grid.cols as isize
+                    || ty >= grid.rows as isize
+                    || in_component[ty as usize * grid.cols + tx as usize]
+            };
+            let mut values: Vec<f64> = Vec::new();
+            for &t in component {
+                let (tx, ty) = ((t % grid.cols) as isize, (t / grid.cols) as isize);
+                let interior = inside(tx - 1, ty)
+                    && inside(tx + 1, ty)
+                    && inside(tx, ty - 1)
+                    && inside(tx, ty + 1);
+                if !interior && component.len() > 8 {
+                    continue;
+                }
+                let (x0, x1, y0, y1) = grid.bounds(t, width, height);
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = y * width + x;
+                        if data[i].is_finite() && !source_mask.mask.get(i) {
+                            values.push(data[i] - bg.level(x as f64, y as f64));
+                        }
+                    }
+                }
+            }
+            (!values.is_empty()).then(|| median(&mut values))
+        };
         let signature = refine::Signature {
             level: sign(level, cfg.v2.level_threshold),
             dispersion: sign(dispersion, cfg.v2.dispersion_threshold),
+            core_residual,
         };
         let refined = if signature.level == 0 && signature.dispersion == 0 {
             // Constant-plateau components: keep the tile mask on defined samples.

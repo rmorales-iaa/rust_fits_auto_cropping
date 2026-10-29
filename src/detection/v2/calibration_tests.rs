@@ -156,10 +156,20 @@ fn clopper_pearson_matches_closed_form_for_zero_failures() {
     assert!(upper_bound(0, n, 0.05) <= 1e-3);
 }
 
+/// Optional comma-separated family filter (FAR_FAMILIES).
+fn selected(family: &str) -> bool {
+    std::env::var("FAR_FAMILIES")
+        .map(|list| list.split(',').any(|f| f.trim() == family))
+        .unwrap_or(true)
+}
+
 #[test]
 #[ignore = "manual null false-alarm calibration run"]
 fn calibration_null_false_alarms() {
     let n = frames();
+    // Start on a fresh line: libtest prints "test <name> ... " without a
+    // newline under --nocapture.
+    println!();
     for family in [
         "flat",
         "gradient",
@@ -169,6 +179,9 @@ fn calibration_null_false_alarms() {
         "correlated_noise",
         "quantized_low_counts",
     ] {
+        if !selected(family) {
+            continue;
+        }
         let mut row = format!("FAR {family:<24} n={n}");
         for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2Experimental] {
             let mut cfg = rules();
@@ -258,12 +271,16 @@ fn injected_frame(family: &str, seed: u64) -> (Vec<f64>, Vec<u8>) {
 #[ignore = "manual injection-recovery run"]
 fn calibration_injection_recovery() {
     let n = (frames() / 4).max(20);
+    println!();
     for family in [
         "sharp_strip",
         "corners",
         "circular_stop_raw",
         "circular_stop_calibrated",
     ] {
+        if !selected(family) {
+            continue;
+        }
         let mut row = format!("POWER {family:<26} n={n}");
         for detector in [DetectorKind::TileV1, DetectorKind::BackgroundV2Experimental] {
             let mut cfg = rules();

@@ -27,7 +27,7 @@ import numpy as np
 from astropy.io import fits
 
 V, I, Q, U0 = 0, 1, 2, 3
-GENERATOR_VERSION = "synthetic-corpus-v1"
+GENERATOR_VERSION = "synthetic-corpus-v2-physical-noise"
 
 
 def labels_from_eta(eta: np.ndarray, eta_i: float, eta_v: float) -> np.ndarray:
@@ -41,6 +41,14 @@ def sky(rng: np.random.Generator, shape, level=1000.0, read=5.0, gain=2.0) -> np
     signal = np.full(shape, level)
     sigma = np.sqrt(read**2 + signal / gain)
     return signal + rng.normal(0.0, 1.0, shape) * sigma
+
+
+def illuminated(rng: np.random.Generator, eta: np.ndarray, level=1000.0, read=5.0, gain=2.0) -> np.ndarray:
+    """Raw frame under relative illumination eta: signal = level*eta with
+    Poisson+read noise sigma^2 = read^2 + signal/gain (noise scales ~sqrt(eta),
+    not eta)."""
+    signal = level * eta
+    return signal + rng.normal(0.0, 1.0, eta.shape) * np.sqrt(read**2 + signal / gain)
 
 
 def gaussian_source(shape, x0, y0, amplitude, sigma) -> np.ndarray:
@@ -68,7 +76,7 @@ def family(name: str, rng: np.random.Generator, shape, eta_i: float, eta_v: floa
     elif name == "null_illuminated_vignetting":
         e = edge_distance(shape)
         eta = 1.0 - 0.4 * np.clip(1.0 - e / 48.0, 0.0, 1.0) ** 2  # eta >= 0.6 >= eta_v
-        data = sky(rng, shape, level=1000.0) * eta
+        data = illuminated(rng, eta)
         truth = labels_from_eta(eta, eta_i, eta_v)
         desc = "smooth raw vignetting with eta >= 0.6; usable science"
     elif name == "strip_sharp":
@@ -87,15 +95,14 @@ def family(name: str, rng: np.random.Generator, shape, eta_i: float, eta_v: floa
         r0 = 0.46 * min(h, w)
         r = np.hypot(x - (w - 1) / 2, y - (h - 1) / 2)
         eta = np.clip((r0 + 6.0 - r) / 12.0, 0.0, 1.0)  # 12px ramp
-        data = sky(rng, shape, level=1000.0) * eta + rng.normal(0.0, 5.0, shape) * (1 - eta)
+        data = illuminated(rng, eta)
         truth = labels_from_eta(eta, eta_i, eta_v)
         desc = "circular field stop with a 12 px illumination ramp (raw)"
     elif name == "circular_stop_calibrated":
         r0 = 0.46 * min(h, w)
         r = np.hypot(x - (w - 1) / 2, y - (h - 1) / 2)
         eta = np.clip((r0 + 6.0 - r) / 12.0, 0.02, 1.0)
-        raw = sky(rng, shape, level=1000.0) * eta
-        data = raw / eta  # flat division amplifies noise where eta is small
+        data = illuminated(rng, eta) / eta  # flat division amplifies noise ~1/sqrt(eta)
         truth = labels_from_eta(eta, eta_i, eta_v)
         desc = "circular field stop after flat division (noise amplified outside)"
     elif name == "strip_amplified":
@@ -129,7 +136,7 @@ FAMILIES = (
 )
 
 
-def write_corpus(out: Path, seeds: int, eta_i: float, eta_v: float, dtype: str) -> dict:
+def write_corpus(out: Path, seeds: int, eta_i: float, eta_v: float, dtype: str, group_dirs: bool = False) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     (out / "truth").mkdir(exist_ok=True)
     manifest = {"generator": GENERATOR_VERSION, "eta_i": eta_i, "eta_v": eta_v, "files": []}
@@ -139,6 +146,12 @@ def write_corpus(out: Path, seeds: int, eta_i: float, eta_v: float, dtype: str) 
             shape = (int(rng.integers(160, 260)), int(rng.integers(160, 260)))
             data, truth, desc = family(fam, rng, shape, eta_i, eta_v)
             name = f"{fam}_{seed:04d}.fits"
+            if group_dirs:
+                # One directory per seed stands in for an independent group
+                # (e.g. a night) for group-bootstrap evaluation.
+                name = f"group_{seed:04d}/{name}"
+                (out / f"group_{seed:04d}").mkdir(exist_ok=True)
+                (out / "truth" / f"group_{seed:04d}").mkdir(exist_ok=True)
             if dtype == "int16":
                 finite = np.isfinite(data)
                 stored = np.clip(np.round(data), -32767, 32767)
@@ -166,10 +179,11 @@ def main() -> int:
     parser.add_argument("--eta-i", type=float, default=0.20)
     parser.add_argument("--eta-v", type=float, default=0.50)
     parser.add_argument("--dtype", choices=("float32", "int16"), default="float32")
+    parser.add_argument("--group-dirs", action="store_true", help="one subdirectory per seed")
     args = parser.parse_args()
     if not 0.0 <= args.eta_i < args.eta_v <= 1.0:
         parser.error("require 0 <= eta_i < eta_v <= 1")
-    manifest = write_corpus(args.output, args.seeds, args.eta_i, args.eta_v, args.dtype)
+    manifest = write_corpus(args.output, args.seeds, args.eta_i, args.eta_v, args.dtype, args.group_dirs)
     print(f"wrote {len(manifest['files'])} fixtures to {args.output}")
     return 0
 

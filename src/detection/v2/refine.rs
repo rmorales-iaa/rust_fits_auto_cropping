@@ -27,6 +27,27 @@ use std::collections::VecDeque;
 pub struct Signature {
     pub level: i8,
     pub dispersion: i8,
+    /// Median residual of the component core: the frame's own zero point for
+    /// relative illumination when the core is unilluminated (level deficit).
+    pub core_residual: Option<f64>,
+}
+
+/// Relative-illumination class of a pixel (decision D4): 3 = strong
+/// (eta < eta_I, invalid), 2 = weak (eta_I <= eta < eta_V, uncertain),
+/// 1 = valid side.
+fn eta_class(eta: f64, eta_invalid: f64, eta_valid: f64) -> u8 {
+    if eta < eta_invalid {
+        3
+    } else if eta < eta_valid {
+        2
+    } else {
+        1
+    }
+}
+
+/// D4 invalid boundary: eta_I = 0.4 * eta_V (0.2 for the shipped 0.5).
+fn eta_invalid(eta_valid: f64) -> f64 {
+    0.4 * eta_valid
 }
 
 pub struct Refined {
@@ -74,7 +95,7 @@ pub fn refine(
                     return 0;
                 }
                 let sigma = bg.noise(x as f64, y as f64).max(1e-300);
-                let mut level_score = || -> Option<f64> {
+                let mut level_score = || -> Option<(f64, f64)> {
                     window.clear();
                     for wy in y.saturating_sub(2)..=(y + 2).min(height - 1) {
                         for wx in x.saturating_sub(2)..=(x + 2).min(width - 1) {
@@ -89,7 +110,7 @@ pub fn refine(
                     }
                     let n_eff = bg.effective_n(window.len());
                     let (median, _) = location_scale_with(window.iter().copied(), &mut scratch);
-                    Some(median / (1.2533 * sigma / n_eff.sqrt()))
+                    Some((median / (1.2533 * sigma / n_eff.sqrt()), median))
                 };
                 let level_z = if signature.level != 0 {
                     level_score()
@@ -115,25 +136,49 @@ pub fn refine(
                     let reference = bg.diff_noise(x as f64, y as f64).max(1e-300);
                     (s_diff.is_finite() && n_diff > 0.0).then(|| {
                         let n_eff = bg.effective_n(n_diff as usize);
-                        (s_diff.max(1e-300) / reference).ln() / (1.36 / n_eff).sqrt()
+                        let ratio = s_diff.max(1e-300) / reference;
+                        (ratio.ln() / (1.36 / n_eff).sqrt(), ratio)
                     })
                 } else {
                     None
                 };
-                let mut best = 0.0_f64; // in units of the high threshold
-                if let Some(z) = level_z {
-                    best = best.max(f64::from(signature.level) * z / high_level);
+                // Significance class (units of the high threshold) and the
+                // D4 relative-illumination class; a pixel is strong/weak only
+                // when it is both significant and on the invalid side of eta.
+                let significance = |z: f64, sign: i8, high: f64| -> u8 {
+                    let t = f64::from(sign) * z / high;
+                    if t >= 1.0 {
+                        3
+                    } else if t >= low {
+                        2
+                    } else {
+                        1
+                    }
+                };
+                let eta_i = eta_invalid(rules.eta_valid);
+                let mut class = 1u8;
+                if let Some((z, residual)) = level_z {
+                    let sig = significance(z, signature.level, high_level);
+                    let eta_level = match signature.core_residual {
+                        // eta = 1 - r / r0, with r0 the unilluminated core.
+                        Some(r0) if signature.level < 0 && r0 < 0.0 => {
+                            eta_class(1.0 - residual / r0, eta_i, rules.eta_valid)
+                        }
+                        _ => 3,
+                    };
+                    class = class.max(sig.min(eta_level));
                 }
-                if let Some(z) = dispersion_z {
-                    best = best.max(f64::from(signature.dispersion) * z / high_disp);
+                if let Some((z, ratio)) = dispersion_z {
+                    let sig = significance(z, signature.dispersion, high_disp);
+                    // Noise-dominated sky: raw ratio^2 ~ eta; flat-divided ~ 1/eta.
+                    let eta = if signature.dispersion < 0 {
+                        ratio * ratio
+                    } else {
+                        1.0 / (ratio * ratio)
+                    };
+                    class = class.max(sig.min(eta_class(eta, eta_i, rules.eta_valid)));
                 }
-                if best >= 1.0 {
-                    3
-                } else if best >= low {
-                    2
-                } else {
-                    1
-                }
+                class
             })
             .collect()
     };

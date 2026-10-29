@@ -292,6 +292,49 @@ Freeze R2–R4 thresholds on development groups using R1.2 (FAR) and R1.4 (power
 R0 (independent; do first) → R1 (blocks all promotion) → R2 → R3 → R4 (R4.2–R4.5 can start after R0 because they consume any mask) → R5 → R6 (R6 profiling starts at R0.1). Every R item ends with a scoped commit, an evidence row in `validation.md`, and status in this section.
 
 
+### Revision 2 implementation status (2026-10-29)
+
+The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = master flats as evaluation labels only, and D4 = eta_I 0.20 / eta_V 0.50 with Q in between, then asked for implementation. Commits on branch `claude/eager-galileo-khb8fs` (local, not pushed): `12036af`, `00122c5`, `6e1e4c3`, `3c8f62b`, `c6b8f5b`, `1c7b7ac` and the documentation/evaluation commit that records this section. Evidence is in [validation](validation.md#revision-2-implementation-evidence-2026-10-29).
+
+| Item | Status | Evidence / remaining |
+| --- | --- | --- |
+| R0.1 stage timers | done | `stage_ms` {read, detect, geometry, write} in summary JSON/CSV. Early error paths can omit some stages. |
+| R0.2 exact selection | done | 2,000-trial bit-identity property test. Decision digest over 48 fixtures x 3 detector models is identical to the previous revision. 7100x5325 detection 1.69 s to 1.17 s single-threaded (-31%, meets the registered >= 30%). |
+| R0.3 intra-image parallelism | done | Ordered per-tile-row collection; same digest; 0.345 s with 4 threads. |
+| R0.4 multiscale reuse | partial | The base scale is reused; the other scales are still separate passes. |
+| R0.5 in-memory mask verification | done | No mask sidecar file. Previous vs new release on 2x18 fixtures in mask and crop modes: 0 science differences; fsync 69 to 41 and 64 to 39; renames 27 to 18. |
+| R0.6 doc drift | done | Revision 2 plus this implementation's docs. |
+| R1.1 label semantics | done (synthetic) | V/I/Q/U0 codes with eta 0.20/0.50 in `tools/make_synthetic_corpus.py` and `tools/flat_labels.py`. |
+| R1.2 null false-alarm calibration | done (synthetic) | Ignored Rust harness with exact Clopper-Pearson bounds over seven null families. G3a result below. Real flat-certified null frames are pending data access. |
+| R1.3 flat-derived labels | tool done | `tools/flat_labels.py` with unit tests. Running it on the yearly tree needs the calibration provenance list and data access (not available in the review container). |
+| R1.4 injection-recovery | done (synthetic) | Rust harness families: strips, corners, raw and flat-divided circular stops. Python corpus with exact truth. |
+| R1.5 metrics and splits | done | `tools/evaluate_masks.py` reconstructs M from products only; Q excluded with best/worst bounds; pooled and macro values; group-bootstrap intervals. |
+| R2.1 background/noise | done (opt-in v2) | Meshes, trusted coherent cluster, Huber surface with blocked-CV degree, extrapolation limit, structure scatter, noise grids, detrended AR(1), support abstention. |
+| R2.2 two-sided evidence | done, amended | Dispersion uses second-difference noise; minimum-effect test against the D4 boundary; noise-only rule added. |
+| R2.3 source mask/protection | done | Pixel-derived FWHM and dilation; protected positive source tiles. A20 probe: 0 pixels removed. |
+| R2.4 correlation demoted | done | v2 does not use correlation as evidence. Detrended correlation is used only in the AR(1) estimate. |
+| R3.1 change-point test | done, amended | CV ratio >= 2 plus an abrupt-step requirement (jump >= 50% of contrast). |
+| R3.2 hysteresis boundaries | done | Exact banded signed distance; A01 probes within 46 px FP and 0 FN on 256-row strips at any tile phase. |
+| R3.3 morphology | not implemented | Off by design; no evidence yet that hole filling is needed. |
+| R3.4 reasons / uncertain band | partial | `uncertain_boundary_pixels` and `uncertain_policy` implemented; the PIXACT3 reason plane is deferred (PIXACT2 still written). |
+| R4.1 exchange-rate policy | done (opt-in key) | `crop_exchange_rate`. Shipped rules keep the component tiers until labelled data justify a lambda. |
+| R4.2 global tolerant rectangle | done | Exhaustive 3-state oracle on 3,000 grids; never smaller than the anchor family. |
+| R4.3 crop fallback (D1) | done | `crop_fallback = bbox_mask` shipped; legacy files keep `keep`. |
+| R4.4 hybrid products (D2) | done | `--mode crop_masked`; the bounding-box product; independent checker verifies masked interiors. |
+| R4.5 support-based abstention | done (v2) | `reference_support_abstained`; v1 keeps its mask-fraction veto for compatibility. |
+| R5 calibration and promotion | open | Synthetic G3a/G3b-type evidence only. G4 needs flat labels and human labels on held-out night groups. v2 stays opt-in. |
+| R6 performance hardening | partial | v2 parallelised and band-limited (37.8 Mpx: 8.3 s to about 2-2.6 s). Border-band v1 evaluation, f32 analysis, weighted memory admission and the full G5 benchmark remain open. |
+
+**Design amendments forced by calibration evidence** (all opt-in v2; each reproduced by the harness before and after the fix):
+1. **Second-difference dispersion instead of residual MAD.** Unmodelled vignetting ramps were counted as noise: 155/200 false alarms at 512 px.
+2. **One-sided minimum-effect test against the D4 boundary.** Significance alone flagged expected photon-noise changes in large tiles.
+3. **Polynomial extrapolation up to two mesh widths beyond trusted support.** Clamping at mesh centres created edge kinks, causing 154/200 gradient false alarms once rho was detrended.
+4. **Abrupt-step requirement in the change-point test.** Two-line models fit hinges and ramps.
+5. **Mesh trust from the largest spatially coherent noise-consistent cluster.** A contaminated robust scale let a quadratic absorb circular field stops: 14/50 detected.
+6. **Smooth clipped mean-absolute noise for quantized data, and at least 8x8 meshes.** Integer MAD granularity split the sky, and small frames abstained.
+
+The harness also showed that a null gradient family must keep illumination at or above eta_V as frame size grows; the family was corrected rather than tuned around.
+
 ## 5. Rules, heuristics and reproducibility configuration
 
 Keep operational `input/config.toml` separate from versioned science policy `input/heuristics.toml`. Proposed schema groups (not current supported keys): `reference`, `sources`, `features`, `components`, `boundary`, `decision`, `geometry`, `uncertainty`. Give each field units, range, interactions, rationale, provenance and missing-data behavior. Bound tile sizes, lag sets, iteration counts, morphology radius, candidate count and uncertainty resamples. Add schema version and migration/error guidance; old configs must not silently acquire different scientific meaning.
