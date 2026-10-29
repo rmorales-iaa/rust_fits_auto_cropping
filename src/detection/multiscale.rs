@@ -2,6 +2,7 @@
 use super::tile_detector::Detection;
 use super::{robust::location_scale, tile_detector::detect_single_scale};
 use crate::config::HeuristicRules;
+use rayon::prelude::*;
 
 const REQUIRED_SCALE_VOTES: u8 = 2;
 
@@ -12,12 +13,12 @@ pub(super) fn detect_multiscale(
     height: usize,
     cfg: &HeuristicRules,
 ) -> Detection {
-    let mut baseline = detect_single_scale(data, width, height, cfg);
     if width.checked_mul(height) != Some(data.len()) {
-        return baseline;
+        return detect_single_scale(data, width, height, cfg);
     }
     let largest_supported = width.min(height) / 3;
     if cfg.tile_size > largest_supported {
+        let mut baseline = detect_single_scale(data, width, height, cfg);
         baseline.accepted = false;
         baseline.mask.fill(false);
         baseline.accepted_components = 0;
@@ -34,6 +35,7 @@ pub(super) fn detect_multiscale(
     scales.sort_unstable();
     scales.dedup();
     if scales.len() < 2 {
+        let mut baseline = detect_single_scale(data, width, height, cfg);
         baseline.accepted = false;
         baseline.mask.fill(false);
         baseline.accepted_components = 0;
@@ -50,15 +52,18 @@ pub(super) fn detect_multiscale(
     let mut maximum_score = 0.0_f64;
     let mut maximum_candidate_tiles = 0;
     let mut maximum_candidate_components = 0;
-    let mut baseline = Some(baseline);
-    for tile_size in scales.iter().copied() {
-        let mut cfg_at_scale = cfg.clone();
-        cfg_at_scale.tile_size = tile_size;
-        let mut result = if tile_size == cfg.tile_size {
-            baseline.take().expect("base scale was evaluated once")
-        } else {
+    // Each scale is an independent deterministic evaluation; run them
+    // concurrently and merge in the fixed ascending scale order, so the result
+    // is identical to evaluating them one after another (plan R0.4).
+    let results: Vec<Detection> = scales
+        .par_iter()
+        .map(|&tile_size| {
+            let mut cfg_at_scale = cfg.clone();
+            cfg_at_scale.tile_size = tile_size;
             detect_single_scale(data, width, height, &cfg_at_scale)
-        };
+        })
+        .collect();
+    for (tile_size, mut result) in scales.iter().copied().zip(results) {
         let is_base_scale = tile_size == cfg.tile_size;
         maximum_score = maximum_score.max(result.score);
         maximum_candidate_tiles = maximum_candidate_tiles.max(result.candidate_tiles);

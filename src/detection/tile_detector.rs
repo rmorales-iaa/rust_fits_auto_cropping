@@ -35,7 +35,6 @@ pub struct Detection {
 struct Tile {
     median: f64,
     sigma: f64,
-    correlation: Option<f64>,
     candidate: bool,
     evidence_ratio: f64,
 }
@@ -177,14 +176,22 @@ pub(super) fn detect_single_scale(
         return empty();
     }
     let mut best_score: f64 = 0.0;
-    for (tile, reference) in tiles.iter_mut().zip(reference_values) {
+    for (index, (tile, reference)) in tiles.iter_mut().zip(reference_values).enumerate() {
         let delta = (tile.median - reference).abs() / scale;
         let quiet = typical_noise > 0.0
             && tile.sigma.is_finite()
             && tile.sigma <= typical_noise * cfg.maximum_tile_noise_ratio;
-        let correlated = tile
-            .correlation
-            .is_some_and(|r| r >= cfg.minimum_spatial_correlation);
+        // Correlation only supports an already high-contrast tile, so it is
+        // evaluated only when it can change the decision (same result as
+        // computing it for every tile).
+        let correlated = || {
+            let (tx, ty) = (index % cols, index / cols);
+            let (x0, y0) = (tx * cfg.tile_size, ty * cfg.tile_size);
+            let x1 = (x0 + cfg.tile_size).min(width);
+            let y1 = (y0 + cfg.tile_size).min(height);
+            lag_one_correlation(data, width, height, x0, x1, y0, y1)
+                .is_some_and(|r| r >= cfg.minimum_spatial_correlation)
+        };
         let uniform_reference = match cfg.reference_model {
             ReferenceModel::CentralTiles => noise_scale <= f64::EPSILON,
             ReferenceModel::RobustAffine => scale <= f64::EPSILON,
@@ -196,7 +203,7 @@ pub(super) fn detect_single_scale(
             0.0
         };
         tile.candidate =
-            delta >= cfg.minimum_abs_z_score && (quiet || correlated || uniform_contrast);
+            delta >= cfg.minimum_abs_z_score && (quiet || uniform_contrast || correlated());
         if delta.is_finite() {
             best_score = best_score.max(delta.min(1.0e6));
         }
@@ -483,7 +490,6 @@ fn tile_statistics(data: &[f64], width: usize, height: usize, tile_size: usize) 
                     Tile {
                         median,
                         sigma,
-                        correlation: lag_one_correlation(data, width, height, x0, x1, y0, y1),
                         candidate: false,
                         evidence_ratio: 0.0,
                     }
