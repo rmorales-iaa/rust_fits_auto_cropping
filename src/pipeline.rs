@@ -5,6 +5,7 @@ use crate::{
     durability::sync_parent,
     fits_image::{is_gzip_compressed, read_image},
     logger::Logger,
+    memory::{Admission, MemoryBudget, WorkloadProfile},
     model::{FileOutcome, OutcomeKind},
     output_layout::{OutputLayout, ProductCategory},
     report,
@@ -125,12 +126,13 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
     let available_cores = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    let workers = effective_worker_count(
-        config.processing.threads,
-        available_cores,
-        config.processing.memory_budget_mib,
-        config.processing.maximum_image_mib,
-    );
+    // Memory is governed per image by weighted admission (crate::memory), so
+    // the worker count only follows the CPU configuration.
+    let workers = effective_worker_count(config.processing.threads, available_cores);
+    let admission = Admission {
+        budget: MemoryBudget::new(config.processing.memory_budget_mib),
+        profile: WorkloadProfile::new(&heuristics.heuristics, args.png),
+    };
     let run_id = Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
     let layout = Arc::new(OutputLayout::prepare(
         &args.output_dir,
@@ -170,6 +172,7 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
                         png_preview: args.png,
                         reason_mask: args.reason_mask,
                     },
+                    &admission,
                 );
                 match logger.lock() {
                     Ok(mut log) => {
@@ -294,6 +297,7 @@ fn process_one(
     config: &Config,
     heuristics: &HeuristicsConfig,
     options: ProductOptions,
+    admission: &Admission,
 ) -> FileOutcome {
     let timer = Instant::now();
     let rel = path.strip_prefix(input).unwrap_or(path);
@@ -313,7 +317,7 @@ fn process_one(
         return finish(outcome, timer);
     }
     let read_timer = Instant::now();
-    let read_result = read_image(path, config.processing.maximum_image_mib);
+    let read_result = read_image(path, config.processing.maximum_image_mib, Some(admission));
     let read_ms = elapsed_ms(read_timer);
     let result = match read_result {
         Ok(Err(reason)) => {

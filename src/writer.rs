@@ -1,9 +1,7 @@
 //! FITS products. Science products copy the source primary header card for
 //! card and add MO_ provenance (see `product_header`); the transient reason
 //! plane is serialized with fitskit.
-use crate::fits_image::{
-    Image, read_fits_snapshot, read_fits_snapshot_with_cards, unused_integer_value,
-};
+use crate::fits_image::{Image, read_fits_snapshot, read_fits_snapshot_with_cards};
 use crate::{crop::CropRect, durability::sync_parent};
 use anyhow::{Context, bail};
 use chrono::{SecondsFormat, Utc};
@@ -418,30 +416,92 @@ fn choose_mask_blank(source: &FitsFile, bitpix: i64, mask: &[bool]) -> anyhow::R
     if image.pixels.len() != mask.len() {
         bail!("source dimensions changed before BLANK selection");
     }
-    let retained: Vec<i64> = match &image.pixels {
-        PixelData::U8(values) => values
+    smallest_unused_code(&image.pixels, mask, bitpix)
+}
+
+/// Smallest stored code (from the type minimum upward) that no retained
+/// sample uses; same result as `unused_integer_value` over the retained
+/// values. 8/16-bit images use a presence table (no copy); 32/64-bit images
+/// sort a copy in their native width.
+fn smallest_unused_code(pixels: &PixelData, excluded: &[bool], bitpix: i64) -> anyhow::Result<i64> {
+    fn first_absent(present: &[bool], min: i64, bitpix: i64) -> anyhow::Result<i64> {
+        present
             .iter()
-            .zip(mask)
-            .filter_map(|(&value, &excluded)| (!excluded).then_some(i64::from(value)))
-            .collect(),
-        PixelData::I16(values) => values
-            .iter()
-            .zip(mask)
-            .filter_map(|(&value, &excluded)| (!excluded).then_some(i64::from(value)))
-            .collect(),
-        PixelData::I32(values) => values
-            .iter()
-            .zip(mask)
-            .filter_map(|(&value, &excluded)| (!excluded).then_some(i64::from(value)))
-            .collect(),
-        PixelData::I64(values) => values
-            .iter()
-            .zip(mask)
-            .filter_map(|(&value, &excluded)| (!excluded).then_some(value))
-            .collect(),
+            .position(|p| !p)
+            .map(|i| min + i as i64)
+            .ok_or_else(|| anyhow::Error::new(crate::fits_image::NoUnusedIntegerCode { bitpix }))
+    }
+    match pixels {
+        PixelData::U8(values) => {
+            let mut present = [false; 256];
+            for (&value, &x) in values.iter().zip(excluded) {
+                if !x {
+                    present[usize::from(value)] = true;
+                }
+            }
+            first_absent(&present, 0, bitpix)
+        }
+        PixelData::I16(values) => {
+            let mut present = vec![false; 65_536];
+            for (&value, &x) in values.iter().zip(excluded) {
+                if !x {
+                    present[(i32::from(value) + 32_768) as usize] = true;
+                }
+            }
+            first_absent(&present, i64::from(i16::MIN), bitpix)
+        }
+        PixelData::I32(values) => {
+            let mut retained: Vec<i32> = values
+                .iter()
+                .zip(excluded)
+                .filter_map(|(&value, &x)| (!x).then_some(value))
+                .collect();
+            retained.sort_unstable();
+            retained.dedup();
+            next_after_sorted(
+                retained.into_iter().map(i64::from),
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+                bitpix,
+            )
+        }
+        PixelData::I64(values) => {
+            let mut retained: Vec<i64> = values
+                .iter()
+                .zip(excluded)
+                .filter_map(|(&value, &x)| (!x).then_some(value))
+                .collect();
+            retained.sort_unstable();
+            retained.dedup();
+            next_after_sorted(retained.into_iter(), i64::MIN, i64::MAX, bitpix)
+        }
         _ => bail!("integer BITPIX does not match source pixel storage"),
-    };
-    unused_integer_value(bitpix, &retained)
+    }
+}
+
+/// First code from `min` not present in the sorted, deduplicated `values`.
+fn next_after_sorted(
+    values: impl Iterator<Item = i64>,
+    min: i64,
+    max: i64,
+    bitpix: i64,
+) -> anyhow::Result<i64> {
+    let mut candidate = min;
+    for value in values {
+        if value < candidate {
+            continue;
+        }
+        if value > candidate {
+            break;
+        }
+        if candidate == max {
+            return Err(anyhow::Error::new(crate::fits_image::NoUnusedIntegerCode {
+                bitpix,
+            }));
+        }
+        candidate += 1;
+    }
+    Ok(candidate)
 }
 
 pub(super) fn push_history(header: &mut Header, text: &str) {
@@ -661,7 +721,7 @@ mod tests {
             "DATAMIN =                  0.0",
         ];
         fs::write(&source, raw_fits(&cards, &data)).unwrap();
-        let image = read_image(&source, 16).unwrap().unwrap();
+        let image = read_image(&source, 256, None).unwrap().unwrap();
         let mut mask = vec![false; width * height];
         for y in 0..height {
             for x in 0..6 {
@@ -724,6 +784,52 @@ mod tests {
         }
         let file = FitsFile::from_file(&cropped).unwrap();
         file.primary().verify_datasum().unwrap();
+    }
+
+    #[test]
+    fn presence_table_blank_search_matches_the_sorting_reference() {
+        use crate::fits_image::unused_integer_value;
+        let mut state = 1u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> 33
+        };
+        for trial in 0..300 {
+            let n = 1 + (next() % 400) as usize;
+            let excluded: Vec<bool> = (0..n).map(|_| next() % 5 == 0).collect();
+            let pick = |v: &[i64]| -> Vec<i64> {
+                v.iter()
+                    .zip(&excluded)
+                    .filter(|(_, x)| !**x)
+                    .map(|(v, _)| *v)
+                    .collect()
+            };
+            // Values concentrated near the type minimum exercise the gaps.
+            let u8s: Vec<u8> = (0..n).map(|_| (next() % 40) as u8).collect();
+            let wide: Vec<i64> = u8s.iter().map(|&v| i64::from(v)).collect();
+            assert_eq!(
+                super::smallest_unused_code(&PixelData::U8(u8s.clone()), &excluded, 8).unwrap(),
+                unused_integer_value(8, &pick(&wide)).unwrap(),
+                "u8 trial {trial}"
+            );
+            let i16s: Vec<i16> = (0..n).map(|_| i16::MIN + (next() % 60) as i16).collect();
+            let wide: Vec<i64> = i16s.iter().map(|&v| i64::from(v)).collect();
+            assert_eq!(
+                super::smallest_unused_code(&PixelData::I16(i16s), &excluded, 16).unwrap(),
+                unused_integer_value(16, &pick(&wide)).unwrap()
+            );
+            let i32s: Vec<i32> = (0..n).map(|_| i32::MIN + (next() % 60) as i32).collect();
+            let wide: Vec<i64> = i32s.iter().map(|&v| i64::from(v)).collect();
+            assert_eq!(
+                super::smallest_unused_code(&PixelData::I32(i32s), &excluded, 32).unwrap(),
+                unused_integer_value(32, &pick(&wide)).unwrap()
+            );
+        }
+        // Full occupancy has no free code, exactly like the reference.
+        let all: Vec<u8> = (0..=255).collect();
+        assert!(super::smallest_unused_code(&PixelData::U8(all), &[false; 256], 8).is_err());
     }
 
     #[test]
@@ -809,7 +915,7 @@ mod tests {
             .set("BLANK", HeaderValue::Integer(255), None);
         fits.to_file(&source).unwrap();
 
-        let image = read_image(&source, 16).unwrap().unwrap();
+        let image = read_image(&source, 256, None).unwrap().unwrap();
         let mut mask = vec![false; width * height];
         for y in 0..16 {
             for x in 0..32 {
@@ -851,7 +957,7 @@ mod tests {
         );
         original_file.to_file(&source).unwrap();
         let expected_source_sha256 = format!("{:x}", Sha256::digest(fs::read(&source).unwrap()));
-        let image = read_image(&source, 16).unwrap().unwrap();
+        let image = read_image(&source, 256, None).unwrap().unwrap();
         assert_eq!(image.source_sha256, expected_source_sha256);
 
         let mut replacement = FitsFile::with_primary_image(ImageData::new(

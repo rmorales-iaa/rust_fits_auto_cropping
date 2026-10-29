@@ -9,6 +9,7 @@ mod durability;
 mod equivalence_harness;
 mod fits_image;
 mod logger;
+mod memory;
 mod model;
 mod output_layout;
 mod pipeline;

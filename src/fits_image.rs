@@ -1,4 +1,5 @@
 //! Rust-native FITS loading, eligibility checks, and detection-value conversion.
+use crate::memory::{Admission, Reservation};
 use anyhow::{Context, bail};
 use fitskit::{FitsFile, HduData, Header, Keyword, PixelData};
 use rayon::prelude::*;
@@ -9,8 +10,6 @@ use std::{
     io::{self, Cursor, Read, Seek, SeekFrom},
     path::Path,
 };
-
-const ESTIMATED_WORKSPACE_BYTES_PER_PIXEL: usize = 40;
 
 #[derive(Debug)]
 pub struct NoUnusedIntegerCode {
@@ -54,6 +53,8 @@ pub struct Image {
     /// The primary header's original 80-byte cards (END excluded), captured
     /// from the same hashed read as `source_fits`. Products copy them verbatim.
     pub source_header_cards: Vec<[u8; 80]>,
+    /// Memory budget share held until the image is dropped.
+    _reservation: Option<Reservation>,
 }
 
 #[derive(Clone)]
@@ -68,6 +69,7 @@ pub struct RawHeaderCard {
 pub fn read_image(
     path: &Path,
     maximum_image_mib: usize,
+    admission: Option<&Admission>,
 ) -> anyhow::Result<Result<Image, Eligibility>> {
     // Inspect headers and seek over payloads before allocating parsed pixel buffers.
     let mut source =
@@ -87,13 +89,17 @@ pub fn read_image(
     let n = width
         .checked_mul(height)
         .ok_or_else(|| anyhow::anyhow!("image dimensions overflow"))?;
-    let max_pixels =
-        maximum_image_mib.saturating_mul(1024 * 1024) / ESTIMATED_WORKSPACE_BYTES_PER_PIXEL;
-    if n > max_pixels {
+    // Measured peak model (crate::memory); checked and reserved before any
+    // pixel buffer is allocated.
+    let profile = admission.map(|a| a.profile).unwrap_or_default();
+    let estimate = profile.peak_bytes(n, bitpix);
+    if estimate > (maximum_image_mib as u64).saturating_mul(1024 * 1024) {
         bail!(
-            "image has {n} pixels; estimated workspace exceeds configured maximum_image_mib={maximum_image_mib}"
+            "image has {n} pixels; estimated peak {} MiB exceeds configured maximum_image_mib={maximum_image_mib}",
+            estimate.div_ceil(1024 * 1024)
         );
     }
+    let reservation = admission.map(|a| a.budget.reserve(estimate)).transpose()?;
     source.seek(SeekFrom::Start(0))?;
     let (file, source_sha256, source_header_cards) = {
         let mut reader = HashingReader::new(&mut source, repairs.clone());
@@ -200,6 +206,7 @@ pub fn read_image(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned()),
         source_header_cards,
+        _reservation: reservation,
     }))
 }
 
@@ -669,6 +676,8 @@ fn center_float_values<T: Copy + Send + Sync>(
         .collect()
 }
 
+/// Reference implementation (tests): smallest unused code by sorting i64 values.
+#[cfg(test)]
 pub fn unused_integer_value(bitpix: i64, raw: &[i64]) -> anyhow::Result<i64> {
     let (min, max) = match bitpix {
         8 => (0, 255),

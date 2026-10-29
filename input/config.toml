@@ -1,7 +1,7 @@
 # Operational settings. Science decision thresholds are in heuristics.toml.
 [processing]
-threads = 4 # 0 selects all available logical CPUs, bounded by the memory budget.
+threads = 4 # 0 selects all available logical CPUs; memory is governed by weighted admission.
 recursive = false
-memory_budget_mib = 8192
-maximum_image_mib = 1536 # Covers 7100x5325 inputs (~1,441 MiB) at the current 40-byte/pixel workspace estimate; not an RSS cap.
+memory_budget_mib = 8192 # Shared budget: each image reserves its estimated peak before allocation.
+maximum_image_mib = 2048 # Per-image cap on the measured peak model; covers 7100x5325 float64 with previews (~1,650 MiB).
 mode = "mask" # mask preserves dimensions; crop selects an axis-aligned rectangle (see heuristics residual fraction).
