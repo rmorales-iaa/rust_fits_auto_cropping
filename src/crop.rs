@@ -1,6 +1,7 @@
 //! Deterministic largest axis-aligned rectangle that excludes all proposed artifacts.
 
 mod global_search;
+use rayon::prelude::*;
 
 const MAX_RESIDUAL_CROP_CANDIDATES: usize = 100_000;
 
@@ -103,24 +104,34 @@ pub fn residual_tolerant_rectangle(
         .saturating_mul(top_offsets.len())
         .saturating_mul(right_offsets.len())
         .saturating_mul(bottom_offsets.len());
-    let mut best = Best::default();
-
-    for &left in &left_offsets {
-        for &top in &top_offsets {
-            for &right in &right_offsets {
-                for &bottom in &bottom_offsets {
-                    let rect = CropRect {
-                        x: clean_anchor.x - left,
-                        y: clean_anchor.y - top,
-                        width: clean_anchor.width + left + right,
-                        height: clean_anchor.height + top + bottom,
-                    };
-                    if let Some(candidate) = ctx.evaluate(rect) {
-                        best.offer(candidate, ctx.accepts(&candidate));
+    // Each left offset is searched independently; merging the per-offset
+    // bests in offset order keeps the sequential first-seen tie rule, so the
+    // result is identical to the nested sequential loops.
+    let partial: Vec<Best> = left_offsets
+        .par_iter()
+        .map(|&left| {
+            let mut best = Best::default();
+            for &top in &top_offsets {
+                for &right in &right_offsets {
+                    for &bottom in &bottom_offsets {
+                        let rect = CropRect {
+                            x: clean_anchor.x - left,
+                            y: clean_anchor.y - top,
+                            width: clean_anchor.width + left + right,
+                            height: clean_anchor.height + top + bottom,
+                        };
+                        if let Some(candidate) = ctx.evaluate(rect) {
+                            best.offer(candidate, ctx.accepts(&candidate));
+                        }
                     }
                 }
             }
-        }
+            best
+        })
+        .collect();
+    let mut best = Best::default();
+    for part in partial {
+        best.merge(part);
     }
     // Plan R4.2: also search rectangles that need not contain the anchor and
     // keep the better feasible result, so this can never return a smaller crop
@@ -145,6 +156,17 @@ pub(crate) struct Best {
 }
 
 impl Best {
+    /// Fold a later partial result into this one, as if its candidates had
+    /// been offered after ours (ties keep the earlier candidate).
+    pub fn merge(&mut self, later: Best) {
+        if let Some(candidate) = later.residual {
+            self.offer(candidate, false);
+        }
+        if let Some(candidate) = later.accepted {
+            self.offer(candidate, true);
+        }
+    }
+
     pub fn offer(&mut self, candidate: CropCandidate, accepted: bool) {
         if self
             .residual
@@ -181,17 +203,12 @@ impl SearchContext {
         height: usize,
         policy: CropPolicy,
     ) -> Option<Self> {
-        let defined_pixels = undefined_mask
-            .iter()
-            .filter(|undefined| !**undefined)
-            .count();
-        let total_artifacts = artifact_mask
-            .iter()
-            .zip(undefined_mask)
-            .filter(|(artifact, undefined)| **artifact && !**undefined)
-            .count();
         let (artifact_prefix, undefined_prefix) =
             build_prefix_counts(artifact_mask, undefined_mask, width, height)?;
+        // The full-frame table entries are the exact totals.
+        let last = artifact_prefix.len() - 1;
+        let defined_pixels = width * height - undefined_prefix[last] as usize;
+        let total_artifacts = artifact_prefix[last] as usize;
         Some(Self {
             artifact_prefix,
             undefined_prefix,
@@ -313,6 +330,10 @@ fn offset_count(maximum: usize, stride: usize) -> usize {
     maximum / stride + 1 + usize::from(!maximum.is_multiple_of(stride))
 }
 
+/// Summed-area tables of (flagged and defined) and undefined samples, with a
+/// zero first row and column. Rows are prefixed in parallel, then accumulated
+/// down the image; integer arithmetic makes the result identical to a
+/// sequential construction.
 fn build_prefix_counts(
     artifacts: &[bool],
     undefined: &[bool],
@@ -327,16 +348,27 @@ fn build_prefix_counts(
     let prefix_len = stride.checked_mul(height.checked_add(1)?)?;
     let mut artifact_prefix = vec![0u32; prefix_len];
     let mut undefined_prefix = vec![0u32; prefix_len];
-    for y in 0..height {
-        let mut artifact_row = 0u32;
-        let mut undefined_row = 0u32;
-        for x in 0..width {
-            let index = y * width + x;
-            artifact_row += u32::from(artifacts[index] && !undefined[index]);
-            undefined_row += u32::from(undefined[index]);
-            let target = (y + 1) * stride + x + 1;
-            artifact_prefix[target] = artifact_prefix[y * stride + x + 1] + artifact_row;
-            undefined_prefix[target] = undefined_prefix[y * stride + x + 1] + undefined_row;
+    artifact_prefix[stride..]
+        .par_chunks_mut(stride)
+        .zip(undefined_prefix[stride..].par_chunks_mut(stride))
+        .enumerate()
+        .for_each(|(y, (artifact_row, undefined_row))| {
+            let (mut a, mut u) = (0u32, 0u32);
+            for x in 0..width {
+                let index = y * width + x;
+                a += u32::from(artifacts[index] && !undefined[index]);
+                u += u32::from(undefined[index]);
+                artifact_row[x + 1] = a;
+                undefined_row[x + 1] = u;
+            }
+        });
+    for table in [&mut artifact_prefix, &mut undefined_prefix] {
+        for y in 1..height {
+            let (above, row) = table.split_at_mut((y + 1) * stride);
+            let above = &above[y * stride..];
+            for (value, add) in row[..stride].iter_mut().zip(above) {
+                *value += *add;
+            }
         }
     }
     Some((artifact_prefix, undefined_prefix))
@@ -428,6 +460,37 @@ pub fn largest_unmasked_rectangle(mask: &[bool], width: usize, height: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_prefix_counts_equal_a_naive_summed_area_table() {
+        let mut state = 9u64;
+        for (w, h) in [(1, 1), (7, 3), (64, 65), (130, 9)] {
+            let mut bit = || {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                state >> 61 == 0
+            };
+            let artifacts: Vec<bool> = (0..w * h).map(|_| bit()).collect();
+            let undefined: Vec<bool> = (0..w * h).map(|_| bit()).collect();
+            let (a, u) = build_prefix_counts(&artifacts, &undefined, w, h).unwrap();
+            for y in 0..=h {
+                for x in 0..=w {
+                    let (mut na, mut nu) = (0u32, 0u32);
+                    for yy in 0..y {
+                        for xx in 0..x {
+                            let i = yy * w + xx;
+                            na += u32::from(artifacts[i] && !undefined[i]);
+                            nu += u32::from(undefined[i]);
+                        }
+                    }
+                    assert_eq!(
+                        (a[y * (w + 1) + x], u[y * (w + 1) + x]),
+                        (na, nu),
+                        "{w}x{h} at {x},{y}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn finds_expected_rectangle_around_four_corner_pattern() {

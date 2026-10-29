@@ -14,6 +14,7 @@
 //! local edge refinement; that case is a bounded heuristic and makes no global
 //! optimality claim. Every candidate is re-verified with exact integer counts.
 use super::{Best, CropRect, SearchContext};
+use rayon::prelude::*;
 
 /// Upper bound on column evaluations (row pairs x columns x log2 columns).
 const WORK_BUDGET: usize = 60_000_000;
@@ -46,63 +47,76 @@ pub(crate) fn search(ctx: &SearchContext, best: &mut Best) -> GlobalSummary {
     }
     let rows = row_boundaries(height, step);
     let rho = ctx.policy.maximum_residual_artifact_fraction;
-    let mut examined = 0usize;
-    let mut prefix = vec![0.0_f64; width + 1];
-    let mut running_max: Vec<f64> = Vec::with_capacity(width + 1);
-    for (ti, &top) in rows.iter().enumerate() {
-        for &bottom in &rows[ti + 1..] {
-            let h = bottom - top;
-            let mut run_start = 0usize;
-            running_max.clear();
-            for x in 0..width {
-                let column = CropRect {
-                    x,
-                    y: top,
-                    width: 1,
-                    height: h,
-                };
-                if ctx.undefined_in(column) != 0 {
-                    // Undefined samples are hard exclusions: restart the run.
-                    run_start = x + 1;
-                    running_max.clear();
-                    continue;
-                }
-                if running_max.is_empty() {
-                    prefix[x] = 0.0;
-                    running_max.push(0.0);
-                }
-                let weight = ctx.flags_in(column) as f64 - rho * h as f64;
-                prefix[x + 1] = prefix[x] + weight;
-                let target = prefix[x + 1];
-                // running_max[k] = max(prefix[run_start..=run_start+k]).
-                let first = running_max.partition_point(|&value| value < target);
-                if first <= x - run_start {
-                    let mut left = run_start + first;
-                    // Floating rounding can misplace an equality boundary;
-                    // exact counts decide, moving right until feasible.
-                    while left <= x {
-                        let rect = CropRect {
-                            x: left,
-                            y: top,
-                            width: x - left + 1,
-                            height: h,
-                        };
-                        examined += 1;
-                        if let Some(candidate) = ctx.evaluate(rect) {
-                            best.offer(candidate, ctx.accepts(&candidate));
-                            break;
-                        }
-                        left += 1;
+    // Top boundaries are independent; per-top bests are merged in top order,
+    // which keeps the sequential first-seen tie rule (identical result).
+    let partial: Vec<(Best, usize)> = (0..rows.len())
+        .into_par_iter()
+        .map(|ti| {
+            let top = rows[ti];
+            let mut local = Best::default();
+            let mut examined = 0usize;
+            let mut prefix = vec![0.0_f64; width + 1];
+            let mut running_max: Vec<f64> = Vec::with_capacity(width + 1);
+            for &bottom in &rows[ti + 1..] {
+                let h = bottom - top;
+                let mut run_start = 0usize;
+                running_max.clear();
+                for x in 0..width {
+                    let column = CropRect {
+                        x,
+                        y: top,
+                        width: 1,
+                        height: h,
+                    };
+                    if ctx.undefined_in(column) != 0 {
+                        // Undefined samples are hard exclusions: restart the run.
+                        run_start = x + 1;
+                        running_max.clear();
+                        continue;
                     }
+                    if running_max.is_empty() {
+                        prefix[x] = 0.0;
+                        running_max.push(0.0);
+                    }
+                    let weight = ctx.flags_in(column) as f64 - rho * h as f64;
+                    prefix[x + 1] = prefix[x] + weight;
+                    let target = prefix[x + 1];
+                    // running_max[k] = max(prefix[run_start..=run_start+k]).
+                    let first = running_max.partition_point(|&value| value < target);
+                    if first <= x - run_start {
+                        let mut left = run_start + first;
+                        // Floating rounding can misplace an equality boundary;
+                        // exact counts decide, moving right until feasible.
+                        while left <= x {
+                            let rect = CropRect {
+                                x: left,
+                                y: top,
+                                width: x - left + 1,
+                                height: h,
+                            };
+                            examined += 1;
+                            if let Some(candidate) = ctx.evaluate(rect) {
+                                local.offer(candidate, ctx.accepts(&candidate));
+                                break;
+                            }
+                            left += 1;
+                        }
+                    }
+                    let next = running_max
+                        .last()
+                        .copied()
+                        .unwrap_or(f64::NEG_INFINITY)
+                        .max(prefix[x + 1]);
+                    running_max.push(next);
                 }
-                let next = running_max
-                    .last()
-                    .copied()
-                    .unwrap_or(f64::NEG_INFINITY)
-                    .max(prefix[x + 1]);
-                running_max.push(next);
             }
-        }
+            (local, examined)
+        })
+        .collect();
+    let mut examined = 0usize;
+    for (local, count) in partial {
+        best.merge(local);
+        examined += count;
     }
     if step > 1 {
         examined += refine(ctx, best, step);
