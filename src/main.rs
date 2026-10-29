@@ -4,6 +4,8 @@ mod config;
 mod crop;
 mod detection;
 mod durability;
+#[cfg(test)]
+mod equivalence_harness;
 mod fits_image;
 mod logger;
 mod model;

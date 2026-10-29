@@ -61,7 +61,18 @@ pub struct FileOutcome {
     pub output_reason_mask: Option<PathBuf>,
     pub output_png: Option<PathBuf>,
     pub source_sha256: Option<String>,
+    /// Stage wall times in milliseconds (plan R0.1); diagnostic, not a benchmark.
+    pub stage_ms: StageTimes,
     pub elapsed_ms: u128,
+}
+
+/// Per-input stage wall times in milliseconds.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct StageTimes {
+    pub read: f64,
+    pub detect: f64,
+    pub geometry: f64,
+    pub write: f64,
 }
 
 impl FileOutcome {
@@ -114,6 +125,7 @@ impl FileOutcome {
             output_reason_mask: None,
             output_png: None,
             source_sha256: None,
+            stage_ms: StageTimes::default(),
             elapsed_ms: 0,
         }
     }

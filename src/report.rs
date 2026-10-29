@@ -82,7 +82,7 @@ pub fn write(
         serde_json::to_vec_pretty(&summary)?,
     )?;
     let mut csv = String::from(
-        "input,status,reason_code,reason,width,height,source_sha256,original_undefined_pixels,candidate_mask_pixels,candidate_undefined_pixels,candidate_proposed_overlap_pixels,proposed_mask_pixels,proposed_undefined_pixels,applied_artifact_pixels,applied_artifact_undefined_pixels,masked_pixels,crop_excluded_undefined_pixels,crop_applied_undefined_pixels,crop_artifact_pixels_retained,crop_residual_artifact_fraction,crop_search_candidates,crop_search_step_px,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_reason_mask,output_png,elapsed_ms\n",
+        "input,status,reason_code,reason,width,height,source_sha256,original_undefined_pixels,candidate_mask_pixels,candidate_undefined_pixels,candidate_proposed_overlap_pixels,proposed_mask_pixels,proposed_undefined_pixels,applied_artifact_pixels,applied_artifact_undefined_pixels,masked_pixels,crop_excluded_undefined_pixels,crop_applied_undefined_pixels,crop_artifact_pixels_retained,crop_residual_artifact_fraction,crop_search_candidates,crop_search_step_px,mask_fraction,proposed_mask_fraction,candidate_tiles,candidate_components,accepted_components,score,evidence_ratio,artifact_benefit,valid_pixel_loss,net_utility,crop_shape,crop_origin_x,crop_origin_y,crop_width,crop_height,crop_center_x,crop_center_y,crop_radius,image_area_retained,artifact_pixels_removed,unmasked_pixels_sacrificed,output_image,output_mask,output_reason_mask,output_png,read_ms,detect_ms,geometry_ms,write_ms,elapsed_ms\n",
     );
     for o in outcomes {
         let fields = [
@@ -148,6 +148,10 @@ pub fn write(
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
+            format!("{:.3}", o.stage_ms.read),
+            format!("{:.3}", o.stage_ms.detect),
+            format!("{:.3}", o.stage_ms.geometry),
+            format!("{:.3}", o.stage_ms.write),
             o.elapsed_ms.to_string(),
         ];
         csv.push_str(

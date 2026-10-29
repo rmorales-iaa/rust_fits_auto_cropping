@@ -315,7 +315,10 @@ fn process_one(
         }
         return finish(outcome, timer);
     }
-    let result = match read_image(path, config.processing.maximum_image_mib) {
+    let read_timer = Instant::now();
+    let read_result = read_image(path, config.processing.maximum_image_mib);
+    let read_ms = elapsed_ms(read_timer);
+    let result = match read_result {
         Ok(Err(reason)) => {
             let reason_code = eligibility_reason_code(&reason);
             let mut outcome = FileOutcome::new(
@@ -339,12 +342,14 @@ fn process_one(
             outcome
         }
         Ok(Ok(image)) => {
+            let detect_timer = Instant::now();
             let detection = detect_border(
                 &image.values,
                 image.width,
                 image.height,
                 &heuristics.heuristics,
             );
+            let detect_ms = elapsed_ms(detect_timer);
             let mut outcome = FileOutcome::new(
                 rel.to_path_buf(),
                 if detection.accepted {
@@ -355,6 +360,7 @@ fn process_one(
                 detection.reason.clone(),
             );
             outcome.reason_code = detection.reason_code;
+            outcome.stage_ms.detect = detect_ms;
             outcome.width = Some(image.width);
             outcome.height = Some(image.height);
             outcome.source_sha256 = Some(image.source_sha256.clone());
@@ -386,6 +392,7 @@ fn process_one(
                     .zip(&image.values)
                     .filter(|(candidate, value)| **candidate && !value.is_finite())
                     .count();
+                let geometry_timer = Instant::now();
                 let crop_search = if matches!(config.processing.mode, ProcessingMode::Crop)
                     && image.crop_wcs_unsupported.is_none()
                 {
@@ -424,6 +431,7 @@ fn process_one(
                 } else {
                     None
                 };
+                outcome.stage_ms.geometry = elapsed_ms(geometry_timer);
                 let selected_crop =
                     crop_search.map(|search| search.accepted.unwrap_or(search.proposed));
                 let crop = selected_crop.map(|candidate| candidate.rect);
@@ -528,6 +536,7 @@ fn process_one(
                         if crop_accepted { "accepted" } else { "rejected; source retained" }
                     ));
                 }
+                let write_timer = Instant::now();
                 if !options.dry_run {
                     let image_path_result = if crop_accepted {
                         layout.cropped_image_path(rel)
@@ -772,6 +781,7 @@ fn process_one(
                         outcome.output_png = Some(preview);
                     }
                 }
+                outcome.stage_ms.write = elapsed_ms(write_timer);
             } else if !options.dry_run {
                 let image_path = match layout.product_path(ProductCategory::Image, rel) {
                     Ok(path) => path,
@@ -799,7 +809,13 @@ fn process_one(
             outcome
         }
     };
+    let mut result = result;
+    result.stage_ms.read = read_ms;
     finish(result, timer)
+}
+
+fn elapsed_ms(timer: Instant) -> f64 {
+    timer.elapsed().as_secs_f64() * 1_000.0
 }
 
 fn publish_passthrough_image(

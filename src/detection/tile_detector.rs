@@ -1,9 +1,12 @@
 //! Candidate mask from robust tile contrast, tile noise and border connectivity.
 use super::reference::fit_robust_affine;
 use super::{
-    correlation::lag_one_correlation, multiscale::detect_multiscale, robust::location_scale,
+    correlation::lag_one_correlation,
+    multiscale::detect_multiscale,
+    robust::{location_scale, location_scale_with},
 };
 use crate::config::{EvidenceModel, HeuristicRules, ReferenceModel};
+use rayon::prelude::*;
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -77,34 +80,7 @@ pub(super) fn detect_single_scale(
     }
     let cols = width.div_ceil(cfg.tile_size);
     let rows = height.div_ceil(cfg.tile_size);
-    let mut tiles = Vec::with_capacity(rows * cols);
-    for ty in 0..rows {
-        for tx in 0..cols {
-            let mut samples = Vec::new();
-            for y in ty * cfg.tile_size..((ty + 1) * cfg.tile_size).min(height) {
-                samples.extend(
-                    data[y * width + tx * cfg.tile_size
-                        ..y * width + ((tx + 1) * cfg.tile_size).min(width)]
-                        .iter()
-                        .copied()
-                        .filter(|v| v.is_finite()),
-                );
-            }
-            let (median, sigma) = location_scale(&samples);
-            let x0 = tx * cfg.tile_size;
-            let x1 = ((tx + 1) * cfg.tile_size).min(width);
-            let y0 = ty * cfg.tile_size;
-            let y1 = ((ty + 1) * cfg.tile_size).min(height);
-            let correlation = lag_one_correlation(data, width, height, x0, x1, y0, y1);
-            tiles.push(Tile {
-                median,
-                sigma,
-                correlation,
-                candidate: false,
-                evidence_ratio: 0.0,
-            });
-        }
-    }
+    let mut tiles = tile_statistics(data, width, height, cfg.tile_size);
     let interior_indices: Vec<usize> = (0..rows)
         .flat_map(|y| {
             (0..cols).filter_map(move |x| {
@@ -463,6 +439,42 @@ pub(super) fn detect_single_scale(
         valid_pixel_loss,
         net_utility,
     }
+}
+
+/// Per-tile robust statistics in row-major tile order. Tile rows are evaluated
+/// in parallel inside the caller's Rayon pool with one reusable sample buffer
+/// per row; each tile's result is independent of scheduling, and rows are
+/// collected in order, so output is identical for any worker count.
+fn tile_statistics(data: &[f64], width: usize, height: usize, tile_size: usize) -> Vec<Tile> {
+    let cols = width.div_ceil(tile_size);
+    let rows = height.div_ceil(tile_size);
+    (0..rows)
+        .into_par_iter()
+        .map(|ty| {
+            let mut scratch = Vec::with_capacity(tile_size * tile_size);
+            let y0 = ty * tile_size;
+            let y1 = ((ty + 1) * tile_size).min(height);
+            (0..cols)
+                .map(|tx| {
+                    let x0 = tx * tile_size;
+                    let x1 = ((tx + 1) * tile_size).min(width);
+                    let samples =
+                        (y0..y1).flat_map(|y| data[y * width + x0..y * width + x1].iter().copied());
+                    let (median, sigma) = location_scale_with(samples, &mut scratch);
+                    Tile {
+                        median,
+                        sigma,
+                        correlation: lag_one_correlation(data, width, height, x0, x1, y0, y1),
+                        candidate: false,
+                        evidence_ratio: 0.0,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn tile_finite_pixels(
