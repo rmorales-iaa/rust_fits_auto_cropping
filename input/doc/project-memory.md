@@ -1,6 +1,14 @@
 # Project memory
 
-Updated: 2026-10-29, after plan Revision 2 (deep code/probe review), large-image remediation and disputed crop-geometry review.
+Updated: 2026-10-29, after the Revision 2 implementation (R0, R1 tools/harness, R2-R4, partial R6), plan Revision 2, large-image remediation and the disputed crop-geometry review.
+
+## Revision 2 implementation (2026-10-29)
+
+- The user decided D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = flats as evaluation labels only, D4 = eta_I 0.20 / eta_V 0.50 with Q in between, and asked for implementation. Local commits on `claude/eager-galileo-khb8fs` (not pushed): `12036af` R0 exact selection and parallel tiles, `00122c5` in-memory mask verification, `6e1e4c3` bbox_mask/crop_masked, `3c8f62b` global tolerant rectangle, `c6b8f5b` v2 detector, `1c7b7ac` calibration harness and fixes, `6bce4e3` D4-anchored boundaries and evaluation tools, `9d60043` source-seed local validation, then the documentation commit.
+- Defaults: detector `tile_v1` unchanged; shipped `crop_fallback = "bbox_mask"` (legacy files default to `keep`); `crop_exchange_rate` opt-in; v2 via `detector = "background_v2_experimental"` with a `[heuristics.v2]` table. Schema 12 adds `action`, `crop_interior_masked_pixels`, `uncertain_boundary_pixels`, `protected_source_pixels` and `stage_ms`. No `masks/` directory is written any more.
+- Evidence (synthetic/seeded): v2 has 0 false alarms in 2,995 frames for every one of 7 null families at 256 px (bound <= 1e-3, G3a). The 512-px gate status is in `validation.md`. v1 false-alarms on 2,966/2,995 edge-source frames. v2 injection: strips and raw circular stops 100/100 with recall 1.000 and precision >= 0.997; flat-divided stops recall 0.963-0.966. End-to-end 72-fixture corpus: v2 mask recall 0.993, precision 0.9987, pooled valid loss 0.0002 (worst image 0.0021); v1 recall 0.33. R0 speedups are bit-identical (digest `6f25a8d0`).
+- Calibration-driven v2 design rules (keep them): second-difference dispersion; a one-sided minimum-effect test against the D4 boundary; polynomial extrapolation limited to two meshes; abrupt-step requirement; mesh trust from the largest coherent noise-consistent cluster; eta-anchored pixel classes (eta = 1 - r/r0 from the component core); local-background validation of source seeds; quantized-noise estimator; at least 8x8 meshes. Null families must stay true nulls as frame size changes (relative illumination >= eta_V).
+- Open: G4 on real labelled frames (run `tools/flat_labels.py` with calibration provenance on held-out night groups); v2 promotion; R0.4 full multiscale reuse; R3.3 morphology; PIXACT3 reasons; R6 (border-band v1, f32 analysis, weighted memory admission, G5 benchmark). Astropy-only FITS checks in this container (no fitsverify).
 
 ## Plan Revision 2: deep review (2026-10-29)
 

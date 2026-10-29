@@ -1,6 +1,6 @@
 # Scientific accuracy, area retention and performance plan
 
-Status: active implementation; **Revision 2 (2026-10-29)** adds a code-and-probe review, new findings A18–A31, a reordered R0–R6 roadmap and closing review passes 8–14 (§0, §4A, §8). Initial correctness/reporting fixes were applied after the 2026-10-27 audit; engineering follow-ups add conservative integer fallback, crop WCS abstention, independent component gates, stable correlation arithmetic, build/run provenance and an opt-in experimental robust-affine reference. Source-aware science-model and release gates remain open. The original audit baseline was source `626f53c`, release executable `0.0.29`, and 47 tests. See [the audit and implementation follow-up](scientific-audit-2026-10-27.md) and [validation record](validation.md).
+Status: active implementation; **Revision 2 (2026-10-29)** was implemented the same day (see §4A implementation status; v2 detector opt-in; G4 open). Revision 2 adds a code-and-probe review, new findings A18–A31, a reordered R0–R6 roadmap and closing review passes 8–14 (§0, §4A, §8). Initial correctness/reporting fixes were applied after the 2026-10-27 audit; engineering follow-ups add conservative integer fallback, crop WCS abstention, independent component gates, stable correlation arithmetic, build/run provenance and an opt-in experimental robust-affine reference. Source-aware science-model and release gates remain open. The original audit baseline was source `626f53c`, release executable `0.0.29`, and 47 tests. See [the audit and implementation follow-up](scientific-audit-2026-10-27.md) and [validation record](validation.md).
 
 This is the active implementation plan for scientific improvements. The [original implementation plan](implementation-plan.md) and completed crop/preview/layout plans remain historical records. Completion of the planning review does not mean the software meets the release gates below. No universal science-grade claim is possible without a declared observing domain, independent labels and downstream measurement evidence.
 
@@ -294,7 +294,7 @@ R0 (independent; do first) → R1 (blocks all promotion) → R2 → R3 → R4 (R
 
 ### Revision 2 implementation status (2026-10-29)
 
-The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = master flats as evaluation labels only, and D4 = eta_I 0.20 / eta_V 0.50 with Q in between, then asked for implementation. Commits on branch `claude/eager-galileo-khb8fs` (local, not pushed): `12036af`, `00122c5`, `6e1e4c3`, `3c8f62b`, `c6b8f5b`, `1c7b7ac` and the documentation/evaluation commit that records this section. Evidence is in [validation](validation.md#revision-2-implementation-evidence-2026-10-29).
+The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = master flats as evaluation labels only, and D4 = eta_I 0.20 / eta_V 0.50 with Q in between, then asked for implementation. Commits on branch `claude/eager-galileo-khb8fs` (local, not pushed): `12036af`, `00122c5`, `6e1e4c3`, `3c8f62b`, `c6b8f5b`, `1c7b7ac`, `6bce4e3`, `9d60043` and the documentation commit that records this section. Evidence is in [validation](validation.md#revision-2-implementation-evidence-2026-10-29).
 
 | Item | Status | Evidence / remaining |
 | --- | --- | --- |
@@ -311,10 +311,10 @@ The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = mas
 | R1.5 metrics and splits | done | `tools/evaluate_masks.py` reconstructs M from products only; Q excluded with best/worst bounds; pooled and macro values; group-bootstrap intervals. |
 | R2.1 background/noise | done (opt-in v2) | Meshes, trusted coherent cluster, Huber surface with blocked-CV degree, extrapolation limit, structure scatter, noise grids, detrended AR(1), support abstention. |
 | R2.2 two-sided evidence | done, amended | Dispersion uses second-difference noise; minimum-effect test against the D4 boundary; noise-only rule added. |
-| R2.3 source mask/protection | done | Pixel-derived FWHM and dilation; protected positive source tiles. A20 probe: 0 pixels removed. |
+| R2.3 source mask/protection | done, amended | Pixel-derived FWHM and dilation; local-background seed validation; protected positive source tiles. A20 probe: 0 pixels removed; 0/300 edge-source false alarms after the amendment. |
 | R2.4 correlation demoted | done | v2 does not use correlation as evidence. Detrended correlation is used only in the AR(1) estimate. |
 | R3.1 change-point test | done, amended | CV ratio >= 2 plus an abrupt-step requirement (jump >= 50% of contrast). |
-| R3.2 hysteresis boundaries | done | Exact banded signed distance; A01 probes within 46 px FP and 0 FN on 256-row strips at any tile phase. |
+| R3.2 hysteresis boundaries | done, amended | Exact banded signed distance. Pixel classes are anchored to D4 relative illumination (eta = 1 - r/r0 from the component core, or the noise ratio). A01 20/28-px strips and A18 are exact (0 FP, 0 FN). Raw circular-stop valid loss fell from 12.6% to 0.02%. |
 | R3.3 morphology | not implemented | Off by design; no evidence yet that hole filling is needed. |
 | R3.4 reasons / uncertain band | partial | `uncertain_boundary_pixels` and `uncertain_policy` implemented; the PIXACT3 reason plane is deferred (PIXACT2 still written). |
 | R4.1 exchange-rate policy | done (opt-in key) | `crop_exchange_rate`. Shipped rules keep the component tiers until labelled data justify a lambda. |
@@ -322,7 +322,7 @@ The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = mas
 | R4.3 crop fallback (D1) | done | `crop_fallback = bbox_mask` shipped; legacy files keep `keep`. |
 | R4.4 hybrid products (D2) | done | `--mode crop_masked`; the bounding-box product; independent checker verifies masked interiors. |
 | R4.5 support-based abstention | done (v2) | `reference_support_abstained`; v1 keeps its mask-fraction veto for compatibility. |
-| R5 calibration and promotion | open | Synthetic G3a/G3b-type evidence only. G4 needs flat labels and human labels on held-out night groups. v2 stays opt-in. |
+| R5 calibration and promotion | open | Synthetic evidence: G3a met at 256 px (0/2,995 in all seven null families, bound <= 1e-3; 512 px in validation). G3 met for strips and raw stops (recall 1.000, precision >= 0.997), and for pooled valid loss <= 0.1% and per-image <= 1% on the corpus. Flat-divided stop recall is now 0.963-0.966 (>= 0.95) after source-seed validation. Not met: small corners below the minimum mask fraction (a policy gate). G4 needs flat labels and human labels on held-out night groups. v2 stays opt-in. |
 | R6 performance hardening | partial | v2 parallelised and band-limited (37.8 Mpx: 8.3 s to about 2-2.6 s). Border-band v1 evaluation, f32 analysis, weighted memory admission and the full G5 benchmark remain open. |
 
 **Design amendments forced by calibration evidence** (all opt-in v2; each reproduced by the harness before and after the fix):
@@ -333,7 +333,11 @@ The user approved D1 = `bbox_mask` fallback, D2 = opt-in `crop_masked`, D3 = mas
 5. **Mesh trust from the largest spatially coherent noise-consistent cluster.** A contaminated robust scale let a quadratic absorb circular field stops: 14/50 detected.
 6. **Smooth clipped mean-absolute noise for quantized data, and at least 8x8 meshes.** Integer MAD granularity split the sky, and small frames abstained.
 
-The harness also showed that a null gradient family must keep illumination at or above eta_V as frame size grows; the family was corrected rather than tuned around.
+7. **Pixel refinement classes anchored to D4 relative illumination**, not only significance. Growth through any significant deficit removed 12.6% of valid pixels inside raw illumination ramps.
+
+8. **Local-background validation of source seeds.** Peak > 5 sigma of ring second-difference noise. Noise clumps in flat-divided exteriors had become protected "sources", holding recall at 0.93-0.94.
+
+The harness also showed that a null gradient family must keep illumination at or above eta_V as frame size grows, and that the Python corpus must use a physical noise model (sigma ~ sqrt(eta)). Both fixtures were corrected rather than tuned around.
 
 ## 5. Rules, heuristics and reproducibility configuration
 

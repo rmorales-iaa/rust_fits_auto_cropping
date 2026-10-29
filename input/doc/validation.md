@@ -325,3 +325,66 @@ After raising the input preflight estimate to 40 bytes/pixel for the two crop-se
 Raising the operational workspace estimate to 1,536 MiB allowed the requested 2009 rerun to complete as release `0.2.55`, run `20261029T070704.156467735Z`: all 3,095 inputs have output entries, 1,025 clipped, 2,070 kept and zero errors in 758,857 ms (12m 38.857s). The user stopped the selected-year batch during 2011; 2,675 inputs had completed when interrupted, the sanitized output has no final summary, its temporary `masks/` directory was removed, and later years were not run. Do not treat the partial 2011 output as a complete year.
 
 The four disputed 2004/2005 inputs were isolated in `/fast_disk/tmp/clippling_test/rectangle_investigation_20261029_fpj28i5i/` and reproduced with release `0.2.57`, run `20261029T073318.329119629Z`. Their rectangles and detector proposals exactly match the prior `0.2.49` summaries. An independent maximum-rectangle implementation on each temporary reason plane reproduces all `(x,y,width,height)` bounds. Astropy confirms that each output FITS array is byte-value-identical to the reported source slice and that `NAXIS1/2` match the output shape; `fitsverify` found zero errors. The green rectangle/red detector/orange sacrifice overlay is `reason_mask_overlay.png` in that diagnostic directory. This isolates the narrow geometry to broad detector exclusion masks, including a fragmented mask on the 2005 frame; it does not establish whether those pixels are scientifically unusable. The classification remains unvalidated without independent usable/invalid pixel labels. Temporary reason-mask copies were deleted after the overlay was made.
+
+## Revision 2 implementation evidence (2026-10-29)
+
+Environment: cloud review container, 4 logical CPUs, Rust release builds, Astropy 8.0.2 (pip). `fitsverify` was unavailable, so FITS checks used Astropy plus the project's checksum, card-policy and sample verification. Branch `claude/eager-galileo-khb8fs`, local commits only. User decisions: D1 `bbox_mask` fallback, D2 opt-in `crop_masked`, D3 flats as evaluation labels only, D4 eta_I = 0.20 and eta_V = 0.50 with Q in between. All data below are synthetic or seeded. Synthetic success is method evidence only; gate G4 (labelled real frames) remains open.
+
+### Speed-only changes (bit-identical)
+- **Exact selection (R0.2/R0.3).** A 2,000-trial property test shows bit-identity with the sort reference. The decision digest `6f25a8d0…` over 48 seeded fixtures × 3 detector models matches the previous revision. Detection on a 7100×5325 frame: 1.69 s before, 1.17 s single-threaded (−31%), 0.345 s with 4 threads (three runs each, quiet machine).
+- **In-memory mask verification (R0.5).** Previous and new release binaries on 2×18 float32/int16 fixtures in mask and crop modes gave 0 differences in status, counts, geometry, science data or non-provenance cards. fsync calls fell 69→41 (mask) and 64→39 (crop); renames 27→18 and 26→18 (strace).
+
+### Crop actions (R4)
+- **`bbox_mask` (D1).** It removes every accepted flag with zero unflagged loss, verified end to end for float32 and int16/BLANK. A full-frame box degrades to `mask`. Legacy rule files keep `keep`.
+- **`crop_masked` (D2).** Retained flags are written as BLANK/NaN. The independent checker verifies masked interiors against report counts; preview checks require undefined samples to render black.
+- **Global tolerant-rectangle family (R4.2).** It matches an exhaustive 3-state oracle on 3,000 random grids up to 7×7. A separated-block fixture yields 36 px versus 18 for the anchor family. On a 7100×5325 circular field at rho = 0.05: 17,408,034 vs 17,305,599 retained pixels (+0.59%), 0.355 s vs 0.200 s.
+
+### Opt-in v2 detector: null false-alarm gate (R1.2, G3a)
+Frame-level false acceptances with exact one-sided 95% Clopper-Pearson upper bounds; seeded families with sigma^2 = 25 + level/2.
+
+| Family | 256 px, n = 2,995: v1 | 256 px: v2 | 512 px, n = 1,000 (final code): v1 | 512 px: v2 |
+| --- | --- | --- | --- | --- |
+| flat | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_FLAT_V1 | G3A512_FLAT_V2 |
+| gradient (±40%) | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_GRADIENT_V1 | G3A512_GRADIENT_V2 |
+| illuminated vignetting (eta ≥ 0.6) | 12 (≤ 0.0065) | 0 (≤ 0.0010) | G3A512_VIGNETTING_V1 | G3A512_VIGNETTING_V2 |
+| bright edge sources | 2,966 (≤ 0.9931) | 0 (≤ 0.0010) | G3A512_EDGE_V1 | G3A512_EDGE_V2 |
+| nebulosity | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_NEBULA_V1 | G3A512_NEBULA_V2 |
+| correlated noise | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_CORR_V1 | G3A512_CORR_V2 |
+| quantized low counts | 0 (≤ 0.0010) | 0 (≤ 0.0010) | G3A512_QUANT_V1 | G3A512_QUANT_V2 |
+
+The 256-px runs used commit `1c7b7ac`, before the D4-anchored refinement. That change only shrinks the masks of already-accepted frames, so those counts are upper bounds for the final code; the 256-px flat family was rerun on the final code (0/2,995). The 512-px column was run on the final code with 1,000 frames per family, where zero failures bounds the rate at <= 0.0030; the full 2,995-frame G3a bound is established at 256 px.
+
+### Opt-in v2 detector: injection recovery (R1.4), final code, 100 frames per cell
+Truth: plateau = I; illumination eta < 0.2 = I, eta ≥ 0.5 = V, Q in between (excluded).
+
+| Family | Size | v1 detected / recall / precision | v2 detected / recall / precision | v2 valid px removed (total) |
+| --- | --- | --- | --- | --- |
+| sharp strip 8–48 px | 256 | 81 / 0.574 / 0.997 | 100 / 1.000 / 0.997 | 2,016 |
+| sharp strip | 512 | 79 / 0.614 / 0.996 | 100 / 1.000 / 0.997 | 4,063 |
+| corners 10–40 px | 256 | 29 / 0.353 / 0.998 | 58 / 0.828 / 1.000 | 87 |
+| corners | 512 | 0 / 0 / – | 11 / 0.203 / 1.000 | 17 |
+| raw circular stop (ramp 4–16 px) | 256 | 94 / 0.230 / 0.599 | 100 / 1.000 / 0.9998 | 421 |
+| raw circular stop | 512 | 78 / 0.124 / 0.693 | 100 / 1.000 / 0.9999 | 914 |
+| flat-divided circular stop | 256 | 0 / 0 / – | 99 / 0.966 / 0.9999 | 317 |
+| flat-divided circular stop | 512 | 0 / 0 / – | 98 / 0.963 / 0.9999 | 788 |
+
+Small corners are limited by the configured `minimum_mask_fraction` (0.005 of defined pixels per component), a policy gate rather than an evidence failure. Flat-divided stops first reached only 0.93–0.94 recall. The false-negative locator traced the shortfall to noise clumps in the amplified exterior that were accepted as protected "sources"; local-background validation of seeds (commit `9d60043`) raised recall to 0.963–0.966, meeting the 0.95 target. Excluding the uncertain band was tested and ruled out as the cause (recall 0.931 vs 0.930, lower precision).
+
+### End-to-end products scored independently (R1.5)
+`tools/make_synthetic_corpus.py --seeds 8 --group-dirs` produced 72 fixtures (9 families, 8 seed groups, physical noise model). Products were evaluated by `tools/evaluate_masks.py`, which reconstructs removed pixels from products and sources only; intervals are 95% bootstraps over the 8 groups. All 144 product sets per mode passed `tools/cross_validate_fits.py`.
+
+| Detector / mode | Recall | Precision | Valid loss (pooled) | Worst-image valid loss | Residual contamination |
+| --- | --- | --- | --- | --- | --- |
+| v1 mask | 0.329 [0.240, 0.430] | 0.817 | 0.0124 | 0.1648 | 0.1020 |
+| v1 crop | 0.279 | 0.749 | 0.0156 | 0.2408 | 0.1092 |
+| v2 mask | 0.9927 [0.9895, 0.9953] | 0.9987 [0.9984, 0.9991] | 0.0002 [0.0001, 0.0003] (Q worst case 0.0023) | 0.0021 | 0.0012 |
+| v2 crop | 0.845 | 0.847 | 0.0254 | 0.2130 | 0.0260 |
+| v2 crop_masked | 0.9957 | 0.867 | 0.0256 | 0.2132 | 0.0007 |
+
+Crop-mode valid loss is the rectangle's geometric sacrifice around circular field stops under the provisional 35/47% caps; mask mode is the valid-retention optimum on the same detections.
+
+### Probe regressions (seeded, 256×256; also unit tests)
+v2 removes 0 valid pixels on the A20 edge source and A03 vignetting nulls (v1: 2,816 / 15,616 / 28,672). It detects A18 identically with or without the interior star, exactly (0 FP, 0 FN). It detects the A19 quiet, amplified and sky-level amplified strips with ≤ 10 FN and ≤ 173 FP, and the A01 20/28-px strips exactly; v1 misses 6 of these 7. On a 7100×5325 strip v2 has 0 FN and 13 FP in 2.6–3.6 s (contended CPU), against v1's 0.37–0.47 s with every noisy-strip pixel missed.
+
+### Test totals
+98 unit + 33 end-to-end + 4 version tests (plus 6 ignored manual harnesses), strict Clippy and rustfmt clean; 25 Python tests (19 checker, 6 evaluation tools).

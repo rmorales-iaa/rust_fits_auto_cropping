@@ -98,3 +98,18 @@ Mechanisms, by code inspection: A18 follows from `typical_noise = max(interior t
 Timing observation (release build, single run, 4-core container): synthetic 7100×5325 frame with a 300-column zero strip. `single_scale` took 1.68 s and `multiscale_consensus` 5.44 s. An O(n) selection median over all 147,852 16×16 tiles took 0.118 s. The mask covered 304 columns. This is a hint for R0, not a G5 benchmark.
 
 Additional inspection findings: A21 (dominated keep fallback after a failed crop cap), A22 (tolerant crop retains flagged samples as data), A23 (anchor-restricted residual search), A24 (dimensionless utility and component-count tiers), A25 (0.5 mask-fraction veto), A26 (sort/allocation cost), A27 (documentation drift, fixed in this revision), A28 (unused master-flat pixel truth), A29 (no null false-alarm control), A30 (undefined label rule for partial illumination) and A31 (transient mask FITS write + fsync + verify per processed image). The responses are mapped in the plan. User decisions D1–D4 are open.
+
+### Revision 2 implementation follow-up (2026-10-29)
+
+Responses to A18–A31, implemented after user decisions D1–D4 (details in the plan's §4A status table and in [validation](validation.md#revision-2-implementation-evidence-2026-10-29)):
+- **A18–A20, A03 (observed probes):** resolved in the opt-in v2 detector. It uses a source-masked mesh background, two-sided second-difference dispersion with a D4 minimum-effect test, source protection and a boundary change-point test. All probe fixtures are permanent unit tests. The default `tile_v1` is unchanged and still exhibits these failures; this is why v2 exists.
+- **A01:** v2's native-resolution, D4-anchored refinement detects the 20/28-px strips exactly.
+- **A21/A22:** `crop_fallback = bbox_mask` (shipped) and `--mode crop_masked`.
+- **A23:** global row-pair/column-sweep tolerant-rectangle family, exhaustive-oracle tested.
+- **A24:** optional `crop_exchange_rate`; the component tiers remain in the shipped rules pending labelled data.
+- **A25:** v2 support-based abstention.
+- **A26/A31:** exact selection, parallel tile rows and in-memory mask verification, all bit-identical.
+- **A27:** documentation updated.
+- **A28–A30:** `tools/flat_labels.py` (D3/D4), the null false-alarm harness and `tools/evaluate_masks.py`.
+
+Still open: G4 real-data evaluation (flat labels need calibration provenance and data access), v2 promotion and R6 hardening.
