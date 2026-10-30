@@ -79,7 +79,10 @@ contains() { grep -q -- "$2" "$1"; }
 T="$WORK/args"; make_tree "$T"
 run "$T" --help; check "help exits 0" status_is $? 0
 run "$T" --year 1999; check "out-of-range year is a usage error" status_is $? 2
-run "$T" --year 2002 --from 2002; check "year list and range are exclusive" status_is $? 2
+run "$T" --from 2002 --to 2003; check "year ranges are refused" status_is $? 2
+check "range refusal explains the sequence" contains "$T/out.txt" "list the years instead"
+run "$T" --years 2002,20x3; check "malformed year in a list is a usage error" status_is $? 2
+run "$T" 2002 1999; check "out-of-range positional year is a usage error" status_is $? 2
 run "$T" --mode mask; check "mask mode with PNG is rejected" status_is $? 2
 run "$T" --mode bogus; check "unknown mode is rejected" status_is $? 2
 run "$T" --unknown; check "unknown option is rejected" status_is $? 2
@@ -116,8 +119,8 @@ check "plan reports a missing dark link" contains "$T/out.txt" "dark(missing)"
 T="$WORK/run"; make_tree "$T"
 run "$T" --years 2003,2002,2003 --mode crop_masked
 check "clean run exits 0" status_is $? 0
-check "years run once each, in order" test "$(grep -c -- '--input-dir' "$T/mock.log")" = 2
-check "first run is 2002" bash -c "head -n 1 '$T/mock.log' | grep -q '/2002/science_calibrated'"
+check "years run once each" test "$(grep -c -- '--input-dir' "$T/mock.log")" = 2
+check "years run in the order given (2003 first)" bash -c "head -n 1 '$T/mock.log' | grep -q '/2003/science_calibrated'"
 check "mode is passed through" grep -q -- '--mode crop_masked' "$T/mock.log"
 check "sanitize, flat output and png are passed" grep -q -- '--flat-output --png --sanitize-output' "$T/mock.log"
 check "bias link created" test -L "$T/out/2002/bias"
@@ -125,6 +128,11 @@ check "missing dark source is not linked" test ! -e "$T/out/2002/dark"
 check "summary line printed" contains "$T/out.txt" "Year 2002: 2 inputs, 2 output images"
 check "progress reaches 100%" contains "$T/out.txt" "100% (2/2)"
 check "batch status lists complete years" contains "$T/out.txt" "2003 complete"
+: >"$T/mock.log"
+run "$T" 2002 "2003 2002" --years "2003, 2002"
+check "positional and space-separated years exit 0" status_is $? 0
+check "positional years run once each" test "$(grep -c -- '--input-dir' "$T/mock.log")" = 2
+check "positional order is kept (2002 first)" bash -c "head -n 1 '$T/mock.log' | grep -q '/2002/science_calibrated'"
 run "$T" --year 2002 --no-png
 check "rerun with --no-png exits 0" status_is $? 0
 check "--no-png omits --png" bash -c "tail -n 1 '$T/mock.log' | grep -vq -- '--png'"

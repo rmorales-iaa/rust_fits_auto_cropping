@@ -2,6 +2,11 @@
 
 Updated: 2026-10-29, after the documentation/branch round, the verbatim-header/MO_ and speed/memory rounds, Revision 3 (v2 default, crop policy, plan review) and the Revision 2 implementation (R0, R1 tools/harness, R2-R4, partial R6), plan Revision 2, large-image remediation and the disputed crop-geometry review.
 
+## Preview names and year sequences (2026-10-30, user request)
+
+- Previews drop the FITS extension (`.fits`, `.fit`, `.fts`, case-insensitive): `night/frame.fits` -> `previews/night/frame.png`. Inputs in one directory that would share a preview name keep the full name (`frame.fits.png`, `frame.fit.png`) so no preview overwrites another; `OutputLayout::register_preview_inputs` computes this from the sorted discovery list before workers start.
+- `scripts/process_cropped_years.sh` takes a sequence of years (positional, `--years` comma/space list, repeated `--year`), processed in the order given with first-occurrence de-duplication. `--from`/`--to` ranges were removed at the user's request and now fail with a usage error that says to list the years.
+
 ## Documentation and branch round (2026-10-29, user request)
 
 - The user asked to update documentation, skills, memory, CLI help and README, then merge existing branches, commit and push.

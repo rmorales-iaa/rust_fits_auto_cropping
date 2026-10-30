@@ -18,17 +18,20 @@ readonly SCRIPT_PATH REPOSITORY_ROOT CONFIG_PATH
 
 usage() {
     cat <<USAGE
-Usage: $(basename "$0") [options]
+Usage: $(basename "$0") [options] [YEAR ...]
 
 Crop the calibrated science images of each selected year from
   SOURCE_ROOT/<year>/science_calibrated/  into  OUTPUT_ROOT/<year>/science_calibrated/
 with flat output, linking SOURCE_ROOT/<year>/{bias,dark,flat} beside it.
 
-Year selection (default: every year from $FIRST_YEAR through $LAST_YEAR):
-  --year YEAR          Process YEAR; repeat for several years.
-  --years LIST         Comma-separated years, e.g. 2009,2011,2017.
-  --from YEAR --to YEAR
-                       Inclusive range (either bound may be omitted).
+Year selection: a sequence of years, processed in the order given (a repeated
+year runs once, at its first position). Default: every year from $FIRST_YEAR
+through $LAST_YEAR in ascending order.
+  YEAR ...             Years as arguments, e.g. 2017 2009 2011 (or 2017,2009).
+  --years LIST         Comma- or space-separated years, e.g. 2017,2009,2011.
+  --year YEAR          One year; may be repeated.
+All three forms can be combined. Year ranges (--from/--to) are not accepted;
+list the years instead.
 
 Processing:
   --mode MODE          crop (default), crop_masked or mask.
@@ -70,8 +73,19 @@ valid_year() {
 
 # ---------------------------------------------------------------- arguments
 requested_years=()
-range_from=''
-range_to=''
+add_year() {
+    valid_year "$1" || die "Year must be a four-digit year between $FIRST_YEAR and $LAST_YEAR: $1"
+    requested_years+=("$((10#$1))")
+}
+add_year_list() {
+    local -a listed
+    IFS=$', \t' read -r -a listed <<<"$1"
+    ((${#listed[@]} > 0)) || die "Empty year list: '$1'"
+    local value
+    for value in "${listed[@]}"; do
+        add_year "$value"
+    done
+}
 MODE=crop
 PNG=1
 PLAN_ONLY=0
@@ -83,33 +97,16 @@ while (($# > 0)); do
         ;;
     --year)
         (($# >= 2)) || die "--year needs a value"
-        valid_year "$2" || die "Year must be between $FIRST_YEAR and $LAST_YEAR: $2"
-        requested_years+=("$((10#$2))")
+        add_year "$2"
         shift 2
         ;;
     --years)
         (($# >= 2)) || die "--years needs a value"
-        IFS=',' read -r -a listed <<<"$2"
-        ((${#listed[@]} > 0)) || die "--years needs at least one year"
-        for value in "${listed[@]}"; do
-            valid_year "$value" || die "Year must be between $FIRST_YEAR and $LAST_YEAR: $value"
-            requested_years+=("$((10#$value))")
-        done
+        add_year_list "$2"
         shift 2
         ;;
-    --from)
-        if (($# < 2)) || ! valid_year "$2"; then
-            die "--from needs a year between $FIRST_YEAR and $LAST_YEAR"
-        fi
-        range_from=$((10#$2))
-        shift 2
-        ;;
-    --to)
-        if (($# < 2)) || ! valid_year "$2"; then
-            die "--to needs a year between $FIRST_YEAR and $LAST_YEAR"
-        fi
-        range_to=$((10#$2))
-        shift 2
+    --from | --to)
+        die "$1 is no longer supported: list the years instead, e.g. 2003 2004 2005"
         ;;
     --mode)
         (($# >= 2)) || die "--mode needs a value"
@@ -132,6 +129,10 @@ while (($# > 0)); do
         PLAN_ONLY=1
         shift
         ;;
+    [0-9]*)
+        add_year_list "$1"
+        shift
+        ;;
     *)
         usage >&2
         exit 2
@@ -140,21 +141,20 @@ while (($# > 0)); do
 done
 readonly MODE PNG PLAN_ONLY
 
-if [[ -n "$range_from$range_to" ]]; then
-    ((${#requested_years[@]} == 0)) || die "Use either --year/--years or --from/--to, not both"
-    from=${range_from:-$FIRST_YEAR}
-    to=${range_to:-$LAST_YEAR}
-    ((from <= to)) || die "--from must not be after --to"
-    for ((year = from; year <= to; year++)); do
-        requested_years+=("$year")
-    done
-elif ((${#requested_years[@]} == 0)); then
+if ((${#requested_years[@]} == 0)); then
     for ((year = FIRST_YEAR; year <= LAST_YEAR; year++)); do
         requested_years+=("$year")
     done
 fi
-# Sorted, de-duplicated year list.
-mapfile -t selected_years < <(printf '%s\n' "${requested_years[@]}" | sort -n -u)
+# Years in the order given; a repeated year keeps its first position.
+selected_years=()
+declare -A seen_years=()
+for year in "${requested_years[@]}"; do
+    if [[ -z ${seen_years[$year]+seen} ]]; then
+        seen_years[$year]=1
+        selected_years+=("$year")
+    fi
+done
 readonly selected_years
 if [[ "$MODE" == mask && $PNG -eq 1 ]]; then
     die "PNG previews require a crop mode; pass --no-png with --mode mask"
