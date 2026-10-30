@@ -4,7 +4,7 @@ Updated: 2026-10-29, after the documentation/branch round, the verbatim-header/M
 
 ## Preview names and year sequences (2026-10-30, user request)
 
-- Previews drop the FITS extension (`.fits`, `.fit`, `.fts`, case-insensitive): `night/frame.fits` -> `previews/night/frame.png`. Inputs in one directory that would share a preview name keep the full name (`frame.fits.png`, `frame.fit.png`) so no preview overwrites another; `OutputLayout::register_preview_inputs` computes this from the sorted discovery list before workers start.
+- Previews drop the FITS extension (`.fits`, `.fit`, `.fts`, case-insensitive): `night/frame.fits` -> `previews/night/frame.png`. Inputs in one directory that would share a preview name keep the full name (`frame.fits.png`, `frame.fit.png`) so no preview overwrites another; `OutputLayout::register_preview_inputs` computes this from the sorted discovery list before workers start. CLI `--help`, README, user guide and the FITS-engineering skill describe both changes; `main` was fast-forwarded to the branch after this round.
 - `scripts/process_cropped_years.sh` takes a sequence of years (positional, `--years` comma/space list, repeated `--year`), processed in the order given with first-occurrence de-duplication. `--from`/`--to` ranges were removed at the user's request and now fail with a usage error that says to list the years.
 
 ## Documentation and branch round (2026-10-29, user request)

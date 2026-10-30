@@ -4,7 +4,7 @@ Status: implemented; crop-fit display revision verified on 2026-10-28.
 
 ## Goal
 
-Add `--png` as an opt-in output for accepted crop-mode images. For each image actually cropped, write `output/runs/<run-id>/previews/<input-relative-path>.png` with the full input on the left and the actual crop on the right. Keep FITS processing and the science crop decision unchanged.
+Add `--png` as an opt-in output for accepted crop-mode images. For each image actually cropped, write `output/runs/<run-id>/previews/<input-relative-path>.png` (since 2026-10-30 without the FITS extension; see README) with the full input on the left and the actual crop on the right. Keep FITS processing and the science crop decision unchanged.
 
 ## Rendering contract
 
