@@ -57,3 +57,7 @@ Thumbs.db
 *.bak
 *.orig
 *.rej
+
+# Local agent/session state (not project content)
+/.anchor/
+.claude/settings.local.json
