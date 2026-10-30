@@ -134,13 +134,13 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         profile: WorkloadProfile::new(&heuristics.heuristics, args.png),
     };
     let run_id = Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
-    let layout = Arc::new(OutputLayout::prepare(
+    let mut layout = OutputLayout::prepare(
         &args.output_dir,
         &input,
         &run_id,
         args.flat_output,
         args.sanitize_output,
-    )?);
+    )?;
     let run_dir = layout.run().to_path_buf();
     let mut logger = Logger::create(&run_dir, &run_id)?;
     logger.event(&run_id,"run_started",serde_json::json!({"input":input,"output_root":layout.root(),"run_directory":&run_dir,"source_config_sha256":source_config_hash,"effective_config_sha256":config_hash,
@@ -148,6 +148,12 @@ fn run_inner(args: Args) -> anyhow::Result<()> {
         "version":env!("RUST_FITS_AUTO_CROPPING_VERSION"),"algorithm_version":heuristics.heuristics.algorithm_version(),"git_revision":env!("RUST_FITS_GIT_REVISION"),"git_dirty":env!("RUST_FITS_GIT_DIRTY")=="true","executable_sha256":executable_sha256,"threads":config.processing.threads,"effective_config":config,"effective_heuristics":heuristics,"mode":config.processing.mode,"recursive":config.processing.recursive,"dry_run":args.dry_run,"reason_mask":args.reason_mask}))?;
     let mut paths = discover(&input, config.processing.recursive)?;
     paths.sort();
+    layout.register_preview_inputs(
+        paths
+            .iter()
+            .map(|path| path.strip_prefix(&input).unwrap_or(path)),
+    );
+    let layout = Arc::new(layout);
     logger.event(&run_id,"discovery_complete",serde_json::json!({"candidate_fits_files":paths.len(),"workers":workers,"memory_budget_mib":config.processing.memory_budget_mib,"maximum_image_mib":config.processing.maximum_image_mib}))?;
     let config = Arc::new(config);
     let heuristics = Arc::new(heuristics);

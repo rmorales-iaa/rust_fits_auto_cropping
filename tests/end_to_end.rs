@@ -869,7 +869,7 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
     }
     assert!(cropped.primary().verify_datasum().is_ok());
 
-    let preview_path = product_path(&output, "previews", "circular-field.fits.png");
+    let preview_path = product_path(&output, "previews", "circular-field.png");
     let preview = image::open(&preview_path).unwrap().to_rgb8();
     let display_crop_width = (crop_width * height + crop_height / 2) / crop_height;
     assert_eq!(
@@ -885,7 +885,7 @@ fn crop_mode_outputs_maximum_rectangular_fits_for_circular_field() {
         report["files"][0]["output_png"]
             .as_str()
             .unwrap()
-            .ends_with("circular-field.fits.png")
+            .ends_with("circular-field.png")
     );
 }
 

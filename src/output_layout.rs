@@ -2,6 +2,7 @@
 use crate::durability::{sync_directory, sync_parent};
 use anyhow::{Context, bail};
 use std::{
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
@@ -12,6 +13,25 @@ pub struct OutputLayout {
     root: PathBuf,
     run: PathBuf,
     flat_output: bool,
+    /// Inputs whose extension-free preview name is shared with another input
+    /// in the same directory; their previews keep the full input name.
+    preview_name_collisions: HashSet<PathBuf>,
+}
+
+/// FITS extensions removed from preview file names (case-insensitive).
+const PREVIEW_STRIPPED_EXTENSIONS: [&str; 3] = ["fits", "fit", "fts"];
+
+/// `night/frame.fits` -> `night/frame`; other names are returned unchanged.
+fn preview_stem(relative: &Path) -> PathBuf {
+    let strip = relative.extension().is_some_and(|extension| {
+        PREVIEW_STRIPPED_EXTENSIONS
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known))
+    });
+    match (strip, relative.file_stem()) {
+        (true, Some(stem)) if !stem.is_empty() => relative.with_file_name(stem),
+        _ => relative.to_path_buf(),
+    }
 }
 
 impl OutputLayout {
@@ -75,6 +95,7 @@ impl OutputLayout {
             root,
             run,
             flat_output,
+            preview_name_collisions: HashSet::new(),
         })
     }
 
@@ -130,8 +151,34 @@ impl OutputLayout {
         Ok(base.join(relative))
     }
 
+    /// Register every input-relative path of the run so that inputs sharing an
+    /// extension-free preview name (`frame.fits`, `frame.fit`) keep their full
+    /// names instead of overwriting each other's preview.
+    pub fn register_preview_inputs<'a>(&mut self, relatives: impl IntoIterator<Item = &'a Path>) {
+        let mut by_stem: HashMap<PathBuf, Vec<&Path>> = HashMap::new();
+        for relative in relatives {
+            by_stem
+                .entry(preview_stem(relative))
+                .or_default()
+                .push(relative);
+        }
+        self.preview_name_collisions = by_stem
+            .into_values()
+            .filter(|group| group.len() > 1)
+            .flatten()
+            .map(Path::to_path_buf)
+            .collect();
+    }
+
+    /// Preview destination: the input-relative path without its FITS
+    /// extension plus `.png` (`night/frame.fits` -> `previews/night/frame.png`).
     pub fn preview_path(&self, relative: &Path) -> anyhow::Result<PathBuf> {
-        let path = self.product_path(ProductCategory::Preview, relative)?;
+        let name = if self.preview_name_collisions.contains(relative) {
+            relative.to_path_buf()
+        } else {
+            preview_stem(relative)
+        };
+        let path = self.product_path(ProductCategory::Preview, &name)?;
         let mut filename = OsString::from(path.as_os_str());
         filename.push(".png");
         Ok(PathBuf::from(filename))
@@ -319,7 +366,10 @@ mod tests {
         assert!(!layout.run().join("masks").exists());
         assert!(!layout.run().join("previews").exists());
         assert!(!layout.run().join("manifests").exists());
-        assert!(layout.preview_path(Path::new("night/frame.fits")).is_ok());
+        assert_eq!(
+            layout.preview_path(Path::new("night/frame.fits")).unwrap(),
+            layout.run().join("previews/night/frame.png")
+        );
         assert!(layout.run().join("previews").is_dir());
         assert_eq!(
             fs::read_to_string(output.join("user-note.txt")).unwrap(),
@@ -412,5 +462,24 @@ mod tests {
 
         assert!(!run.join("masks").exists());
         assert!(!run.join("reason_masks").exists());
+    }
+
+    #[test]
+    fn preview_names_drop_the_fits_extension_unless_two_inputs_collide() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir(&input).unwrap();
+        let mut layout =
+            OutputLayout::prepare(&output, &input, "20261030T120000000Z", false, false).unwrap();
+        let inputs = ["a.fits", "a.FIT", "b.fts", "c.fits.gz", "n/a.fits"].map(Path::new);
+        layout.register_preview_inputs(inputs);
+        let previews = layout.run().join("previews");
+        let name = |rel: &str| layout.preview_path(Path::new(rel)).unwrap();
+        assert_eq!(name("a.fits"), previews.join("a.fits.png"));
+        assert_eq!(name("a.FIT"), previews.join("a.FIT.png"));
+        assert_eq!(name("b.fts"), previews.join("b.png"));
+        assert_eq!(name("c.fits.gz"), previews.join("c.fits.gz.png"));
+        assert_eq!(name("n/a.fits"), previews.join("n/a.png"));
     }
 }
